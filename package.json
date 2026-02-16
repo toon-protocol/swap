@@ -1,6 +1,6 @@
 {
   "name": "agent-society",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "description": "Nostr-based peer discovery and SPSP for Interledger agents",
   "type": "module",
