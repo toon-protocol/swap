@@ -32,3 +32,17 @@ pnpm-debug.log*
 
 # Misc
 *.tgz
+
+# Claude Code local config
+.claude/
+
+# MCP config
+.mcp.json
+
+# Backup files
+*.backup
+
+# Images
+*.png
+*.jpg
+*.jpeg
