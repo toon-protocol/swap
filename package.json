@@ -32,14 +32,17 @@
   "packageManager": "pnpm@8.15.0",
   "devDependencies": {
     "@eslint/js": "^9.0.0",
+    "@toon-format/toon": "^1.0.0",
     "@types/node": "^20.11.0",
     "eslint": "^9.0.0",
     "eslint-config-prettier": "^9.0.0",
+    "nostr-tools": "^2.23.1",
     "prettier": "^3.2.0",
     "tsup": "^8.0.0",
     "tsx": "^4.19.2",
     "typescript": "^5.3.0",
     "typescript-eslint": "^8.0.0",
-    "vitest": "^1.0.0"
+    "vitest": "^1.0.0",
+    "ws": "^8.19.0"
   }
 }

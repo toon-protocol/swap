@@ -1,3 +1,4 @@
 packages:
   - 'packages/*'
   - 'docker'
+  - 'packages/git-proxy'
