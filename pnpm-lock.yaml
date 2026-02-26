@@ -87,9 +87,6 @@ importers:
 
   packages/bls:
     dependencies:
-      '@crosstown/client':
-        specifier: workspace:*
-        version: link:../client
       '@crosstown/core':
         specifier: workspace:*
         version: link:../core
@@ -8345,7 +8342,7 @@ packages:
     resolution: {integrity: sha512-an2S5quJMiy5bnZKEf6AkfH/7r8CzHvhchU40gxN+OM6HPhe7Z9T1FUychcf2M9PpPOO0Hf7BAEfJkw2TDIBDw==}
     engines: {node: '>=12.0.0'}
     dependencies:
-      readable-stream: 3.6.2
+      readable-stream: 4.7.0
       webextension-polyfill: 0.10.0
     dev: false
 
