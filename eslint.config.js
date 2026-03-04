@@ -52,6 +52,8 @@ export default tseslint.config(
       '**/*.js',
       '**/*.mjs',
       'archive/**',
+      'packages/rig/**',
+      'packages/town/**',
     ],
   }
 );
