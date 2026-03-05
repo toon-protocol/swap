@@ -227,22 +227,6 @@ importers:
         specifier: ^4.18.2
         version: 4.22.1
 
-  packages/git-proxy:
-    dependencies:
-      '@hono/node-server':
-        specifier: ^1.14.0
-        version: 1.19.9(hono@4.11.8)
-      hono:
-        specifier: ^4.0.0
-        version: 4.11.8
-      undici:
-        specifier: ^6.0.0
-        version: 6.23.0
-    devDependencies:
-      '@types/node':
-        specifier: ^20.0.0
-        version: 20.19.32
-
   packages/relay:
     dependencies:
       '@crosstown/bls':
@@ -295,6 +279,9 @@ importers:
         specifier: ^2.20.0
         version: 2.23.1(typescript@5.9.3)
     devDependencies:
+      '@crosstown/relay':
+        specifier: workspace:*
+        version: link:../relay
       '@types/node':
         specifier: ^20.0.0
         version: 20.19.32
@@ -12117,11 +12104,6 @@ packages:
     engines: {node: '>=14.0'}
     dependencies:
       '@fastify/busboy': 2.1.1
-    dev: false
-
-  /undici@6.23.0:
-    resolution: {integrity: sha512-VfQPToRA5FZs/qJxLIinmU59u0r7LXqoJkCzinq3ckNJp3vKEh7jTWN589YQ5+aoAC/TGRLyJLCPKcLQbM8r9g==}
-    engines: {node: '>=18.17'}
     dev: false
 
   /unpipe@1.0.0:
