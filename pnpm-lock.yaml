@@ -65,6 +65,12 @@ importers:
       '@crosstown/relay':
         specifier: workspace:*
         version: link:../packages/relay
+      '@crosstown/sdk':
+        specifier: workspace:*
+        version: link:../packages/sdk
+      '@crosstown/town':
+        specifier: workspace:*
+        version: link:../packages/town
       '@hono/node-server':
         specifier: ^1.13.7
         version: 1.19.9(hono@4.11.8)
