@@ -24,6 +24,7 @@ Thumbs.db
 
 # Test
 coverage/
+**/data/*.db
 
 # Logs
 *.log
