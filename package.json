@@ -2,7 +2,7 @@
   "name": "crosstown",
   "version": "0.2.0",
   "private": true,
-  "description": "Nostr-based peer discovery and SPSP for Interledger agents",
+  "description": "ILP-gated Nostr relay. Pay to write, free to read.",
   "type": "module",
   "scripts": {
     "build": "pnpm -r run build",
@@ -17,7 +17,7 @@
     "nostr",
     "interledger",
     "ilp",
-    "spsp",
+    "toon",
     "payment",
     "agent",
     "nip-02",
