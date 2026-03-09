@@ -53,7 +53,6 @@ export default tseslint.config(
       '**/*.mjs',
       'archive/**',
       'packages/rig/**',
-      'packages/town/**',
     ],
   }
 );
