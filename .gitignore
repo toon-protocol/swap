@@ -50,6 +50,9 @@ pnpm-debug.log*
 *.jpg
 *.jpeg
 
+# Nix build output (symlink to /nix/store result)
+/result
+
 # Generated deployment files
 docker-compose-peer*.yml
 genesis.env
