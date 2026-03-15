@@ -275,6 +275,12 @@ importers:
       '@ardrive/turbo-sdk':
         specifier: ^1.21.0
         version: 1.40.2(typescript@5.9.3)
+      '@scure/bip32':
+        specifier: ^2.0.0
+        version: 2.0.1
+      '@scure/bip39':
+        specifier: ^2.0.0
+        version: 2.0.1
       '@toon-format/toon':
         specifier: ^1.1.0
         version: 1.4.0
