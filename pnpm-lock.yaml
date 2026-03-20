@@ -21,6 +21,9 @@ importers:
       '@eslint/js':
         specifier: ^9.0.0
         version: 9.39.2
+      '@hono/node-server':
+        specifier: ^1.13.7
+        version: 1.19.9(hono@4.12.7)
       '@toon-format/toon':
         specifier: ^1.0.0
         version: 1.4.0
@@ -39,6 +42,9 @@ importers:
       eslint-config-prettier:
         specifier: ^9.0.0
         version: 9.1.2(eslint@9.39.2)
+      hono:
+        specifier: ^4.11.10
+        version: 4.12.7
       nostr-tools:
         specifier: ^2.23.1
         version: 2.23.1(typescript@5.9.3)
@@ -2731,7 +2737,6 @@ packages:
       hono: ^4
     dependencies:
       hono: 4.12.7
-    dev: false
 
   /@humanfs/core@0.19.1:
     resolution: {integrity: sha512-5DyQ4+1JEUzejeK1JGICcideyfUbGixgS9jNgex5nqkW+cY7WZhxBigmieN5Qnw9ZosSNVC9KQKyb+GUaGyKUA==}
@@ -5433,7 +5438,7 @@ packages:
       bip39: 3.1.0
       commander: 12.1.0
       inquirer: 9.3.8(@types/node@20.19.32)
-      nostr-tools: 2.23.0(typescript@5.9.3)
+      nostr-tools: 2.23.1(typescript@5.9.3)
       qrcode: 1.5.4
       sharp: 0.33.5
     transitivePeerDependencies:
@@ -8694,7 +8699,6 @@ packages:
   /hono@4.12.7:
     resolution: {integrity: sha512-jq9l1DM0zVIvsm3lv9Nw9nlJnMNPOcAtsbsgiUhWcFzPE99Gvo6yRTlszSLLYacMeQ6quHD6hMfId8crVHvexw==}
     engines: {node: '>=16.9.0'}
-    dev: false
 
   /html-escaper@2.0.2:
     resolution: {integrity: sha512-H2iMtd0I4Mt5eYiapRdIDjp+XzelXQ0tFE4JS7YFwFevXXMmOp9myNrUvCg0D6ws8iqkRPBfKHgbwig1SmlLfg==}
@@ -9841,6 +9845,7 @@ packages:
       '@scure/bip39': 2.0.1
       nostr-wasm: 0.1.0
       typescript: 5.9.3
+    dev: false
 
   /nostr-tools@2.23.1(typescript@5.9.3):
     resolution: {integrity: sha512-Q5SJ1omrseBFXtLwqDhufpFLA6vX3rS/IuBCc974qaYX6YKGwEPxa/ZsyxruUOr+b+5EpWL2hFmCB5AueYrfBw==}
