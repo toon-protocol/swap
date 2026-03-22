@@ -79,8 +79,8 @@ importers:
         specifier: workspace:*
         version: link:../packages/bls
       '@toon-protocol/connector':
-        specifier: ^1.8.1
-        version: 1.8.1(@types/node@20.19.32)(typescript@5.9.3)
+        specifier: ^2.0.0
+        version: 2.0.0(@types/node@20.19.32)(typescript@5.9.3)
       '@toon-protocol/core':
         specifier: workspace:*
         version: link:../packages/core
@@ -156,8 +156,8 @@ importers:
   examples/sdk-example:
     dependencies:
       '@toon-protocol/connector':
-        specifier: ^1.8.1
-        version: 1.8.1(@types/node@20.19.32)(typescript@5.9.3)
+        specifier: ^2.0.0
+        version: 2.0.0(@types/node@20.19.32)(typescript@5.9.3)
       '@toon-protocol/core':
         specifier: workspace:*
         version: link:../../packages/core
@@ -187,8 +187,8 @@ importers:
   examples/town-example:
     dependencies:
       '@toon-protocol/connector':
-        specifier: ^1.8.1
-        version: 1.8.1(@types/node@20.19.32)(typescript@5.9.3)
+        specifier: ^2.0.0
+        version: 2.0.0(@types/node@20.19.32)(typescript@5.9.3)
       '@toon-protocol/core':
         specifier: workspace:*
         version: link:../../packages/core
@@ -261,8 +261,8 @@ importers:
   packages/client:
     dependencies:
       '@toon-protocol/connector':
-        specifier: ^1.8.1
-        version: 1.8.1(@types/node@20.19.32)(typescript@5.9.3)
+        specifier: ^2.0.0
+        version: 2.0.0(@types/node@20.19.32)(typescript@5.9.3)
       '@toon-protocol/core':
         specifier: workspace:*
         version: link:../core
@@ -422,8 +422,8 @@ importers:
         version: 2.23.1(typescript@5.9.3)
     devDependencies:
       '@toon-protocol/connector':
-        specifier: ^1.8.1
-        version: 1.8.1(@types/node@20.19.32)(typescript@5.9.3)
+        specifier: ^2.0.0
+        version: 2.0.0(@types/node@20.19.32)(typescript@5.9.3)
       '@toon-protocol/relay':
         specifier: workspace:*
         version: link:../relay
@@ -455,8 +455,8 @@ importers:
         specifier: ^1.0.0
         version: 1.19.9(hono@4.12.7)
       '@toon-protocol/connector':
-        specifier: ^1.8.1
-        version: 1.8.1(@types/node@20.19.32)(typescript@5.9.3)
+        specifier: ^2.0.0
+        version: 2.0.0(@types/node@20.19.32)(typescript@5.9.3)
       '@toon-protocol/core':
         specifier: workspace:*
         version: link:../core
@@ -3328,7 +3328,7 @@ packages:
       '@noble/hashes': 1.8.0
       '@scure/base': 1.2.6
       '@types/debug': 4.1.12
-      debug: 4.3.4
+      debug: 4.4.3
       pony-cause: 2.1.11
       semver: 7.7.4
       uuid: 9.0.1
@@ -3345,7 +3345,7 @@ packages:
       '@noble/hashes': 1.8.0
       '@scure/base': 1.2.6
       '@types/debug': 4.1.12
-      debug: 4.3.4
+      debug: 4.4.3
       pony-cause: 2.1.11
       semver: 7.7.4
       uuid: 9.0.1
@@ -5405,8 +5405,8 @@ packages:
   /@toon-format/toon@1.4.0:
     resolution: {integrity: sha512-bjdhhIPjnX2oVk+pKy/nD3bwuESDLX/5fwW0TxwpV7Q4PVNkiRSv1S0sPeuy9TI4PfAlulow1HShdmMTnYvoLg==}
 
-  /@toon-protocol/connector@1.8.1(@types/node@20.19.32)(typescript@5.9.3):
-    resolution: {integrity: sha512-Z5U64TXnZlKAWkTzFKVYmE4+GTjtTkottdCWlOnQO3wtX65dBP/CukZ40Iuo/hCics6ylIaQAljdVDFZh4Vidg==}
+  /@toon-protocol/connector@2.0.0(@types/node@20.19.32)(typescript@5.9.3):
+    resolution: {integrity: sha512-Ry+SklPlLK0gwCExhan0b9hGRxonUsE1rSeRNNWqwSwE5oV0pKyES7/1qmyFPcHCDOyu+uOUKqNmorI+gGoKqA==}
     engines: {node: '>=22.11.0'}
     hasBin: true
     peerDependencies:
@@ -8186,7 +8186,7 @@ packages:
     resolution: {integrity: sha512-an2S5quJMiy5bnZKEf6AkfH/7r8CzHvhchU40gxN+OM6HPhe7Z9T1FUychcf2M9PpPOO0Hf7BAEfJkw2TDIBDw==}
     engines: {node: '>=12.0.0'}
     dependencies:
-      readable-stream: 3.6.2
+      readable-stream: 4.7.0
       webextension-polyfill: 0.10.0
     dev: false
 
@@ -10103,7 +10103,7 @@ packages:
     dependencies:
       '@adraffy/ens-normalize': 1.11.1
       '@noble/curves': 1.9.7
-      '@noble/hashes': 1.7.1
+      '@noble/hashes': 1.8.0
       '@scure/bip32': 1.7.0
       '@scure/bip39': 1.6.0
       abitype: 1.2.3(typescript@5.9.3)(zod@3.25.76)
