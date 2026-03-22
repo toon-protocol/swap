@@ -402,6 +402,9 @@ importers:
 
   packages/sdk:
     dependencies:
+      '@ardrive/turbo-sdk':
+        specifier: ^1.19.0
+        version: 1.40.2(typescript@5.9.3)
       '@noble/curves':
         specifier: ^2.0.0
         version: 2.0.1
