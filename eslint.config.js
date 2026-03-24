@@ -57,7 +57,6 @@ export default tseslint.config(
       '**/*.cjs',
       '**/*.mjs',
       'archive/**',
-      'packages/rig/**',
     ],
   }
 );
