@@ -57,6 +57,7 @@ export default tseslint.config(
       '**/*.cjs',
       '**/*.mjs',
       'archive/**',
+      '.claude/**',
     ],
   }
 );
