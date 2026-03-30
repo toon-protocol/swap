@@ -39,7 +39,8 @@
       "serve-static": ">=1.16.0",
       "cookie": ">=0.7.0",
       "path-to-regexp": ">=0.1.10",
-      "express": ">=4.21.0"
+      "express": ">=4.21.0",
+      "@toon-protocol/mina-zkapp": "link:../connector/packages/mina-zkapp"
     },
     "auditConfig": {
       "ignoreCves": [
