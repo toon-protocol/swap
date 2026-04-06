@@ -20,7 +20,7 @@ export default defineConfig({
     // Canonical test count: `pnpm test` at the repo root is the single source
     // of truth for total test count. All workspace members with tests must be
     // listed here so counts are consistent across pipeline steps.
-    include: ['packages/*/src/**/*.test.ts', 'docker/src/**/*.test.ts'],
+    include: ['packages/*/src/**/*.test.ts', 'packages/memvid-node/tests/**/*.test.ts', 'docker/src/**/*.test.ts'],
     exclude: ['**/node_modules/**', '**/dist/**', '**/__integration__/**', 'packages/mina-zkapp/**'],
     coverage: {
       provider: 'v8',
