@@ -58,6 +58,7 @@ export default tseslint.config(
       '**/*.mjs',
       'archive/**',
       '.claude/**',
+      'packages/memvid-node/index.d.ts',
     ],
   }
 );

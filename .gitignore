@@ -34,6 +34,9 @@ coverage/
 npm-debug.log*
 pnpm-debug.log*
 
+# Legal documents (private, not for version control)
+_bmad-output/legal/
+
 # Misc
 *.tgz
 .auto-bmad-tmp/
@@ -57,6 +60,7 @@ __pycache__/
 *.jpg
 *.jpeg
 !_bmad-output/branding/**/*.png
+!_bmad-output/dev-signals/assets/**/*.png
 
 # Nix build output (symlink to /nix/store result)
 /result
@@ -64,3 +68,5 @@ __pycache__/
 # Generated deployment files
 docker-compose-peer*.yml
 genesis.env
+.playwright-cli/
+wallet-*.yaml

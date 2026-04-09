@@ -6,7 +6,10 @@
   "type": "module",
   "scripts": {
     "build": "pnpm -r run build",
-    "test": "vitest",
+    "test": "vitest run",
+    "test:jest": "pnpm --filter @toon-protocol/pet-dvm test",
+    "test:zk": "pnpm --filter @toon-protocol/pet-circuit test",
+    "test:all": "vitest run && pnpm test:jest",
     "test:coverage": "vitest --coverage",
     "lint": "eslint .",
     "format": "prettier --write \"packages/*/src/**/*.ts\"",
@@ -39,7 +42,8 @@
       "serve-static": ">=1.16.0",
       "cookie": ">=0.7.0",
       "path-to-regexp": ">=0.1.10",
-      "express": ">=4.21.0"
+      "express": ">=4.21.0",
+      "@toon-protocol/mina-zkapp": "workspace:*"
     },
     "auditConfig": {
       "ignoreCves": [
