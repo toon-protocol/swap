@@ -46,8 +46,8 @@ async function isAnvilReachable(): Promise<boolean> {
   }
 }
 
-describe.skip('AC-9 [P2] Anvil-backed settlement tx well-formedness (opt-in, SDK E2E infra required)', () => {
-  it('AC-9 — buildSettlementTx bytes accepted by anvilClient.call (eth_call or eth_estimateGas)', async (ctx) => {
+describe('AC-9 [P2] Anvil-backed settlement tx well-formedness (opt-in, SDK E2E infra required)', () => {
+  it.skip('AC-9 — buildSettlementTx bytes accepted by anvilClient.call (eth_call or eth_estimateGas) — [BLOCKED] depends on AC-4/AC-8; same 12.4 sender→recipient binding blocker documented in swap-flow.integration.test.ts', async (ctx) => {
     const reachable = await isAnvilReachable();
     if (!reachable) {
       ctx.skip(

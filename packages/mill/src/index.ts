@@ -55,6 +55,7 @@ export type {
   MillInstance,
   MillHealthResponse,
   MillLogger,
+  Publisher,
 } from './mill.js';
 export { MillStartError } from './errors.js';
 export type { MillStartErrorCode } from './errors.js';

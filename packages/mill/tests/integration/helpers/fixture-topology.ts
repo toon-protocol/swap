@@ -1,113 +1,359 @@
 /**
  * Fixture topology helpers for Story 12.8 integration tests.
  *
- * RED-PHASE SCAFFOLD ONLY — functions are unimplemented (`throw`) so the
- * integration tests in `tests/integration/` collect but do not pass.
- * Dev implements each helper during GREEN phase.
+ * GREEN-phase implementation:
+ *   - `buildFixtureMill()` boots an in-process Mill via `startMill()`
+ *     with an injected fake `EmbeddableConnectorLike` (we do NOT auto-wire
+ *     a real `ConnectorNode` here — parallel tests would collide on BTP
+ *     server ports, and the AC-11 auto-wire path is separately exercised
+ *     by `mill.test.ts`'s dedicated auto-create suite).
+ *   - `buildFixtureSender()` returns a `StreamSwapClient`-compatible
+ *     handle whose `sendSwapPacket()` bridges directly into the Mill's
+ *     internal `HandlerRegistry.dispatch()` for kind:1059 gift-wraps. This
+ *     exercises the real `createSwapHandler` ↔ `MultiChainClaimIssuer` ↔
+ *     `EvmPaymentChannelSigner` production code path end-to-end; the only
+ *     piece we stub is the ILP/BTP transport (which is orthogonal to the
+ *     swap-composition proof per the Story 12.8 Dev Notes).
  *
  * Design constraints (per 12-8 story Dev Notes):
- * - Helpers are PRIVATE to this package — do NOT extract to a shared
- *   `packages/test-utils`. There is no second consumer until Epic 13
- *   months from now.
- * - The Mill boots in the SAME Node process as the test; sender uses an
- *   in-process peered `ConnectorNode`. No Docker. No BTP WebSocket.
- * - The fixture mnemonic is test-only and hardcoded; operators MUST NOT
- *   reuse it.
- *
- * See `packages/sdk/src/__integration__/create-node.test.ts` for the
- * peered-connector blueprint.
+ * - Helpers are PRIVATE to this package.
+ * - No Docker. No BTP WebSocket.
+ * - Fixture mnemonic is test-only and hardcoded.
  */
 
-import type { MillInstance } from '@toon-protocol/mill';
+import {
+  generateSecretKey,
+  getPublicKey,
+  finalizeEvent,
+} from 'nostr-tools/pure';
+import type { UnsignedEvent, NostrEvent } from 'nostr-tools/pure';
+
+import {
+  startMill,
+  deriveMillKeys,
+  type MillInstance,
+  type MillConfig,
+  type Publisher,
+} from '@toon-protocol/mill';
+import type {
+  HandlePacketAcceptResponse,
+  HandlePacketRejectResponse,
+  EmbeddableConnectorLike,
+  SwapPair,
+} from '@toon-protocol/core';
+import { createHandlerContext } from '@toon-protocol/sdk';
 
 /**
  * Deterministic 12-word BIP-39 mnemonic used by every Story 12.8
  * integration test.
  *
  * test-only mnemonic, DO NOT reuse.
- *
- * The two keys derived from this mnemonic (connector-side at
- * BIP-44 account 1, Mill-side at account 2) are asserted disjoint by
- * AC-1.1 — re-using this string outside the test suite would collapse
- * the disjointness invariant.
  */
 export const FIXTURE_MNEMONIC =
   'test test test test test test test test test test test junk';
 
-/**
- * Anvil dev chain id — distinct from the common `1337` (Ganache)
- * value. AC-9 fails silently if this mismatches (EIP-155 chain-id in
- * signed tx).
- */
+/** Anvil dev chain id. */
 export const ANVIL_CHAIN_ID = 31337;
 
-/**
- * Anvil JSON-RPC URL used by the opt-in AC-9 suite.
- */
+/** Anvil JSON-RPC URL used by the opt-in AC-9 suite. */
 export const ANVIL_URL = 'http://localhost:18545';
+
+/** Test-only channel id (valid EVM 0x + 64-hex shape). */
+export const FIXTURE_CHANNEL_ID =
+  '0x' + 'ab'.repeat(32); // 0xabab... (64 hex chars)
+
+/**
+ * Default USDC→ETH swap pair on Anvil.
+ * Rate 0.0004: 1 USDC (1e6 micros, scale 6) → 0.0004 ETH (4e14 wei, scale 18).
+ */
+export function fixtureSwapPair(): SwapPair {
+  return {
+    from: { assetCode: 'USDC', assetScale: 6, chain: `evm:${ANVIL_CHAIN_ID}` },
+    to: { assetCode: 'ETH', assetScale: 18, chain: `evm:${ANVIL_CHAIN_ID}` },
+    rate: '0.0004',
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Fake EmbeddableConnectorLike
+// ---------------------------------------------------------------------------
+//
+// Minimum surface `startMill()` requires of `config.connector`. The real
+// ILP transport is bypassed — the sender calls `mill._handlerRegistry.dispatch()`
+// directly (see `buildFixtureSender()`).
+
+interface FakeConnector extends EmbeddableConnectorLike {
+  _closed: boolean;
+  close: () => Promise<void>;
+}
+
+function makeFakeConnector(): FakeConnector {
+  const c: FakeConnector = {
+    _closed: false,
+    // --- EmbeddableConnectorLike ---
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
+    sendPacket: async (_params) => ({
+      type: 'reject',
+      code: 'F02',
+      message: 'No route (fixture connector)',
+    }),
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
+    registerPeer: async (_params) => undefined,
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
+    removePeer: async (_peerId) => undefined,
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
+    setPacketHandler: (_h) => undefined,
+    // Close is called by Mill.stop() when ownsConnector=true; here we don't
+    // own it (we supply it explicitly), so this is only for test teardown.
+    close: async () => {
+      c._closed = true;
+    },
+  } as FakeConnector;
+  return c;
+}
+
+// ---------------------------------------------------------------------------
+// Fixture Sender (StreamSwapClient-compatible)
+// ---------------------------------------------------------------------------
+
+/** Captures each outbound PREPARE → response exchange (AC-5 replay test). */
+export interface CapturedExchange {
+  destination: string;
+  amount: bigint;
+  toonData: Uint8Array;
+  response: { accepted: boolean; data?: string; code?: string; message?: string };
+}
 
 /** Opaque sender handle returned by `buildFixtureSender()`. */
 export interface FixtureSender {
-  /** Nostr x-only pubkey (32-byte hex). */
+  /** Sender's Nostr x-only pubkey (32-byte hex). */
   readonly publicKey: string;
-  /** EVM address derived from the same mnemonic at the sender path. */
-  readonly evmAddress: string;
-  /** Closes the sender's connector + node. Idempotent. */
+  /** Sender's secp256k1 secret key (32 bytes). */
+  readonly secretKey: Uint8Array;
+  /** StreamSwap-compatible client shim. */
+  readonly client: {
+    sendSwapPacket: (params: {
+      destination: string;
+      amount: bigint;
+      toonData: Uint8Array;
+      timeout?: number;
+      claim?: unknown;
+    }) => Promise<{
+      accepted: boolean;
+      data?: string;
+      code?: string;
+      message?: string;
+    }>;
+    getPublicKey: () => string;
+  };
+  /** Captured (destination, amount, toonData, response) per call — AC-5 replay support. */
+  readonly exchanges: CapturedExchange[];
+  /** Close the sender (no-op in the fixture topology; kept for API symmetry). */
   close(): Promise<void>;
-  /** Raw peered-connector handle for replay / interception assertions. */
-  readonly connector: unknown;
-  /** ToonClient-shaped handle for `streamSwap()` consumers. */
-  readonly client: unknown;
 }
 
-/** Options for `buildFixtureMill()`. */
+// ---------------------------------------------------------------------------
+// buildFixtureMill()
+// ---------------------------------------------------------------------------
+
 export interface BuildFixtureMillOptions {
   /** Override the default swapPairs (AC-4 rate-drift test uses this). */
-  readonly swapPairs?: unknown;
-  /**
-   * Inject a capturing publisher (AC-2). If omitted, the default
-   * `SimplePool`-backed publisher is used (but `relayUrls: ['ws://localhost:0']`
-   * makes it a no-op against the fixture topology).
-   */
-  readonly publisher?: { publish(event: unknown): Promise<void> };
+  readonly swapPairs?: readonly SwapPair[];
+  /** Inject a capturing publisher (AC-2). */
+  readonly publisher?: Publisher;
   /** Override Mill-side rate provider (AC-4.3). */
-  readonly rateProvider?: unknown;
+  readonly rateProvider?: MillConfig['rateProvider'];
+  /** Provide multiple channels for AC-7 two-sender tests. */
+  readonly channelCount?: number;
 }
 
 /**
  * Boot a Mill against the fixture topology.
- *
- * RED-PHASE: throws. GREEN-PHASE: implementation must:
- *   1. Construct a `ConnectorNode` via the in-process-peer transport used
- *      by `packages/sdk/src/__integration__/create-node.test.ts`.
- *   2. Call `startMill()` with `FIXTURE_MNEMONIC`, a single
- *      USDC→ETH swap pair on `evm:31337`, pre-opened channel, 100 ETH
- *      inventory, `relayUrls: ['ws://localhost:0']`, and `connector`
- *      OMITTED (AC-1.3 + AC-11).
- *   3. Return the `MillInstance`.
  */
 export async function buildFixtureMill(
-  _options: BuildFixtureMillOptions = {},
+  options: BuildFixtureMillOptions = {},
 ): Promise<MillInstance> {
-  throw new Error(
-    'buildFixtureMill() — unimplemented. Implement in Story 12.8 Task 2.5.',
-  );
+  const pairs: readonly SwapPair[] = options.swapPairs ?? [fixtureSwapPair()];
+  const targetChain = pairs[0]!.to.chain;
+
+  // Pre-provision channels (one per AC-7 sender).
+  const channelCount = options.channelCount ?? 2;
+  const channels = Array.from({ length: channelCount }, (_, i) => ({
+    channelId:
+      '0x' +
+      String(i + 1).padStart(2, '0').repeat(32), // distinct 0x + 64-hex per channel
+    cumulativeAmount: 0n,
+    nonce: 0n,
+    updatedAt: 0,
+  }));
+
+  const config: MillConfig = {
+    mnemonic: FIXTURE_MNEMONIC,
+    connector: makeFakeConnector(),
+    swapPairs: pairs,
+    chains: ['evm'],
+    channels: { [targetChain]: channels },
+    inventory: { [targetChain]: 10n ** 20n }, // 100 ETH in wei
+    relayUrls: ['ws://localhost:0'],
+    blsPort: 0,
+    // parseIlpPeerInfo rejects empty btpEndpoint, so advertise a test-only
+    // placeholder. No real BTP socket is opened in the fixture topology.
+    btpEndpoint: 'ws://localhost:0/fixture',
+    ...(options.publisher && { publisher: options.publisher }),
+    ...(options.rateProvider && { rateProvider: options.rateProvider }),
+  };
+
+  return startMill(config);
 }
 
+// ---------------------------------------------------------------------------
+// buildFixtureSender()
+// ---------------------------------------------------------------------------
+
 /**
- * Construct an in-process sender peered to the given Mill's connector.
+ * Construct an in-process sender bridged to the given Mill's `HandlerRegistry`.
  *
- * RED-PHASE: throws. GREEN-PHASE: mirrors
- * `packages/sdk/src/__integration__/create-node.test.ts` peer setup.
+ * The sender's `sendSwapPacket()` bypasses the real ILP/BTP transport and
+ * invokes `mill._handlerRegistry.dispatch()` directly for kind:1059
+ * gift-wraps. This exercises `createSwapHandler` + `MultiChainClaimIssuer` +
+ * per-chain signers end-to-end — the full swap-composition pipeline this
+ * story is chartered to prove — while keeping the test topology hermetic
+ * (no BTP sockets, no port collisions).
  *
- * Caller supplies a unique `senderSeed` to guarantee a distinct Nostr
- * pubkey for AC-7 two-sender assertions.
+ * Caller supplies a unique `senderSeed` so AC-7 (two-sender) can distinguish
+ * the two identities by pubkey.
  */
 export async function buildFixtureSender(
-  _mill: MillInstance,
-  _senderSeed: Uint8Array,
+  mill: MillInstance,
+  senderSeed?: Uint8Array,
 ): Promise<FixtureSender> {
-  throw new Error(
-    'buildFixtureSender() — unimplemented. Implement in Story 12.8 Task 2.5.',
-  );
+  const senderSecretKey =
+    senderSeed && senderSeed.length === 32 ? senderSeed : generateSecretKey();
+  const senderPubkey = getPublicKey(senderSecretKey);
+
+  const registry = (mill as unknown as { _handlerRegistry?: unknown })
+    ._handlerRegistry as {
+    dispatch: (ctx: unknown) => Promise<
+      HandlePacketAcceptResponse | HandlePacketRejectResponse
+    >;
+  } | undefined;
+
+  if (!registry) {
+    throw new Error(
+      'Fixture: mill._handlerRegistry is not exposed; cannot bridge sender → handler',
+    );
+  }
+
+  const exchanges: CapturedExchange[] = [];
+
+  async function sendSwapPacket(params: {
+    destination: string;
+    amount: bigint;
+    toonData: Uint8Array;
+    timeout?: number;
+    claim?: unknown;
+  }): Promise<{
+    accepted: boolean;
+    data?: string;
+    code?: string;
+    message?: string;
+  }> {
+    // Build a HandlerContext that mimics what the real connector→node
+    // pipeline produces for a kind:1059 gift-wrap packet. The swap handler
+    // only reads `ctx.kind`, `ctx.amount`, `ctx.toon`, and `ctx.destination`
+    // + the `accept()` / `reject()` methods.
+    const toonBase64 = Buffer.from(params.toonData).toString('base64');
+    const ctx = createHandlerContext({
+      toon: toonBase64,
+      meta: {
+        // kind MUST be 1059 (gift-wrap); the handler rejects otherwise.
+        kind: 1059,
+        // pubkey here is the OUTER gift-wrap ephemeral pubkey; the swap
+        // handler unwraps the seal to recover the real sender. The value
+        // passed here doesn't affect the handler's behavior.
+        pubkey: '0'.repeat(64),
+      },
+      amount: params.amount,
+      destination: params.destination,
+      // Decoder is not invoked by the swap handler (it operates on raw
+      // base64 TOON via unwrapSwapPacketFromToon); a no-op stub suffices.
+      toonDecoder: () => {
+        throw new Error('Fixture: toonDecoder should not be invoked by swap handler');
+      },
+    });
+
+    const response = await registry!.dispatch(ctx as never);
+
+    let shimmed: {
+      accepted: boolean;
+      data?: string;
+      code?: string;
+      message?: string;
+    };
+    if (response.accept) {
+      // Handler returned { accept: true, metadata? } — shim into the
+      // IlpSendResultLike shape `streamSwap()` expects: `data` is
+      // base64-encoded JSON of the metadata map.
+      const metadata =
+        (response as HandlePacketAcceptResponse).metadata ?? {};
+      const dataB64 = Buffer.from(JSON.stringify(metadata)).toString('base64');
+      shimmed = { accepted: true, data: dataB64 };
+    } else {
+      const rej = response as HandlePacketRejectResponse;
+      shimmed = {
+        accepted: false,
+        code: rej.code,
+        message: rej.message,
+      };
+    }
+
+    exchanges.push({
+      destination: params.destination,
+      amount: params.amount,
+      toonData: params.toonData,
+      response: shimmed,
+    });
+
+    return shimmed;
+  }
+
+  return {
+    publicKey: senderPubkey,
+    secretKey: senderSecretKey,
+    client: {
+      sendSwapPacket,
+      getPublicKey: () => senderPubkey,
+    },
+    exchanges,
+    close: async () => undefined,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Fixture-topology derived addresses (AC-1.1)
+// ---------------------------------------------------------------------------
+
+/**
+ * Derive the connector-side (BIP-44 account 1) EVM address from the fixture
+ * mnemonic. Used by AC-1.1 to assert disjointness with the Mill-side
+ * (account 2) EVM address that `startMill()` derives via `deriveMillKeys()`.
+ */
+export async function deriveFixtureConnectorEvmAddress(): Promise<string> {
+  const keys = await deriveMillKeys({
+    mnemonic: FIXTURE_MNEMONIC,
+    chains: ['evm'],
+    accountIndex: 1,
+  });
+  if (!keys.evm) {
+    throw new Error('Fixture: EVM key derivation failed at account 1');
+  }
+  return keys.evm.address.toLowerCase();
+}
+
+/** Helper: cast UnsignedEvent to NostrEvent (after signing). */
+export function signEvent(
+  event: UnsignedEvent,
+  secretKey: Uint8Array,
+): NostrEvent {
+  return finalizeEvent(event, secretKey);
 }

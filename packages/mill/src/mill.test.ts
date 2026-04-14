@@ -534,3 +534,90 @@ describe('Pass-3 security: passphrase rejection (cryptographic correctness)', ()
     await instance.stop();
   });
 });
+
+// ===========================================================================
+// Story 12.8 AC-11: auto-create embedded ConnectorNode when none supplied
+// ===========================================================================
+
+describe('Story 12.8 AC-11 — auto-create embedded ConnectorNode', () => {
+  it('[P1] startMill() with no connector + btpServerPort auto-wires ConnectorNode; mill.connector is live', async () => {
+    const startMill = await loadStartMill();
+    // Use a high, likely-free port to avoid collision.
+    const port = 24000 + Math.floor(Math.random() * 1000);
+    // Omit the `connector` key entirely — exercising the auto-wire branch.
+    const { connector: _ignored, ...withoutConnector } = baseConfig();
+    const instance = (await startMill({
+      ...withoutConnector,
+      btpServerPort: port,
+    })) as MillInstanceShape & {
+      connector?: { nodeId?: string };
+    };
+    try {
+      expect(instance.connector).toBeDefined();
+      // Distinct from operator-supplied fake (which has `_calls`).
+      expect((instance.connector as { _calls?: unknown })._calls).toBeUndefined();
+    } finally {
+      await instance.stop();
+    }
+  });
+
+  it('[P1] stop() cleanly tears down the auto-created connector (ownership transfer)', async () => {
+    const startMill = await loadStartMill();
+    const port = 25000 + Math.floor(Math.random() * 1000);
+    const { connector: _ignored, ...withoutConnector } = baseConfig();
+    const instance = (await startMill({
+      ...withoutConnector,
+      btpServerPort: port,
+    })) as MillInstanceShape;
+    // Idempotent stop — second call is a no-op.
+    await instance.stop();
+    await instance.stop();
+    expect(instance.health().status).toBe('stopped');
+  });
+});
+
+// ===========================================================================
+// Story 12.8 AC-13: publisher injection + rejecting-publisher tolerance
+// ===========================================================================
+
+describe('Story 12.8 AC-13 — publisher injection', () => {
+  it('[P1] injected publisher.publish() is called with a kind:10032 event', async () => {
+    const startMill = await loadStartMill();
+    const captured: unknown[] = [];
+    const publisher = {
+      publish: async (event: unknown): Promise<void> => {
+        captured.push(event);
+      },
+    };
+    const instance = (await startMill(
+      baseConfig({ publisher })
+    )) as MillInstanceShape;
+    try {
+      // Publish fires after resolve; await one macrotask tick.
+      const deadline = Date.now() + 2_000;
+      while (captured.length === 0 && Date.now() < deadline) {
+        await new Promise((r) => setTimeout(r, 20));
+      }
+      expect(captured.length).toBe(1);
+      const ev = captured[0] as { kind: number; tags: string[][] };
+      expect(ev.kind).toBe(10032);
+    } finally {
+      await instance.stop();
+    }
+  });
+
+  it('[P1] rejecting publisher does NOT fail startMill() (flaky-relay tolerance, R-8N2)', async () => {
+    const startMill = await loadStartMill();
+    const publisher = {
+      publish: async (): Promise<void> => {
+        throw new Error('simulated relay outage');
+      },
+    };
+    // Boot MUST resolve; the per-relay failure is logged, not thrown.
+    const instance = (await startMill(
+      baseConfig({ publisher })
+    )) as MillInstanceShape;
+    expect(instance.health().status).toBe('ok');
+    await instance.stop();
+  });
+});

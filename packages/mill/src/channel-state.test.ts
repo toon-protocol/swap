@@ -273,3 +273,136 @@ describe('MillChannelState — per-channel nonce + cumulativeAmount (Story 12.4 
     expect(cs.get(KEY)!.updatedAt).toBe(7777);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Story 12.8 AC-12 — per-sender sticky channel binding
+// ---------------------------------------------------------------------------
+
+describe('Story 12.8 AC-12 — sender→channel sticky binding', () => {
+  const SENDER_A = 'a'.repeat(64);
+  const SENDER_B = 'b'.repeat(64);
+
+  function makeTwoChannelPool() {
+    return new MillChannelState({
+      channels: {
+        // Provision two channels keyed by channelId for the same (asset, chain).
+        'ETH:evm:31337:0xchan-1': {
+          channelId: '0xchan-1',
+          cumulativeAmount: 0n,
+          nonce: 0n,
+          updatedAt: 0,
+        },
+        'ETH:evm:31337:0xchan-2': {
+          channelId: '0xchan-2',
+          cumulativeAmount: 0n,
+          nonce: 0n,
+          updatedAt: 0,
+        },
+      },
+    });
+  }
+
+  it('[P0] two senders bind to distinct channels (first-available policy)', () => {
+    const cs = makeTwoChannelPool();
+    const rA = cs.reserve({
+      assetCode: 'ETH',
+      chain: 'evm:31337',
+      senderPubkey: SENDER_A,
+      cumulativeDelta: 10n,
+    });
+    const rB = cs.reserve({
+      assetCode: 'ETH',
+      chain: 'evm:31337',
+      senderPubkey: SENDER_B,
+      cumulativeDelta: 20n,
+    });
+    expect(rA.channelId).not.toBe(rB.channelId);
+  });
+
+  it('[P0] same sender repeated reserves stay bound to the same channel', () => {
+    const cs = makeTwoChannelPool();
+    const r1 = cs.reserve({
+      assetCode: 'ETH',
+      chain: 'evm:31337',
+      senderPubkey: SENDER_A,
+      cumulativeDelta: 1n,
+    });
+    const r2 = cs.reserve({
+      assetCode: 'ETH',
+      chain: 'evm:31337',
+      senderPubkey: SENDER_A,
+      cumulativeDelta: 2n,
+    });
+    const r3 = cs.reserve({
+      assetCode: 'ETH',
+      chain: 'evm:31337',
+      senderPubkey: SENDER_A,
+      cumulativeDelta: 3n,
+    });
+    expect(r1.channelId).toBe(r2.channelId);
+    expect(r2.channelId).toBe(r3.channelId);
+    expect(r3.nonce).toBe(3n);
+    expect(r3.cumulativeAmount).toBe(6n);
+  });
+
+  it('[P1] getBindings() snapshot reflects both sticky assignments after AC-7-style flow', () => {
+    const cs = makeTwoChannelPool();
+    cs.reserve({
+      assetCode: 'ETH',
+      chain: 'evm:31337',
+      senderPubkey: SENDER_A,
+      cumulativeDelta: 1n,
+    });
+    cs.reserve({
+      assetCode: 'ETH',
+      chain: 'evm:31337',
+      senderPubkey: SENDER_B,
+      cumulativeDelta: 1n,
+    });
+    const bindings = cs.getBindings();
+    expect(Object.keys(bindings)).toHaveLength(2);
+    expect(bindings[`ETH:evm:31337:${SENDER_A}`]).toBeDefined();
+    expect(bindings[`ETH:evm:31337:${SENDER_B}`]).toBeDefined();
+    // Snapshot is defensive — mutating it does not affect internal state.
+    delete bindings[`ETH:evm:31337:${SENDER_A}`];
+    expect(Object.keys(cs.getBindings())).toHaveLength(2);
+  });
+
+  it('[P1] releaseAll() clears sticky bindings (shutdown-scoped)', () => {
+    const cs = makeTwoChannelPool();
+    cs.reserve({
+      assetCode: 'ETH',
+      chain: 'evm:31337',
+      senderPubkey: SENDER_A,
+      cumulativeDelta: 1n,
+    });
+    expect(Object.keys(cs.getBindings())).toHaveLength(1);
+    cs.releaseAll();
+    expect(Object.keys(cs.getBindings())).toHaveLength(0);
+  });
+
+  it('[P1] third sender with only two provisioned channels → throws UNSUPPORTED_CHAIN', () => {
+    const cs = makeTwoChannelPool();
+    cs.reserve({
+      assetCode: 'ETH',
+      chain: 'evm:31337',
+      senderPubkey: SENDER_A,
+      cumulativeDelta: 1n,
+    });
+    cs.reserve({
+      assetCode: 'ETH',
+      chain: 'evm:31337',
+      senderPubkey: SENDER_B,
+      cumulativeDelta: 1n,
+    });
+    const SENDER_C = 'c'.repeat(64);
+    expect(() =>
+      cs.reserve({
+        assetCode: 'ETH',
+        chain: 'evm:31337',
+        senderPubkey: SENDER_C,
+        cumulativeDelta: 1n,
+      })
+    ).toThrow(MillWalletError);
+  });
+});

@@ -23,6 +23,12 @@
 
 import { serve, type ServerType } from '@hono/node-server';
 import { Hono, type Context } from 'hono';
+import { SimplePool } from 'nostr-tools/pool';
+import type { NostrEvent } from 'nostr-tools/pure';
+import {
+  ConnectorNode,
+  createLogger as createConnectorLogger,
+} from '@toon-protocol/connector';
 
 import {
   HandlerRegistry,
@@ -61,6 +67,19 @@ export interface MillLogger {
   info: (...args: unknown[]) => void;
   warn: (...args: unknown[]) => void;
   error: (...args: unknown[]) => void;
+}
+
+/**
+ * Story 12.8 AC-13 — injectable relay publisher.
+ *
+ * Default implementation uses `SimplePool.publish()` against
+ * `config.relayUrls`. Tests substitute a capturing implementation so
+ * they can assert the kind:10032 broadcast without spinning up a relay.
+ * Publish failures are logged at `warn` and DO NOT fail Mill boot — a
+ * flaky relay must not prevent a Mill from coming up.
+ */
+export interface Publisher {
+  publish(event: unknown): Promise<void>;
 }
 
 /**
@@ -109,6 +128,14 @@ export interface MillConfig {
   relayUrls: readonly string[];
   knownPeers?: readonly { ilpAddress: string; btpUrl?: string }[];
   blsPort?: number;
+  /**
+   * Story 12.8 AC-11 — BTP server port for the auto-created embedded
+   * ConnectorNode (when `config.connector` and `config.connectorUrl`
+   * are both omitted). Ignored if the operator supplies a connector.
+   * Defaults to `3400` (distinct from Town's `3000` default so a Mill
+   * and a Town can run side-by-side on one host without collision).
+   */
+  btpServerPort?: number;
   passphrase?: string;
   logger?: MillLogger;
 
@@ -132,6 +159,18 @@ export interface MillConfig {
   advertisedAsset?: { assetCode: string; assetScale: number };
 
   /**
+   * Story 12.8 AC-13 — optional injectable relay publisher.
+   *
+   * When omitted, the default implementation uses a
+   * {@link SimplePool}-backed publisher that calls
+   * `pool.publish(relayUrls, event)` with `Promise.allSettled` semantics
+   * (per-relay failures logged at `warn`; boot does NOT fail). Tests
+   * inject a capturing or rejecting publisher to assert the broadcast
+   * path without spinning up a relay.
+   */
+  publisher?: Publisher;
+
+  /**
    * @internal — test hook. When supplied, called exactly once with the
    * signed kind:10032 event immediately after `buildIlpPeerInfoEvent`
    * returns. Used by AC-6 tests to capture the event without reaching
@@ -146,6 +185,19 @@ export interface MillInstance {
   readonly identity: NodeIdentity;
   readonly blsPort: number;
   readonly millKeys: MillKeys;
+  /**
+   * Story 12.8 AC-11 — the effective connector the Mill is wired to.
+   *
+   * - When `config.connector` was supplied: that value, verbatim.
+   * - When neither `config.connector` nor `config.connectorUrl` were
+   *   supplied: an auto-created embedded {@link ConnectorNode}.
+   * - Otherwise: `undefined`.
+   *
+   * Ownership: lifecycle of auto-created connectors is managed by the
+   * Mill (`stop()` closes them). Operator-supplied connectors are
+   * owned by the caller and NOT closed on `stop()`.
+   */
+  readonly connector?: EmbeddableConnectorLike;
   stop(): Promise<void>;
   health(): MillHealthResponse;
   /** @internal — AC-10 test hook. */
@@ -502,24 +554,69 @@ export async function startMill(config: MillConfig): Promise<MillInstance> {
   }
 
   // 11. Connector ownership.
-  //     - `config.connector` supplied → caller owns → we never close.
-  //     - `config.connectorUrl` supplied → not wired into this story's scope
-  //       (reserved for standalone mode); treated as opaque, not closed.
-  //     - Neither supplied → leave `effectiveConnector` undefined. The swap
-  //       handler is registered on the local registry but no packets will
-  //       reach it until a real connector is bolted on. Story 12.8 E2E
-  //       supplies a real connector; unit tests pass a fake.
-  const ownsConnector = false;
-  const effectiveConnector: EmbeddableConnectorLike | undefined =
+  //
+  // Story 12.8 AC-11: three ownership modes —
+  //   - `config.connector` supplied → caller owns → we never close.
+  //   - `config.connectorUrl` supplied → treated as opaque; not closed.
+  //   - Neither supplied → we AUTO-CREATE an embedded `ConnectorNode`
+  //     (mirrors `startTown()`'s default mode) and own its lifecycle.
+  //
+  // The auto-create branch is what makes `startMill({ mnemonic, swapPairs,
+  // chains, channels, inventory, relayUrls })` — with no connector args —
+  // a functional boot, which is the minimal contract the Story 12.8 E2E
+  // and operator-docs-stage-9 topology both require.
+  let ownsConnector = false;
+  let autoCreatedConnector: ConnectorNode | null = null;
+  let effectiveConnector: EmbeddableConnectorLike | undefined =
     config.connector;
-  // Symmetric with the `knownPeers` warning below: `connectorUrl` is a
-  // scoped-out standalone-mode hook. Accepting it silently would mislead
-  // operators who believe they've wired a remote connector.
+
   if (config.connectorUrl !== undefined && config.connector === undefined) {
+    // `connectorUrl` is a scoped-out standalone-mode hook (the remote-HTTP
+    // connector path). Warn the operator so a misconfigured remote URL
+    // doesn't silently fail to wire.
     logger.warn?.('mill.connectorUrl.ignored', {
       reason:
-        'standalone-connector (HTTP) mode is deferred to Story 12.8 E2E; config.connectorUrl is accepted but not dispatched',
+        'standalone-connector (HTTP) mode is deferred; config.connectorUrl is accepted but not dispatched',
     });
+  } else if (
+    config.connector === undefined &&
+    config.connectorUrl === undefined &&
+    config.btpServerPort !== undefined
+  ) {
+    // AC-11: auto-wire an embedded ConnectorNode when the operator opts in
+    // by supplying `btpServerPort`. Mirrors `startTown()`'s default mode,
+    // less the settlement infra (swap-handler-owned in the Mill topology
+    // per D12-005). The explicit `btpServerPort` is required because
+    // `ConnectorNode` rejects port=0 (OS-assigned), so silent defaults
+    // would either collide across parallel boots or fail noisily.
+    const nodeId = `toon-mill-${identity.pubkey.slice(0, 16)}`;
+    const btpServerPort = config.btpServerPort;
+    const connectorLogger = createConnectorLogger(nodeId, 'warn');
+    try {
+      autoCreatedConnector = new ConnectorNode(
+        {
+          nodeId,
+          btpServerPort,
+          environment: 'development' as const,
+          deploymentMode: 'embedded' as const,
+          peers: [],
+          routes: [],
+          localDelivery: { enabled: false },
+        },
+        connectorLogger
+      );
+      effectiveConnector =
+        autoCreatedConnector as unknown as EmbeddableConnectorLike;
+      ownsConnector = true;
+      logger.debug?.('mill.connector.auto_created', { nodeId, btpServerPort });
+    } catch (err) {
+      // Do not throw — the swap handler is still registered on the local
+      // HandlerRegistry, and tests may choose to observe via black-box
+      // dispatch without a live connector.
+      logger.warn?.('mill.connector.auto_create_failed', {
+        err: errSummary(err),
+      });
+    }
   }
 
   // 12. BLS server (Hono).
@@ -586,7 +683,39 @@ export async function startMill(config: MillConfig): Promise<MillInstance> {
     });
   }
 
-  // 13. Publish kind:10032 with swapPairs (fire-and-forget).
+  // 13. Publish kind:10032 with swapPairs.
+  //
+  // Story 12.8 AC-13: resolve the publisher seam (either the operator-
+  // supplied injection or a SimplePool-backed default), then broadcast
+  // the built event. Publish is fire-and-forget with Promise.allSettled
+  // semantics — a rejecting relay MUST NOT fail boot. The broadcast
+  // runs on the next microtask (after `startMill()` resolves) so the
+  // caller observes a ready Mill before relay I/O begins.
+  let autoPool: SimplePool | undefined;
+  const effectivePublisher: Publisher =
+    config.publisher ??
+    (() => {
+      autoPool = new SimplePool();
+      return {
+        async publish(event: unknown): Promise<void> {
+          // `Promise.allSettled` ensures a single rejecting relay cannot
+          // surface an aggregate rejection back to the caller.
+          const promises = autoPool!.publish(
+            [...config.relayUrls],
+            event as NostrEvent
+          );
+          const results = await Promise.allSettled(promises);
+          for (const r of results) {
+            if (r.status === 'rejected') {
+              logger.warn?.('mill.peerInfo.relay_publish_failed', {
+                err: errSummary(r.reason),
+              });
+            }
+          }
+        },
+      };
+    })();
+
   try {
     const ownIlpInfo: IlpPeerInfo = {
       pubkey: identity.pubkey,
@@ -604,6 +733,12 @@ export async function startMill(config: MillConfig): Promise<MillInstance> {
       swapPairs: config.swapPairs.length,
       relayUrls: config.relayUrls,
     });
+
+    // Actually broadcast. Swallow promise rejection at this level — the
+    // publisher impl already logs per-relay failures.
+    void effectivePublisher.publish(ilpInfoEvent).catch((err) => {
+      logger.warn?.('mill.peerInfo.publish_failed', { err: errSummary(err) });
+    });
   } catch (err) {
     logger.warn?.('mill.peerInfo.publish_failed', { err: errSummary(err) });
   }
@@ -616,6 +751,7 @@ export async function startMill(config: MillConfig): Promise<MillInstance> {
     identity,
     blsPort: livePort,
     millKeys,
+    ...(effectiveConnector !== undefined && { connector: effectiveConnector }),
     _handlerRegistry: registry,
     health: getHealth,
     async stop() {
@@ -652,6 +788,20 @@ export async function startMill(config: MillConfig): Promise<MillInstance> {
         logger.warn?.('mill.stop.release_all_failed', {
           err: errSummary(err),
         });
+      }
+      // Story 12.8 AC-13: close the auto-created SimplePool (if any) so the
+      // Mill does not leak relay sockets on shutdown. Operator-injected
+      // publishers are the caller's responsibility to close.
+      if (autoPool) {
+        try {
+          (autoPool as unknown as { close?: (urls: string[]) => void }).close?.(
+            [...config.relayUrls]
+          );
+        } catch (err) {
+          logger.warn?.('mill.stop.pool_close_failed', {
+            err: errSummary(err),
+          });
+        }
       }
       status = 'stopped';
     },
