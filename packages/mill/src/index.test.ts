@@ -45,9 +45,15 @@ describe('@toon-protocol/mill public API exports (Story 12.4 AC-9)', () => {
     expect(typeof mill.MillWalletError).toBe('function');
   });
 
-  it('[P2] does NOT export startMill (Story 12.7 scope, not 12.4)', () => {
-    expect(
-      (mill as unknown as Record<string, unknown>)['startMill']
-    ).toBeUndefined();
+  it('[P2] exports startMill (Story 12.7)', () => {
+    expect(typeof mill.startMill).toBe('function');
+  });
+
+  it('[P2] exports MillStartError class (Story 12.7)', () => {
+    expect(typeof mill.MillStartError).toBe('function');
+  });
+
+  it('[P2] re-exports createSwapHandler from @toon-protocol/sdk (Story 12.7)', () => {
+    expect(typeof mill.createSwapHandler).toBe('function');
   });
 });

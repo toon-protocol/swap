@@ -44,3 +44,21 @@ export type {
 // Errors (Story 12.4)
 export { MillInventoryError, MillWalletError } from './errors.js';
 export type { MillInventoryErrorCode, MillWalletErrorCode } from './errors.js';
+
+// Runtime entrypoint (Story 12.7)
+export { startMill } from './mill.js';
+// NOTE: `buildSignerAddresses` is an @internal helper exposed for unit tests
+// via the `./mill.js` module path (AC-5). It is intentionally NOT re-exported
+// from the public barrel.
+export type {
+  MillConfig,
+  MillInstance,
+  MillHealthResponse,
+  MillLogger,
+} from './mill.js';
+export { MillStartError } from './errors.js';
+export type { MillStartErrorCode } from './errors.js';
+
+// Convenience re-export for operators (Story 12.7 AC-1) — do not wrap.
+export { createSwapHandler } from '@toon-protocol/sdk';
+export type { CreateSwapHandlerConfig } from '@toon-protocol/sdk';

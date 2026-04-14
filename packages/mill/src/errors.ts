@@ -51,3 +51,42 @@ export class MillWalletError extends Error {
     this.code = code;
   }
 }
+
+/**
+ * Startup-time failure codes for `startMill()` (Story 12.7 AC-11).
+ *
+ * `INVALID_CONFIG`         — config validation failed (missing/conflicting fields).
+ * `MILL_REQUIRES_MNEMONIC` — caller supplied `secretKey` only; Mill key
+ *                            derivation (BIP-32) requires a BIP-39 mnemonic
+ *                            (D12-011).
+ * `MISSING_KEY`            — pair targets a chain family whose key was not
+ *                            derived (operator forgot to list it in
+ *                            `config.chains`).
+ * `UNSUPPORTED_CHAIN_FAMILY` — pair targets a chain prefix the Mill does
+ *                              not recognise.
+ * `CONNECTOR_INIT_FAILED`  — failed to construct / start the embedded
+ *                            connector.
+ * `HANDLER_REGISTRATION_FAILED` — registering the kind:1059 swap handler
+ *                                  on the registry failed.
+ */
+export type MillStartErrorCode =
+  | 'INVALID_CONFIG'
+  | 'MILL_REQUIRES_MNEMONIC'
+  | 'MISSING_KEY'
+  | 'UNSUPPORTED_CHAIN_FAMILY'
+  | 'CONNECTOR_INIT_FAILED'
+  | 'HANDLER_REGISTRATION_FAILED';
+
+export class MillStartError extends Error {
+  public readonly code: MillStartErrorCode;
+
+  constructor(
+    code: MillStartErrorCode,
+    message: string,
+    options?: { cause?: unknown }
+  ) {
+    super(`[${code}] ${message}`, options as ErrorOptions | undefined);
+    this.name = 'MillStartError';
+    this.code = code;
+  }
+}

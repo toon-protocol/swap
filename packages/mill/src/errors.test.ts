@@ -11,7 +11,11 @@
  * first.
  */
 import { describe, it, expect } from 'vitest';
-import { MillInventoryError, MillWalletError } from './errors.js';
+import {
+  MillInventoryError,
+  MillWalletError,
+  MillStartError,
+} from './errors.js';
 
 describe('MillInventoryError contract (Story 12.4 AC-2)', () => {
   it('[P0] is an Error subclass with name="MillInventoryError"', () => {
@@ -77,6 +81,38 @@ describe('MillWalletError contract (Story 12.4 AC-2)', () => {
   it('[P2] preserves ES2022 `cause` option', () => {
     const root = new Error('root');
     const err = new MillWalletError('DERIVATION_FAILED', 'wrapped', {
+      cause: root,
+    });
+    expect((err as { cause?: unknown }).cause).toBe(root);
+  });
+});
+
+describe('MillStartError contract (Story 12.7 AC-11)', () => {
+  it('[P0] is an Error subclass with name="MillStartError"', () => {
+    const err = new MillStartError('INVALID_CONFIG', 'bad');
+    expect(err).toBeInstanceOf(Error);
+    expect(err).toBeInstanceOf(MillStartError);
+    expect(err.name).toBe('MillStartError');
+  });
+
+  it('[P1] accepts every MillStartErrorCode literal', () => {
+    for (const code of [
+      'INVALID_CONFIG',
+      'MILL_REQUIRES_MNEMONIC',
+      'MISSING_KEY',
+      'UNSUPPORTED_CHAIN_FAMILY',
+      'CONNECTOR_INIT_FAILED',
+      'HANDLER_REGISTRATION_FAILED',
+    ] as const) {
+      const err = new MillStartError(code, 'msg');
+      expect(err.code).toBe(code);
+      expect(err.message).toContain(code);
+    }
+  });
+
+  it('[P2] preserves ES2022 `cause` option', () => {
+    const root = new Error('root');
+    const err = new MillStartError('HANDLER_REGISTRATION_FAILED', 'wrapped', {
       cause: root,
     });
     expect((err as { cause?: unknown }).cause).toBe(root);

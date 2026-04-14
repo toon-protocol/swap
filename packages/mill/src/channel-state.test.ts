@@ -186,4 +186,90 @@ describe('MillChannelState — per-channel nonce + cumulativeAmount (Story 12.4 
     expect(calls.length).toBe(1);
     expect(calls[0]?.[0]).toBe('mill.channelState.release.unknown_channel');
   });
+
+  // -------------------------------------------------------------------------
+  // Gap-fill: releaseAll() — Story 12.7 AC-3 / AC-12 (bulk reservation flush)
+  // Added by testarch-automate to cover the missing tests called out in the
+  // story's "Modified files" section for `channel-state.test.ts`.
+  // -------------------------------------------------------------------------
+
+  it('[P1] releaseAll() resets every tracked channel to nonce=0 and cumulativeAmount=0', () => {
+    const otherKey = {
+      assetCode: 'USDC',
+      chain: 'evm:8453',
+      senderPubkey: 'b'.repeat(64),
+    };
+    const cs = new MillChannelState({
+      channels: {
+        [`${KEY.assetCode}:${KEY.chain}:${KEY.senderPubkey}`]: {
+          channelId: '0xchan-1',
+          cumulativeAmount: 0n,
+          nonce: 0n,
+          updatedAt: 0,
+        },
+        [`${otherKey.assetCode}:${otherKey.chain}:${otherKey.senderPubkey}`]: {
+          channelId: '0xchan-2',
+          cumulativeAmount: 0n,
+          nonce: 0n,
+          updatedAt: 0,
+        },
+      },
+    });
+
+    // Build up non-zero state on both channels.
+    cs.reserve({ ...KEY, cumulativeDelta: 10n });
+    cs.reserve({ ...KEY, cumulativeDelta: 5n });
+    cs.reserve({ ...otherKey, cumulativeDelta: 99n });
+
+    cs.releaseAll();
+
+    const e1 = cs.get(KEY)!;
+    const e2 = cs.get(otherKey)!;
+    expect(e1.nonce).toBe(0n);
+    expect(e1.cumulativeAmount).toBe(0n);
+    expect(e2.nonce).toBe(0n);
+    expect(e2.cumulativeAmount).toBe(0n);
+  });
+
+  it('[P2] releaseAll() preserves channelId on reset entries', () => {
+    const cs = makeProvisioned();
+    cs.reserve({ ...KEY, cumulativeDelta: 42n });
+    cs.releaseAll();
+    expect(cs.get(KEY)!.channelId).toBe('0xchan');
+  });
+
+  it('[P2] releaseAll() is a no-op on an empty channel map (does not throw)', () => {
+    const cs = new MillChannelState({ channels: {} });
+    expect(() => cs.releaseAll()).not.toThrow();
+  });
+
+  it('[P2] releaseAll() is idempotent — calling twice leaves zeroed state', () => {
+    const cs = makeProvisioned();
+    cs.reserve({ ...KEY, cumulativeDelta: 7n });
+    cs.releaseAll();
+    cs.releaseAll();
+    const e = cs.get(KEY)!;
+    expect(e.nonce).toBe(0n);
+    expect(e.cumulativeAmount).toBe(0n);
+  });
+
+  it('[P2] releaseAll() stamps updatedAt from the injected clock', () => {
+    let now = 100;
+    const cs = new MillChannelState({
+      channels: {
+        [`${KEY.assetCode}:${KEY.chain}:${KEY.senderPubkey}`]: {
+          channelId: '0xchan',
+          cumulativeAmount: 0n,
+          nonce: 0n,
+          updatedAt: 0,
+        },
+      },
+      clock: () => now,
+    });
+    now = 500;
+    cs.reserve({ ...KEY, cumulativeDelta: 5n });
+    now = 7777;
+    cs.releaseAll();
+    expect(cs.get(KEY)!.updatedAt).toBe(7777);
+  });
 });

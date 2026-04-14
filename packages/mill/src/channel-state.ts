@@ -126,4 +126,21 @@ export class MillChannelState {
     if (!entry) return null;
     return { ...entry };
   }
+
+  /**
+   * Bulk-release all tracked reservations (Story 12.7 AC-3 / AC-12).
+   *
+   * Resets every channel entry's nonce and cumulativeAmount to zero — used
+   * during Mill `stop()` to free reservation state before shutdown. This does
+   * NOT reverse signed claims already emitted; it simply clears in-memory
+   * reservation bookkeeping so GC can reclaim the map.
+   */
+  releaseAll(): void {
+    const now = this.clock();
+    for (const entry of this.channels.values()) {
+      entry.nonce = 0n;
+      entry.cumulativeAmount = 0n;
+      entry.updatedAt = now;
+    }
+  }
 }
