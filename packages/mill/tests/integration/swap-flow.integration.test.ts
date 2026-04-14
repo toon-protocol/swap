@@ -197,7 +197,7 @@ describe('AC-2 [P1] kind:10032 publication round-trip + publisher injection (T-8
 // papering over it.
 
 const SCHEMA_BLOCKER =
-  '[BLOCKED] 12.4 sender→recipient binding missing: claim-issuer passes 32-byte Nostr senderPubkey to EvmPaymentChannelSigner.signBalanceProof() as recipient; signer rejects with "EVM recipient must be 20 bytes, got 32" → MillWalletError(SIGNING_FAILED) → ILP T00 → streamSwap state=failed. Needs bug filed against 12.4 (claim-issuer) + a sender-side EVM recipient-address discovery mechanism.';
+  '[BLOCKED — fixed in Story 12.9; re-enable is Story 12.8\'s job] 12.4 sender→recipient binding missing: claim-issuer passes 32-byte Nostr senderPubkey to EvmPaymentChannelSigner.signBalanceProof() as recipient; signer rejects with "EVM recipient must be 20 bytes, got 32" → MillWalletError(SIGNING_FAILED) → ILP T00 → streamSwap state=failed. Resolved by Story 12.9 (sender-provided chainRecipient threaded via kind:20032 chain-recipient tag).';
 
 describe('AC-3 through AC-8 (blocked on schema drift)', () => {
   it.skip(`AC-3 — malformed kind:1059 → REJECT: ${SCHEMA_BLOCKER}`, () => undefined);

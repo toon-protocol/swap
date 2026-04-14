@@ -21,6 +21,13 @@ import { MillInventoryError, MillWalletError } from './errors.js';
 
 const SENDER_PUBKEY = 'b'.repeat(64);
 
+/**
+ * Shared 20-byte lowercased EVM fixture recipient for Story 12.9 tests
+ * and existing-test accommodation sweep (Task 7.1). Keeps the recipient
+ * chain-format-valid so signer validation does not false-positive.
+ */
+const FIXTURE_EVM_RECIPIENT = '0x' + '11'.repeat(20);
+
 const PAIR_USDC_TO_ETH: SwapPair = {
   from: { assetCode: 'USDC', chain: 'evm:base:8453', assetScale: 6 },
   to: { assetCode: 'ETH', chain: 'evm:base:8453', assetScale: 18 },
@@ -77,6 +84,7 @@ describe('MultiChainClaimIssuer (Story 12.4 AC-6, AC-8, AC-10)', () => {
       targetAmount: 50n,
       pair: PAIR_USDC_TO_ETH,
       senderPubkey: SENDER_PUBKEY,
+      chainRecipient: FIXTURE_EVM_RECIPIENT,
       rumor: makeRumor(),
     });
 
@@ -120,6 +128,7 @@ describe('MultiChainClaimIssuer (Story 12.4 AC-6, AC-8, AC-10)', () => {
       targetAmount: 50n,
       pair: PAIR_USDC_TO_ETH,
       senderPubkey: SENDER_PUBKEY,
+      chainRecipient: FIXTURE_EVM_RECIPIENT,
       rumor: makeRumor(),
     });
 
@@ -157,6 +166,7 @@ describe('MultiChainClaimIssuer (Story 12.4 AC-6, AC-8, AC-10)', () => {
         targetAmount: 100n,
         pair: PAIR_USDC_TO_ETH,
         senderPubkey: SENDER_PUBKEY,
+        chainRecipient: FIXTURE_EVM_RECIPIENT,
         rumor: makeRumor(),
       })
     ).rejects.toMatchObject({
@@ -186,6 +196,7 @@ describe('MultiChainClaimIssuer (Story 12.4 AC-6, AC-8, AC-10)', () => {
         targetAmount: 50n,
         pair: PAIR_USDC_TO_ETH,
         senderPubkey: SENDER_PUBKEY,
+        chainRecipient: FIXTURE_EVM_RECIPIENT,
         rumor: makeRumor(),
       })
     ).rejects.toMatchObject({
@@ -229,6 +240,7 @@ describe('MultiChainClaimIssuer (Story 12.4 AC-6, AC-8, AC-10)', () => {
         targetAmount: 50n,
         pair: PAIR_USDC_TO_ETH,
         senderPubkey: SENDER_PUBKEY,
+        chainRecipient: FIXTURE_EVM_RECIPIENT,
         rumor: makeRumor(),
       })
     ).rejects.toMatchObject({
@@ -275,6 +287,7 @@ describe('MultiChainClaimIssuer (Story 12.4 AC-6, AC-8, AC-10)', () => {
           targetAmount: per,
           pair: PAIR_USDC_TO_ETH,
           senderPubkey: SENDER_PUBKEY,
+          chainRecipient: FIXTURE_EVM_RECIPIENT,
           rumor: makeRumor(),
         })
       )
@@ -336,6 +349,7 @@ describe('MultiChainClaimIssuer (Story 12.4 AC-6, AC-8, AC-10)', () => {
       targetAmount: 50n,
       pair: PAIR_USDC_TO_ETH,
       senderPubkey: SENDER_PUBKEY,
+      chainRecipient: FIXTURE_EVM_RECIPIENT,
       rumor: makeRumor(),
     });
     const r2 = await issuer.issueClaim({
@@ -343,6 +357,7 @@ describe('MultiChainClaimIssuer (Story 12.4 AC-6, AC-8, AC-10)', () => {
       targetAmount: 50n,
       pair: PAIR_USDC_TO_ETH,
       senderPubkey: SENDER_PUBKEY,
+      chainRecipient: FIXTURE_EVM_RECIPIENT,
       rumor: makeRumor(),
     });
 
@@ -384,6 +399,7 @@ describe('MultiChainClaimIssuer (Story 12.4 AC-6, AC-8, AC-10)', () => {
         targetAmount: 50n,
         pair: PAIR_USDC_TO_ETH,
         senderPubkey: SENDER_PUBKEY,
+        chainRecipient: FIXTURE_EVM_RECIPIENT,
         rumor: makeRumor(),
       })
     ).rejects.toMatchObject({
@@ -427,6 +443,7 @@ describe('MultiChainClaimIssuer (Story 12.4 AC-6, AC-8, AC-10)', () => {
       targetAmount: 10n,
       pair: PAIR_USDC_TO_ETH,
       senderPubkey: SENDER_PUBKEY,
+      chainRecipient: FIXTURE_EVM_RECIPIENT,
       rumor: makeRumor(),
     });
     expect(typeof result.claimId).toBe('string');
@@ -479,6 +496,7 @@ describe('MultiChainClaimIssuer (Story 12.4 AC-6, AC-8, AC-10)', () => {
       targetAmount: 50n,
       pair: PAIR_USDC_TO_ETH,
       senderPubkey: SENDER_PUBKEY,
+      chainRecipient: FIXTURE_EVM_RECIPIENT,
       rumor: makeRumor(),
     });
     expect(result.claim).toBeInstanceOf(Uint8Array);
@@ -538,6 +556,7 @@ describe('Story 12.6 AC-3 — IssueClaimResult settlement-context fields', () =>
       targetAmount: 50n,
       pair: PAIR_USDC_TO_ETH,
       senderPubkey: SENDER_PUBKEY,
+      chainRecipient: FIXTURE_EVM_RECIPIENT,
       rumor: makeRumor(),
     });
 
@@ -548,8 +567,11 @@ describe('Story 12.6 AC-3 — IssueClaimResult settlement-context fields', () =>
     expect(typeof result.nonce).toBe('bigint');
     expect(result.cumulativeAmount).toBe(50n);
     expect(typeof result.cumulativeAmount).toBe('bigint');
-    // Recipient = the sender's pubkey (who will receive settlement funds).
-    expect(result.recipient).toBe(SENDER_PUBKEY);
+    // Story 12.9 AC-12: recipient = the sender's CHAIN-LAYER payout address
+    // (e.g., 20-byte EVM), NOT the Nostr identity key. Pre-12.9 this assertion
+    // incorrectly expected SENDER_PUBKEY, which was the defect that blocked
+    // Story 12.8 session 3.
+    expect(result.recipient).toBe(FIXTURE_EVM_RECIPIENT);
     // Mill signer address threaded through from config.
     expect(result.millSignerAddress).toBe(EVM_MILL_SIGNER);
   });
@@ -580,6 +602,7 @@ describe('Story 12.6 AC-3 — IssueClaimResult settlement-context fields', () =>
       targetAmount: 30n,
       pair: PAIR_USDC_TO_ETH,
       senderPubkey: SENDER_PUBKEY,
+      chainRecipient: FIXTURE_EVM_RECIPIENT,
       rumor: makeRumor(),
     });
     const r2 = await issuer.issueClaim({
@@ -587,6 +610,7 @@ describe('Story 12.6 AC-3 — IssueClaimResult settlement-context fields', () =>
       targetAmount: 20n,
       pair: PAIR_USDC_TO_ETH,
       senderPubkey: SENDER_PUBKEY,
+      chainRecipient: FIXTURE_EVM_RECIPIENT,
       rumor: makeRumor(),
     });
 
@@ -627,6 +651,7 @@ describe('Story 12.6 AC-3 — IssueClaimResult settlement-context fields', () =>
       targetAmount: 50n,
       pair: PAIR_USDC_TO_ETH,
       senderPubkey: SENDER_PUBKEY,
+      chainRecipient: FIXTURE_EVM_RECIPIENT,
       rumor: makeRumor(),
     });
 
@@ -668,6 +693,7 @@ describe('Story 12.6 AC-3 — IssueClaimResult settlement-context fields', () =>
       targetAmount: 50n,
       pair: PAIR_USDC_TO_ETH,
       senderPubkey: SENDER_PUBKEY,
+      chainRecipient: FIXTURE_EVM_RECIPIENT,
       rumor: makeRumor(),
     });
 
@@ -677,5 +703,196 @@ describe('Story 12.6 AC-3 — IssueClaimResult settlement-context fields', () =>
     expect(result.nonce).toBeUndefined();
     expect(result.cumulativeAmount).toBeUndefined();
     expect(result.recipient).toBeUndefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Story 12.9 AC-11, AC-12, AC-16 — chain-recipient threading through to the
+// balance-proof signer. Reproduces the Story 12.8 session-3 defect in RED
+// form: the signer MUST receive the 20-byte `chainRecipient`, NOT the 32-byte
+// Nostr `senderPubkey`. Identity-layer keys (inventory / channel-state) stay
+// keyed on `senderPubkey` (guardrail 8.3).
+// ---------------------------------------------------------------------------
+
+describe('Story 12.9 — chain-recipient threading to signBalanceProof', () => {
+  const EVM_MILL_SIGNER_FOR_SETTLEMENT = '0x' + 'c'.repeat(40);
+  const CHAIN = 'evm:base:8453';
+
+  function buildIssuer(opts?: {
+    signBalanceProof?: (arg: unknown) => Promise<Uint8Array>;
+    withSettlementAddresses?: boolean;
+  }): {
+    issuer: MultiChainClaimIssuer;
+    signer: {
+      signBalanceProof: ReturnType<typeof vi.fn>;
+    };
+    inventory: MillInventory;
+    channelState: MillChannelState;
+  } {
+    const inventory = new MillInventory({
+      balances: { 'ETH:evm:base:8453': { available: 1_000n, total: 1_000n } },
+    });
+    const channelState = new MillChannelState({
+      channels: {
+        [`ETH:evm:base:8453:${SENDER_PUBKEY}`]: {
+          channelId: '0xchan12_9',
+          cumulativeAmount: 0n,
+          nonce: 0n,
+          updatedAt: 0,
+        },
+      },
+    });
+    const signBalanceProof = vi.fn(
+      opts?.signBalanceProof ?? (async () => new Uint8Array([0xde, 0xad]))
+    );
+    const signer = {
+      chain: CHAIN,
+      chainKind: 'evm' as const,
+      signBalanceProof,
+    };
+    const issuer = new MultiChainClaimIssuer({
+      inventory,
+      signers: { [CHAIN]: signer },
+      channelState,
+      ...(opts?.withSettlementAddresses === true
+        ? {
+            signerAddresses: { [CHAIN]: EVM_MILL_SIGNER_FOR_SETTLEMENT },
+          }
+        : {}),
+    });
+    return { issuer, signer, inventory, channelState };
+  }
+
+  it('[P0] T-10: signer receives 20-byte chainRecipient, NOT 32-byte senderPubkey (AC-11, AC-16a)', async () => {
+    const { issuer, signer } = buildIssuer();
+    await issuer.issueClaim({
+      sourceAmount: 100_000n,
+      targetAmount: 50n,
+      pair: PAIR_USDC_TO_ETH,
+      senderPubkey: SENDER_PUBKEY,
+      chainRecipient: FIXTURE_EVM_RECIPIENT,
+      rumor: makeRumor(),
+    });
+    expect(signer.signBalanceProof).toHaveBeenCalledTimes(1);
+    const arg = signer.signBalanceProof.mock.calls[0]![0] as {
+      recipient: string;
+    };
+    expect(arg.recipient).toBe(FIXTURE_EVM_RECIPIENT);
+    // Critical: MUST NOT be the 32-byte Nostr identity key. That was the defect.
+    expect(arg.recipient).not.toBe(SENDER_PUBKEY);
+    // And format-check: 20-byte lowercased 0x-prefixed hex.
+    expect(arg.recipient).toMatch(/^0x[0-9a-f]{40}$/);
+  });
+
+  it('[P1] T-11: IssueClaimResult.recipient echoes chainRecipient when settlement context is emitted (AC-12, AC-16b)', async () => {
+    const { issuer } = buildIssuer({ withSettlementAddresses: true });
+    const result = await issuer.issueClaim({
+      sourceAmount: 100_000n,
+      targetAmount: 50n,
+      pair: PAIR_USDC_TO_ETH,
+      senderPubkey: SENDER_PUBKEY,
+      chainRecipient: FIXTURE_EVM_RECIPIENT,
+      rumor: makeRumor(),
+    });
+    expect(result.recipient).toBe(FIXTURE_EVM_RECIPIENT);
+    expect(result.recipient).not.toBe(SENDER_PUBKEY);
+  });
+
+  it('[P1] T-12: signer throw still releases reserve + re-credits inventory (AC-16c, guardrail 8.3)', async () => {
+    const { issuer, channelState, inventory } = buildIssuer({
+      signBalanceProof: async () => {
+        throw new Error('signer boom');
+      },
+    });
+    await expect(
+      issuer.issueClaim({
+        sourceAmount: 1n,
+        targetAmount: 50n,
+        pair: PAIR_USDC_TO_ETH,
+        senderPubkey: SENDER_PUBKEY,
+        chainRecipient: FIXTURE_EVM_RECIPIENT,
+        rumor: makeRumor(),
+      })
+    ).rejects.toMatchObject({
+      name: 'MillWalletError',
+      code: 'SIGNING_FAILED',
+    });
+    // Inventory re-credited.
+    expect(inventory.get('ETH', CHAIN)!.available).toBe(1_000n);
+    // Channel state rolled back (nonce + cumulativeAmount restored to pre-reserve).
+    // This is the sender→channel sticky binding keyed on `senderPubkey`
+    // (identity-layer), NOT on `chainRecipient`.
+    const entry = channelState.get({
+      assetCode: 'ETH',
+      chain: CHAIN,
+      senderPubkey: SENDER_PUBKEY,
+    });
+    expect(entry!.nonce).toBe(0n);
+    expect(entry!.cumulativeAmount).toBe(0n);
+  });
+
+  it('[P2] T-13: inventory + channel-state still keyed by senderPubkey, NOT chainRecipient (guardrail 8.3)', async () => {
+    // Reserve spy: the first argument of channelState.reserve MUST carry
+    // the Nostr senderPubkey. If Story 12.9 regressed and rekeyed on
+    // chainRecipient, this would fail.
+    const { issuer, channelState } = buildIssuer();
+    const reserveSpy = vi.spyOn(channelState, 'reserve');
+    await issuer.issueClaim({
+      sourceAmount: 100_000n,
+      targetAmount: 50n,
+      pair: PAIR_USDC_TO_ETH,
+      senderPubkey: SENDER_PUBKEY,
+      chainRecipient: FIXTURE_EVM_RECIPIENT,
+      rumor: makeRumor(),
+    });
+    expect(reserveSpy).toHaveBeenCalledTimes(1);
+    const reserveArg = reserveSpy.mock.calls[0]![0] as {
+      senderPubkey: string;
+    };
+    expect(reserveArg.senderPubkey).toBe(SENDER_PUBKEY);
+    expect(reserveArg.senderPubkey).not.toBe(FIXTURE_EVM_RECIPIENT);
+  });
+
+  it('[P1] T-14: malformed chainRecipient is rejected at claim-issuer boundary BEFORE any state mutation (AC-2 third tier)', async () => {
+    // Story 12.9 code-review pass #3: AC-2 codifies a THREE-tier validation
+    // regime (sender / handler / claim-issuer). This test guards the third
+    // tier: a malformed `chainRecipient` reaching the claim-issuer (e.g., a
+    // direct caller that bypassed the swap-handler) MUST be rejected with
+    // MillWalletError('SIGNING_FAILED') BEFORE any inventory debit or
+    // channel reservation occurs (no rollback needed because no state
+    // change yet).
+    const { issuer, signer, inventory, channelState } = buildIssuer();
+    const reserveSpy = vi.spyOn(channelState, 'reserve');
+    const debitSpy = vi.spyOn(inventory, 'debit');
+    await expect(
+      issuer.issueClaim({
+        sourceAmount: 100_000n,
+        targetAmount: 50n,
+        pair: PAIR_USDC_TO_ETH,
+        senderPubkey: SENDER_PUBKEY,
+        // Not 20 bytes; this is the Nostr pubkey shape (32 bytes / 64 hex
+        // chars). This is precisely the Story 12.8 defect value; the
+        // claim-issuer boundary MUST now reject it.
+        chainRecipient: SENDER_PUBKEY,
+        rumor: makeRumor(),
+      })
+    ).rejects.toThrow(/missing or malformed/);
+    // Pre-debit rejection: signer, inventory debit, and channelState.reserve
+    // MUST NOT have been called.
+    expect(signer.signBalanceProof).not.toHaveBeenCalled();
+    expect(debitSpy).not.toHaveBeenCalled();
+    expect(reserveSpy).not.toHaveBeenCalled();
+    // And the error class is the MillWalletError('SIGNING_FAILED') family so
+    // the Story 12.3 swap-handler can map it to ILP T00.
+    await expect(
+      issuer.issueClaim({
+        sourceAmount: 100_000n,
+        targetAmount: 50n,
+        pair: PAIR_USDC_TO_ETH,
+        senderPubkey: SENDER_PUBKEY,
+        chainRecipient: SENDER_PUBKEY,
+        rumor: makeRumor(),
+      })
+    ).rejects.toBeInstanceOf(MillWalletError);
   });
 });

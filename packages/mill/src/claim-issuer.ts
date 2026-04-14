@@ -18,6 +18,50 @@ import type { MillChannelState, Reservation } from './channel-state.js';
 import type { PaymentChannelSigner } from './payment-channel-signer.js';
 import { MillWalletError } from './errors.js';
 
+// ---------------------------------------------------------------------------
+// Story 12.9 AC-2 — claim-issuer (pre-sign) chain-recipient validation
+// ---------------------------------------------------------------------------
+//
+// AC-2 requires that `chainRecipient` be validated against `pair.to.chain` at
+// THREE boundaries: sender (pre-send), swap-handler (post-unwrap), and
+// claim-issuer (pre-sign). The sender and handler already do this; this
+// block adds the third boundary as defense-in-depth, guarding against:
+//   - future non-EVM signers (Solana, Mina) that may not enforce shape;
+//   - direct callers of `MultiChainClaimIssuer.issueClaim()` that bypass the
+//     swap-handler (e.g., unit tests, internal Mill integrations);
+//   - any downstream regression that silently relaxes handler-side validation.
+//
+// Rules MUST stay byte-for-byte in sync with
+// `validateChainAddress(value, chain, 'address')` in
+// `packages/sdk/src/stream-swap.ts` and `validateChainRecipient()` in
+// `packages/sdk/src/swap-handler.ts` (guardrail 8.5).
+
+const CLAIM_ISSUER_EVM_ADDRESS_REGEX = /^0x[0-9a-f]{40}$/;
+const CLAIM_ISSUER_BASE58_REGEX = /^[1-9A-HJ-NP-Za-km-z]+$/;
+
+function validateClaimIssuerChainRecipient(
+  value: string,
+  chain: string
+): boolean {
+  if (typeof value !== 'string' || value.length === 0) return false;
+  if (chain.startsWith('evm:')) {
+    return CLAIM_ISSUER_EVM_ADDRESS_REGEX.test(value);
+  }
+  if (chain.startsWith('solana:')) {
+    // Shape-only (regex + length) at the claim-issuer boundary. A full
+    // base58-decode check already runs at sender + handler; we deliberately
+    // do NOT add a base58 dep to the mill package for this third tier.
+    if (!CLAIM_ISSUER_BASE58_REGEX.test(value)) return false;
+    return value.length >= 32 && value.length <= 44;
+  }
+  if (chain.startsWith('mina:')) {
+    return CLAIM_ISSUER_BASE58_REGEX.test(value) && value.length >= 32;
+  }
+  // Unknown chain: permit non-empty; the signer lookup below will surface
+  // UNSUPPORTED_CHAIN before any signing actually happens.
+  return value.length > 0;
+}
+
 export interface MillClaimIssuerLogger {
   debug?: (...a: unknown[]) => void;
   info?: (...a: unknown[]) => void;
@@ -97,7 +141,7 @@ export class MultiChainClaimIssuer implements ClaimIssuer {
   }
 
   async issueClaim(params: IssueClaimParams): Promise<IssueClaimResult> {
-    const { pair, senderPubkey, targetAmount } = params;
+    const { pair, senderPubkey, chainRecipient, targetAmount } = params;
     const targetChain = pair.to.chain;
     const targetAsset = pair.to.assetCode;
 
@@ -107,6 +151,21 @@ export class MultiChainClaimIssuer implements ClaimIssuer {
       throw new MillWalletError(
         'UNSUPPORTED_CHAIN',
         `No signer for chain: ${targetChain}`
+      );
+    }
+
+    // Story 12.9 AC-2 (claim-issuer boundary): validate `chainRecipient`
+    // format against `pair.to.chain` BEFORE any inventory debit or channel
+    // reservation so a malformed value cannot leak state changes. Third
+    // defensive tier; sender + handler already validate. No inventory
+    // rollback is needed because this runs before the debit.
+    if (
+      typeof chainRecipient !== 'string' ||
+      !validateClaimIssuerChainRecipient(chainRecipient, targetChain)
+    ) {
+      throw new MillWalletError(
+        'SIGNING_FAILED',
+        `chainRecipient is missing or malformed for chain ${targetChain}`
       );
     }
 
@@ -132,11 +191,17 @@ export class MultiChainClaimIssuer implements ClaimIssuer {
     // 4. Sign the balance proof. On throw, reverse inventory + channel state.
     let claim: Uint8Array;
     try {
+      // Story 12.9 AC-11: the balance-proof `recipient` is the sender's
+      // chain-specific payout address (e.g., 20-byte EVM address), NOT the
+      // 32-byte Nostr `senderPubkey`. The EVM signer enforces the 20-byte
+      // shape; passing `senderPubkey` caused the Story 12.8 schema-drift
+      // blocker. `senderPubkey` remains in use below for inventory and
+      // channel-state keying — that binding is identity-layer and unchanged.
       claim = await signer.signBalanceProof({
         channelId: reservation.channelId,
         cumulativeAmount: reservation.cumulativeAmount,
         nonce: reservation.nonce,
-        recipient: senderPubkey,
+        recipient: chainRecipient,
       });
     } catch (err) {
       this.inventory.credit(targetAsset, targetChain, targetAmount);
@@ -175,7 +240,10 @@ export class MultiChainClaimIssuer implements ClaimIssuer {
       result.channelId = reservation.channelId;
       result.nonce = reservation.nonce;
       result.cumulativeAmount = reservation.cumulativeAmount;
-      result.recipient = senderPubkey;
+      // Story 12.9 AC-12: echo the sender-supplied chain-layer payout
+      // address, not the Nostr identity key. The sender's AC-7 equality
+      // check asserts `metadata.recipient === params.chainRecipient`.
+      result.recipient = chainRecipient;
       result.millSignerAddress = millSignerAddress;
     }
     return result;

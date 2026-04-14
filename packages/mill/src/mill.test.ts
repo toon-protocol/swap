@@ -555,7 +555,9 @@ describe('Story 12.8 AC-11 — auto-create embedded ConnectorNode', () => {
     try {
       expect(instance.connector).toBeDefined();
       // Distinct from operator-supplied fake (which has `_calls`).
-      expect((instance.connector as { _calls?: unknown })._calls).toBeUndefined();
+      expect(
+        (instance.connector as { _calls?: unknown })._calls
+      ).toBeUndefined();
     } finally {
       await instance.stop();
     }
