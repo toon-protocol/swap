@@ -22,7 +22,9 @@
     "build": "tsup",
     "dev": "tsup --watch",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "test:integration": "vitest run --config vitest.integration.config.ts",
+    "test:integration:anvil": "vitest run --config vitest.integration.config.ts tests/integration/swap-flow-anvil.integration.test.ts"
   },
   "keywords": [
     "toon",
