@@ -8,9 +8,18 @@
 
 import { secp256k1 } from '@noble/curves/secp256k1.js';
 import { ed25519 } from '@noble/curves/ed25519.js';
-import { keccak_256 } from '@noble/hashes/sha3.js';
 import { sha256 } from '@noble/hashes/sha2.js';
-import { bytesToHex, hexToBytes as nobleHexToBytes } from '@noble/hashes/utils.js';
+import { bytesToHex } from '@noble/hashes/utils.js';
+
+// Story 12.6 AC-6: balance-proof hashes moved to @toon-protocol/sdk so the
+// Mill-side signer and the sender-side verifier share a single source of truth.
+import {
+  balanceProofHashEvm,
+  balanceProofHashSolana,
+  bigintToBytes32BE,
+  concatBytes,
+  hexToBytes,
+} from '@toon-protocol/sdk';
 
 import type { MillChainKind } from './wallet.js';
 import { MillWalletError } from './errors.js';
@@ -29,87 +38,6 @@ export interface PaymentChannelSigner {
 }
 
 // ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-function hexToBytes(hex: string): Uint8Array {
-  const clean = hex.startsWith('0x') ? hex.slice(2) : hex;
-  if (clean.length % 2 !== 0 || !/^[0-9a-fA-F]*$/.test(clean)) {
-    throw new Error(`Invalid hex string: ${hex}`);
-  }
-  // Delegate the actual byte decoding to @noble/hashes/utils so we share the
-  // workspace's audited hex decoder rather than hand-rolling `parseInt`.
-  return nobleHexToBytes(clean);
-}
-
-function bigintToBytes32BE(x: bigint): Uint8Array {
-  if (x < 0n) {
-    throw new Error('bigint must be non-negative for balance-proof encoding');
-  }
-  const out = new Uint8Array(32);
-  let v = x;
-  for (let i = 31; i >= 0; i--) {
-    out[i] = Number(v & 0xffn);
-    v >>= 8n;
-  }
-  if (v !== 0n) {
-    throw new Error('bigint exceeds 256 bits');
-  }
-  return out;
-}
-
-function concat(...parts: Uint8Array[]): Uint8Array {
-  let len = 0;
-  for (const p of parts) len += p.length;
-  const out = new Uint8Array(len);
-  let o = 0;
-  for (const p of parts) {
-    out.set(p, o);
-    o += p.length;
-  }
-  return out;
-}
-
-/**
- * Compute the EVM balance-proof message hash:
- *   keccak256(channelId || cumulativeAmount(32BE) || nonce(32BE) || recipient)
- * `channelId` and `recipient` are decoded hex bytes (hex inputs validated
- * by `hexToBytes`). Solana uses a separate `balanceProofHashSolana` helper
- * with sha256 + UTF-8 encoding — see below.
- */
-function balanceProofHashEvm(
-  channelIdBytes: Uint8Array,
-  cumulativeAmount: bigint,
-  nonce: bigint,
-  recipientBytes: Uint8Array
-): Uint8Array {
-  return keccak_256(
-    concat(
-      channelIdBytes,
-      bigintToBytes32BE(cumulativeAmount),
-      bigintToBytes32BE(nonce),
-      recipientBytes
-    )
-  );
-}
-
-function balanceProofHashSolana(
-  channelId: string,
-  cumulativeAmount: bigint,
-  nonce: bigint,
-  recipient: string
-): Uint8Array {
-  return sha256(
-    concat(
-      new TextEncoder().encode(channelId),
-      bigintToBytes32BE(cumulativeAmount),
-      bigintToBytes32BE(nonce),
-      new TextEncoder().encode(recipient)
-    )
-  );
-}
-
-// ---------------------------------------------------------------------------
 // EvmPaymentChannelSigner
 // ---------------------------------------------------------------------------
 
@@ -124,7 +52,10 @@ export class EvmPaymentChannelSigner implements PaymentChannelSigner {
   private readonly privateKey: Uint8Array;
 
   constructor(cfg: EvmPaymentChannelSignerConfig) {
-    if (!(cfg.privateKey instanceof Uint8Array) || cfg.privateKey.length !== 32) {
+    if (
+      !(cfg.privateKey instanceof Uint8Array) ||
+      cfg.privateKey.length !== 32
+    ) {
       throw new MillWalletError(
         'SIGNING_FAILED',
         `EVM signer requires a 32-byte secp256k1 private key (got ${
@@ -167,10 +98,7 @@ export class EvmPaymentChannelSigner implements PaymentChannelSigner {
         prehash: false,
         format: 'recovered',
       });
-      const sigObj = secp256k1.Signature.fromBytes(
-        recoveredBytes,
-        'recovered'
-      );
+      const sigObj = secp256k1.Signature.fromBytes(recoveredBytes, 'recovered');
       const compact = sigObj.toBytes('compact'); // 64 bytes: r||s
       if (compact.length !== 64) {
         throw new Error(
@@ -287,7 +215,7 @@ export class MinaPaymentChannelSigner implements PaymentChannelSigner {
       // runs ONLY when `mina-signer` is absent (optional peer dep). The
       // fallback keeps unit tests self-contained without the peer dep.
       // Story 12.8 E2E installs the peer and exercises the real signer.
-      const msg = concat(
+      const msg = concatBytes(
         new TextEncoder().encode(this.privateKey),
         new TextEncoder().encode(this.publicKey),
         bigintToBytes32BE(params.cumulativeAmount),
@@ -321,7 +249,10 @@ export class SolanaPaymentChannelSigner implements PaymentChannelSigner {
   private readonly privateKey: Uint8Array;
 
   constructor(cfg: SolanaPaymentChannelSignerConfig) {
-    if (!(cfg.privateKey instanceof Uint8Array) || cfg.privateKey.length !== 32) {
+    if (
+      !(cfg.privateKey instanceof Uint8Array) ||
+      cfg.privateKey.length !== 32
+    ) {
       throw new MillWalletError(
         'SIGNING_FAILED',
         `Solana signer requires a 32-byte Ed25519 seed (got ${

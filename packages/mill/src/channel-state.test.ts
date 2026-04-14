@@ -103,9 +103,7 @@ describe('MillChannelState — per-channel nonce + cumulativeAmount (Story 12.4 
 
   it('[P1] release on an unprovisioned channel is a no-op (does not throw)', () => {
     const cs = new MillChannelState({ channels: {} });
-    expect(() =>
-      cs.release({ ...KEY, cumulativeDelta: 1n })
-    ).not.toThrow();
+    expect(() => cs.release({ ...KEY, cumulativeDelta: 1n })).not.toThrow();
   });
 
   it('[P1] release is a no-op when it would drive nonce negative (best-effort reversal)', () => {

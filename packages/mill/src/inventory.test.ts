@@ -189,9 +189,9 @@ describe('MillInventory — in-memory per-pair reserves (Story 12.4 AC-4)', () =
       expect((err as MillInventoryError).code).toBe('UNKNOWN_PAIR');
     }
     // state unchanged
-    expect(
-      inv.get(USDC_EVM_BASE.asset, USDC_EVM_BASE.chain)!.available
-    ).toBe(100n);
+    expect(inv.get(USDC_EVM_BASE.asset, USDC_EVM_BASE.chain)!.available).toBe(
+      100n
+    );
   });
 
   it('[P1] get() returns null for uninitialized pair', () => {
@@ -211,21 +211,21 @@ describe('MillInventory — in-memory per-pair reserves (Story 12.4 AC-4)', () =
       clock: () => now,
     });
     // init timestamp is from clock
-    expect(
-      inv.get(USDC_EVM_BASE.asset, USDC_EVM_BASE.chain)!.updatedAt
-    ).toBe(1_000);
+    expect(inv.get(USDC_EVM_BASE.asset, USDC_EVM_BASE.chain)!.updatedAt).toBe(
+      1_000
+    );
 
     now = 2_500;
     inv.debit(USDC_EVM_BASE.asset, USDC_EVM_BASE.chain, 10n);
-    expect(
-      inv.get(USDC_EVM_BASE.asset, USDC_EVM_BASE.chain)!.updatedAt
-    ).toBe(2_500);
+    expect(inv.get(USDC_EVM_BASE.asset, USDC_EVM_BASE.chain)!.updatedAt).toBe(
+      2_500
+    );
 
     now = 4_000;
     inv.credit(USDC_EVM_BASE.asset, USDC_EVM_BASE.chain, 5n);
-    expect(
-      inv.get(USDC_EVM_BASE.asset, USDC_EVM_BASE.chain)!.updatedAt
-    ).toBe(4_000);
+    expect(inv.get(USDC_EVM_BASE.asset, USDC_EVM_BASE.chain)!.updatedAt).toBe(
+      4_000
+    );
   });
 
   it('[P2] snapshot round-trips asset/chain parsing even when chain contains colons (e.g. evm:base:8453)', () => {

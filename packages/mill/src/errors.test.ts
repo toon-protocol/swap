@@ -31,10 +31,7 @@ describe('MillInventoryError contract (Story 12.4 AC-2)', () => {
   });
 
   it('[P1] accepts "UNKNOWN_PAIR" code literal', () => {
-    const err = new MillInventoryError(
-      'UNKNOWN_PAIR',
-      'Pair not advertised'
-    );
+    const err = new MillInventoryError('UNKNOWN_PAIR', 'Pair not advertised');
     expect(err.code).toBe('UNKNOWN_PAIR');
   });
 
@@ -48,11 +45,9 @@ describe('MillInventoryError contract (Story 12.4 AC-2)', () => {
 
   it('[P2] preserves ES2022 `cause` option', () => {
     const root = new Error('root');
-    const err = new MillInventoryError(
-      'INSUFFICIENT_INVENTORY',
-      'wrapped',
-      { cause: root }
-    );
+    const err = new MillInventoryError('INSUFFICIENT_INVENTORY', 'wrapped', {
+      cause: root,
+    });
     expect((err as { cause?: unknown }).cause).toBe(root);
   });
 });

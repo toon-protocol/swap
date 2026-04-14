@@ -31,6 +31,16 @@ export interface MultiChainClaimIssuerConfig {
   channelState: MillChannelState;
   logger?: MillClaimIssuerLogger;
   newClaimId?: () => string;
+  /**
+   * Per-chain on-chain signer addresses. Keyed by target-chain string (e.g.
+   * `'evm:base:8453'`). Required for Story 12.6 settlement-context metadata
+   * in the FULFILL path so the sender can verify claims against the correct
+   * Mill signer address.
+   *
+   * TODO(12.7): `startMill()` will populate this from the derived wallet.
+   * Until then, callers must supply the map explicitly.
+   */
+  signerAddresses?: Record<string, string>;
 }
 
 export class MultiChainClaimIssuer implements ClaimIssuer {
@@ -39,6 +49,7 @@ export class MultiChainClaimIssuer implements ClaimIssuer {
   private readonly channelState: MillChannelState;
   private readonly logger?: MillClaimIssuerLogger;
   private readonly newClaimId: () => string;
+  private readonly signerAddresses: Record<string, string>;
 
   constructor(config: MultiChainClaimIssuerConfig) {
     // Constructor-time config validation uses INVALID_CONFIG so it does not
@@ -67,6 +78,7 @@ export class MultiChainClaimIssuer implements ClaimIssuer {
     this.signers = config.signers;
     this.channelState = config.channelState;
     this.logger = config.logger;
+    this.signerAddresses = config.signerAddresses ?? {};
     this.newClaimId =
       config.newClaimId ??
       (() => {
@@ -153,6 +165,19 @@ export class MultiChainClaimIssuer implements ClaimIssuer {
       asset: targetAsset,
       nonce: reservation.nonce.toString(),
     });
-    return { claim, claimId };
+
+    // Story 12.6: include settlement-context fields when the caller has
+    // provided a signer-address map. Absent signer address = legacy caller,
+    // metadata stays in the pre-12.6 shape.
+    const result: IssueClaimResult = { claim, claimId };
+    const millSignerAddress = this.signerAddresses[targetChain];
+    if (millSignerAddress !== undefined) {
+      result.channelId = reservation.channelId;
+      result.nonce = reservation.nonce;
+      result.cumulativeAmount = reservation.cumulativeAmount;
+      result.recipient = senderPubkey;
+      result.millSignerAddress = millSignerAddress;
+    }
+    return result;
   }
 }

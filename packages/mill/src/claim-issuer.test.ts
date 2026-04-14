@@ -492,3 +492,190 @@ describe('MultiChainClaimIssuer (Story 12.4 AC-6, AC-8, AC-10)', () => {
     ).toBe(1n);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Story 12.6 AC-3 — settlement-context field round-trip from reservation
+// to IssueClaimResult.
+//
+// When the issuer is constructed with a `signerAddresses` map, every
+// `issueClaim()` result MUST expose channelId/nonce/cumulativeAmount/
+// recipient/millSignerAddress so the Mill's swap handler can emit them in
+// FULFILL metadata (the load-bearing contract for `buildSettlementTx()`).
+//
+// When `signerAddresses` is omitted (legacy caller), the result MUST stay in
+// the pre-12.6 shape ({ claim, claimId } only) — this is the "one story-cycle
+// of compatibility" AC-3 calls out.
+// ---------------------------------------------------------------------------
+
+describe('Story 12.6 AC-3 — IssueClaimResult settlement-context fields', () => {
+  const EVM_MILL_SIGNER = '0x' + 'c'.repeat(40);
+  const CHAIN = 'evm:base:8453';
+
+  it('[P0] surfaces channelId/nonce/cumulativeAmount/recipient/millSignerAddress when signerAddresses configured', async () => {
+    const inventory = new MillInventory({
+      balances: { 'ETH:evm:base:8453': { available: 1_000n, total: 1_000n } },
+    });
+    const channelState = new MillChannelState({
+      channels: {
+        [`ETH:evm:base:8453:${SENDER_PUBKEY}`]: {
+          channelId: '0xdeadbeef',
+          cumulativeAmount: 0n,
+          nonce: 0n,
+          updatedAt: 0,
+        },
+      },
+    });
+    const signer = makeMockSigner('evm');
+    const issuer = new MultiChainClaimIssuer({
+      inventory,
+      signers: { [CHAIN]: signer },
+      channelState,
+      signerAddresses: { [CHAIN]: EVM_MILL_SIGNER },
+    });
+
+    const result = await issuer.issueClaim({
+      sourceAmount: 100_000n,
+      targetAmount: 50n,
+      pair: PAIR_USDC_TO_ETH,
+      senderPubkey: SENDER_PUBKEY,
+      rumor: makeRumor(),
+    });
+
+    // channelId copied verbatim from the reservation.
+    expect(result.channelId).toBe('0xdeadbeef');
+    // First claim increments nonce to 1 and sets cumulativeAmount to delta.
+    expect(result.nonce).toBe(1n);
+    expect(typeof result.nonce).toBe('bigint');
+    expect(result.cumulativeAmount).toBe(50n);
+    expect(typeof result.cumulativeAmount).toBe('bigint');
+    // Recipient = the sender's pubkey (who will receive settlement funds).
+    expect(result.recipient).toBe(SENDER_PUBKEY);
+    // Mill signer address threaded through from config.
+    expect(result.millSignerAddress).toBe(EVM_MILL_SIGNER);
+  });
+
+  it('[P0] monotonically increments nonce + cumulativeAmount across two sequential claims', async () => {
+    const inventory = new MillInventory({
+      balances: { 'ETH:evm:base:8453': { available: 1_000n, total: 1_000n } },
+    });
+    const channelState = new MillChannelState({
+      channels: {
+        [`ETH:evm:base:8453:${SENDER_PUBKEY}`]: {
+          channelId: '0xchan2',
+          cumulativeAmount: 0n,
+          nonce: 0n,
+          updatedAt: 0,
+        },
+      },
+    });
+    const issuer = new MultiChainClaimIssuer({
+      inventory,
+      signers: { [CHAIN]: makeMockSigner('evm') },
+      channelState,
+      signerAddresses: { [CHAIN]: EVM_MILL_SIGNER },
+    });
+
+    const r1 = await issuer.issueClaim({
+      sourceAmount: 100_000n,
+      targetAmount: 30n,
+      pair: PAIR_USDC_TO_ETH,
+      senderPubkey: SENDER_PUBKEY,
+      rumor: makeRumor(),
+    });
+    const r2 = await issuer.issueClaim({
+      sourceAmount: 50_000n,
+      targetAmount: 20n,
+      pair: PAIR_USDC_TO_ETH,
+      senderPubkey: SENDER_PUBKEY,
+      rumor: makeRumor(),
+    });
+
+    expect(r1.nonce).toBe(1n);
+    expect(r1.cumulativeAmount).toBe(30n);
+    expect(r2.nonce).toBe(2n);
+    // Balance proofs are CUMULATIVE — total running balance, not per-packet.
+    expect(r2.cumulativeAmount).toBe(50n);
+    // channelId + recipient + millSignerAddress stable across claims.
+    expect(r2.channelId).toBe(r1.channelId);
+    expect(r2.recipient).toBe(r1.recipient);
+    expect(r2.millSignerAddress).toBe(r1.millSignerAddress);
+  });
+
+  it('[P0] omits all settlement fields when signerAddresses NOT configured (legacy shape)', async () => {
+    const inventory = new MillInventory({
+      balances: { 'ETH:evm:base:8453': { available: 1_000n, total: 1_000n } },
+    });
+    const channelState = new MillChannelState({
+      channels: {
+        [`ETH:evm:base:8453:${SENDER_PUBKEY}`]: {
+          channelId: '0xchan3',
+          cumulativeAmount: 0n,
+          nonce: 0n,
+          updatedAt: 0,
+        },
+      },
+    });
+    const issuer = new MultiChainClaimIssuer({
+      inventory,
+      signers: { [CHAIN]: makeMockSigner('evm') },
+      channelState,
+      // no signerAddresses -> legacy path
+    });
+
+    const result = await issuer.issueClaim({
+      sourceAmount: 100_000n,
+      targetAmount: 50n,
+      pair: PAIR_USDC_TO_ETH,
+      senderPubkey: SENDER_PUBKEY,
+      rumor: makeRumor(),
+    });
+
+    // Legacy shape: no settlement fields present.
+    expect(result.channelId).toBeUndefined();
+    expect(result.nonce).toBeUndefined();
+    expect(result.cumulativeAmount).toBeUndefined();
+    expect(result.recipient).toBeUndefined();
+    expect(result.millSignerAddress).toBeUndefined();
+    // But the base fields still work.
+    expect(result.claim).toBeInstanceOf(Uint8Array);
+    expect(typeof result.claimId).toBe('string');
+  });
+
+  it('[P1] omits settlement fields for a chain that has no entry in signerAddresses', async () => {
+    const inventory = new MillInventory({
+      balances: { 'ETH:evm:base:8453': { available: 1_000n, total: 1_000n } },
+    });
+    const channelState = new MillChannelState({
+      channels: {
+        [`ETH:evm:base:8453:${SENDER_PUBKEY}`]: {
+          channelId: '0xchan4',
+          cumulativeAmount: 0n,
+          nonce: 0n,
+          updatedAt: 0,
+        },
+      },
+    });
+    const issuer = new MultiChainClaimIssuer({
+      inventory,
+      signers: { [CHAIN]: makeMockSigner('evm') },
+      channelState,
+      // Map configured, but for a DIFFERENT chain.
+      signerAddresses: { 'solana:mainnet': 'So1111111' },
+    });
+
+    const result = await issuer.issueClaim({
+      sourceAmount: 100_000n,
+      targetAmount: 50n,
+      pair: PAIR_USDC_TO_ETH,
+      senderPubkey: SENDER_PUBKEY,
+      rumor: makeRumor(),
+    });
+
+    // Chain-specific miss -> legacy shape for this claim.
+    expect(result.millSignerAddress).toBeUndefined();
+    expect(result.channelId).toBeUndefined();
+    expect(result.nonce).toBeUndefined();
+    expect(result.cumulativeAmount).toBeUndefined();
+    expect(result.recipient).toBeUndefined();
+  });
+});
