@@ -24,9 +24,7 @@
 import {
   generateSecretKey,
   getPublicKey,
-  finalizeEvent,
 } from 'nostr-tools/pure';
-import type { UnsignedEvent, NostrEvent } from 'nostr-tools/pure';
 
 import {
   startMill,
@@ -57,10 +55,6 @@ export const ANVIL_CHAIN_ID = 31337;
 
 /** Anvil JSON-RPC URL used by the opt-in AC-9 suite. */
 export const ANVIL_URL = 'http://localhost:18545';
-
-/** Test-only channel id (valid EVM 0x + 64-hex shape). */
-export const FIXTURE_CHANNEL_ID =
-  '0x' + 'ab'.repeat(32); // 0xabab... (64 hex chars)
 
 /**
  * Default USDC→ETH swap pair on Anvil.
@@ -350,10 +344,3 @@ export async function deriveFixtureConnectorEvmAddress(): Promise<string> {
   return keys.evm.address.toLowerCase();
 }
 
-/** Helper: cast UnsignedEvent to NostrEvent (after signing). */
-export function signEvent(
-  event: UnsignedEvent,
-  secretKey: Uint8Array,
-): NostrEvent {
-  return finalizeEvent(event, secretKey);
-}
