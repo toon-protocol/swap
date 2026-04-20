@@ -47,6 +47,8 @@ interface CliRawConfig {
   ilpAddress?: string;
   btpEndpoint?: string;
   advertisedAsset?: { assetCode: string; assetScale: number };
+  // Ator/SOCKS5 transport overlay (Epic 35 integration).
+  transport?: { type: string; socksProxy?: string; externalUrl?: string; managed?: boolean; managedOptions?: Record<string, unknown> };
 }
 
 function toBigInt(v: unknown): bigint {
@@ -125,6 +127,7 @@ function parseRawConfig(raw: CliRawConfig): MillConfig {
   if (raw.ilpAddress) cfg.ilpAddress = raw.ilpAddress;
   if (raw.btpEndpoint) cfg.btpEndpoint = raw.btpEndpoint;
   if (raw.advertisedAsset) cfg.advertisedAsset = raw.advertisedAsset;
+  if (raw.transport) cfg.transport = raw.transport as MillConfig['transport'];
   return cfg;
 }
 

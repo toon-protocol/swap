@@ -63,3 +63,6 @@ export type { MillStartErrorCode } from './errors.js';
 // Convenience re-export for operators (Story 12.7 AC-1) — do not wrap.
 export { createSwapHandler } from '@toon-protocol/sdk';
 export type { CreateSwapHandlerConfig } from '@toon-protocol/sdk';
+
+// Re-export transport config from connector for convenience
+export type { TransportConfig } from '@toon-protocol/connector';

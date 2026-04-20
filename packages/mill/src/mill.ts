@@ -29,6 +29,7 @@ import {
   ConnectorNode,
   createLogger as createConnectorLogger,
 } from '@toon-protocol/connector';
+import type { TransportConfig } from '@toon-protocol/connector';
 
 import {
   HandlerRegistry,
@@ -136,6 +137,12 @@ export interface MillConfig {
    * and a Town can run side-by-side on one host without collision).
    */
   btpServerPort?: number;
+  /**
+   * Transport configuration for the auto-created embedded connector
+   * (ator/SOCKS5 privacy overlay). When provided, passed directly to
+   * ConnectorNode as `transport`. Ignored if `connector` is supplied.
+   */
+  transport?: TransportConfig;
   passphrase?: string;
   logger?: MillLogger;
 
@@ -593,16 +600,21 @@ export async function startMill(config: MillConfig): Promise<MillInstance> {
     const btpServerPort = config.btpServerPort;
     const connectorLogger = createConnectorLogger(nodeId, 'warn');
     try {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const connectorConfig: any = {
+        nodeId,
+        btpServerPort,
+        environment: 'development' as const,
+        deploymentMode: 'embedded' as const,
+        peers: [],
+        routes: [],
+        localDelivery: { enabled: false },
+      };
+      if (config.transport) {
+        connectorConfig.transport = config.transport;
+      }
       autoCreatedConnector = new ConnectorNode(
-        {
-          nodeId,
-          btpServerPort,
-          environment: 'development' as const,
-          deploymentMode: 'embedded' as const,
-          peers: [],
-          routes: [],
-          localDelivery: { enabled: false },
-        },
+        connectorConfig,
         connectorLogger
       );
       effectiveConnector =
