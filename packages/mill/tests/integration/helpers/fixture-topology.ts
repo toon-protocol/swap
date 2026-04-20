@@ -85,17 +85,13 @@ function makeFakeConnector(): FakeConnector {
   const c: FakeConnector = {
     _closed: false,
     // --- EmbeddableConnectorLike ---
-    // eslint-disable-next-line @typescript-eslint/no-unused-vars
     sendPacket: async (_params) => ({
       type: 'reject',
       code: 'F02',
       message: 'No route (fixture connector)',
     }),
-    // eslint-disable-next-line @typescript-eslint/no-unused-vars
     registerPeer: async (_params) => undefined,
-    // eslint-disable-next-line @typescript-eslint/no-unused-vars
     removePeer: async (_peerId) => undefined,
-    // eslint-disable-next-line @typescript-eslint/no-unused-vars
     setPacketHandler: (_h) => undefined,
     // Close is called by Mill.stop() when ownsConnector=true; here we don't
     // own it (we supply it explicitly), so this is only for test teardown.
