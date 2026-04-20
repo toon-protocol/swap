@@ -364,6 +364,7 @@ describe('Story 12.8 AC-12 — sender→channel sticky binding', () => {
     expect(bindings[`ETH:evm:31337:${SENDER_A}`]).toBeDefined();
     expect(bindings[`ETH:evm:31337:${SENDER_B}`]).toBeDefined();
     // Snapshot is defensive — mutating it does not affect internal state.
+    // eslint-disable-next-line @typescript-eslint/no-dynamic-delete
     delete bindings[`ETH:evm:31337:${SENDER_A}`];
     expect(Object.keys(cs.getBindings())).toHaveLength(2);
   });

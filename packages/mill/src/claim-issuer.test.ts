@@ -5,7 +5,7 @@
  * T-026 (concurrent issuance) + T-int-1 (structural compatibility with
  * createSwapHandler, AC-10) — test-design-epic-12 Story 12-4.
  */
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, type Mock } from 'vitest';
 import type { SwapPair } from '@toon-protocol/core';
 // Type-only — keeps this package from taking a runtime cycle on @toon-protocol/sdk.
 import type { ClaimIssuer } from '@toon-protocol/sdk';
@@ -724,7 +724,7 @@ describe('Story 12.9 — chain-recipient threading to signBalanceProof', () => {
   }): {
     issuer: MultiChainClaimIssuer;
     signer: {
-      signBalanceProof: ReturnType<typeof vi.fn>;
+      signBalanceProof: Mock<[arg: unknown], Promise<Uint8Array>>;
     };
     inventory: MillInventory;
     channelState: MillChannelState;

@@ -9,21 +9,26 @@
  *
  * ## Anvil account allocation (Task 1.4)
  *
- * The SDK E2E suite claims Anvil accounts **#3–#10** (see
- * `packages/sdk/tests/e2e/helpers/docker-e2e-setup.ts` TEST_PRIVATE_KEY
- * and friends). Mill E2E must pick disjoint accounts to avoid nonce
- * contention if both suites ever run in parallel on shared infra.
+ * The SDK E2E suite claims Anvil accounts **#3–#9** (plus 1 non-standard
+ * key outside the default Anvil set; see `docker-e2e-setup.ts`
+ * TEST_PRIVATE_KEY and friends). Mill E2E must pick disjoint accounts to
+ * avoid nonce contention if both suites ever run in parallel on shared infra.
+ *
+ * **Critical allocation constraints (from Story 12.10 v0.3 review):**
+ * - Account **#0** (`0xf39F...`) is peer1's `SETTLEMENT_PRIVATE_KEY` — DO NOT USE.
+ * - Account **#2** (`0x3C44...`) is peer2's `SETTLEMENT_PRIVATE_KEY` — DO NOT USE.
+ *   Using these as test sender keys causes nonce contention and settlement
+ *   assertion failures.
+ * - Accounts **#3–#9** are claimed by SDK E2E tests.
  *
  * Mill E2E uses:
- * - Anvil account **#1** — `MILL_E2E_EVM_SENDER_PRIVATE_KEY` (EVM-flow tests).
- * - Anvil account **#2** — `MILL_E2E_EVM_SENDER_PRIVATE_KEY_ALT` (pair-matrix
- *   alternate sender where a second EVM signer is needed).
+ * - Anvil account **#1** — `MILL_E2E_EVM_SENDER_PRIVATE_KEY` (the ONLY
+ *   unclaimed standard Anvil account). Sufficient if tests run serially
+ *   (enforced by `singleFork: true` in vitest config).
  *
- * Account #0 is Anvil's deployer and holds the full Mock USDC supply; do NOT
- * reuse it from tests. Accounts #3–#10 are SDK-claimed. If the Mill E2E
- * suite ever needs >2 concurrent EVM signers, switch to a one-time
- * `cast send` top-up of a fresh mnemonic-derived key at the top of the
- * suite rather than grabbing #11+ (the Anvil default fund is 10 accounts).
+ * If the Mill E2E suite ever needs >1 concurrent EVM signer, derive fresh
+ * keys from a test-local mnemonic and fund them with a one-time `cast send`
+ * at the top of the suite rather than grabbing claimed accounts.
  */
 
 export {
@@ -77,24 +82,20 @@ export {
 } from '../../../../sdk/tests/e2e/helpers/docker-e2e-setup.js';
 
 // ---------------------------------------------------------------------------
-// Mill-E2E-specific Anvil keys (disjoint from SDK E2E accounts #3–#10)
+// Mill-E2E-specific Anvil keys (disjoint from SDK E2E accounts #3–#9)
 // ---------------------------------------------------------------------------
 
-/** Anvil account #1 — EVM swap-flow sender for Mill E2E tests. */
+/**
+ * Anvil account #1 — the ONLY unclaimed standard Anvil account available
+ * for Mill E2E tests. Account #0 is peer1's settlement key, account #2 is
+ * peer2's settlement key, and accounts #3-#9 are claimed by SDK E2E tests.
+ */
 export const MILL_E2E_EVM_SENDER_PRIVATE_KEY =
   '0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d' as const;
 
 /** Anvil account #1 address (derived, hardcoded for cheap lookup). */
 export const MILL_E2E_EVM_SENDER_ADDRESS =
   '0x70997970C51812dc3A010C7d01b50e0d17dc79C8' as const;
-
-/** Anvil account #2 — alternate EVM sender for pair-matrix scenarios. */
-export const MILL_E2E_EVM_SENDER_PRIVATE_KEY_ALT =
-  '0x5de4111afa1a4b94908f83103eb1f1706367c2e68ca870fc3fb9a804cdab365a' as const;
-
-/** Anvil account #2 address. */
-export const MILL_E2E_EVM_SENDER_ADDRESS_ALT =
-  '0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC' as const;
 
 // ---------------------------------------------------------------------------
 // Chain-string constants (must match docker-compose-sdk-e2e.yml env vars)

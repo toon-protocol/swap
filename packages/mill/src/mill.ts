@@ -700,6 +700,7 @@ export async function startMill(config: MillConfig): Promise<MillInstance> {
         async publish(event: unknown): Promise<void> {
           // `Promise.allSettled` ensures a single rejecting relay cannot
           // surface an aggregate rejection back to the caller.
+          // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
           const promises = autoPool!.publish(
             [...config.relayUrls],
             event as NostrEvent

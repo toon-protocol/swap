@@ -331,7 +331,7 @@ describe('T-058 startMill fails fast on missing mnemonic (AC-2, AC-4 phase 3)', 
     const startMill = await loadStartMill();
     const MillStartError = await loadMillStartError();
     const cfg = baseConfig();
-    delete (cfg as Record<string, unknown>).mnemonic;
+    delete (cfg as Record<string, unknown>)['mnemonic'];
     await expect(startMill(cfg)).rejects.toBeInstanceOf(MillStartError);
     await expect(startMill(cfg)).rejects.toMatchObject({
       code: 'INVALID_CONFIG',
@@ -351,7 +351,7 @@ describe('T-058 startMill fails fast on missing mnemonic (AC-2, AC-4 phase 3)', 
   it('[P1] throws MILL_REQUIRES_MNEMONIC when only secretKey is supplied (D12-011)', async () => {
     const startMill = await loadStartMill();
     const cfg = baseConfig({ secretKey: new Uint8Array(32) });
-    delete (cfg as Record<string, unknown>).mnemonic;
+    delete (cfg as Record<string, unknown>)['mnemonic'];
     await expect(startMill(cfg)).rejects.toMatchObject({
       code: 'MILL_REQUIRES_MNEMONIC',
     });
@@ -389,7 +389,7 @@ describe('AC-2 MillConfig validation (every INVALID_CONFIG branch)', () => {
   it('[P2] rejects secretKey that is not 32 bytes', async () => {
     const startMill = await loadStartMill();
     const cfg = baseConfig({ secretKey: new Uint8Array(31) });
-    delete (cfg as Record<string, unknown>).mnemonic;
+    delete (cfg as Record<string, unknown>)['mnemonic'];
     await expect(startMill(cfg)).rejects.toMatchObject({
       code: expect.stringMatching(/INVALID_CONFIG|MILL_REQUIRES_MNEMONIC/),
     });
