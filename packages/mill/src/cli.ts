@@ -48,7 +48,13 @@ interface CliRawConfig {
   btpEndpoint?: string;
   advertisedAsset?: { assetCode: string; assetScale: number };
   // Ator/SOCKS5 transport overlay (Epic 35 integration).
-  transport?: { type: string; socksProxy?: string; externalUrl?: string; managed?: boolean; managedOptions?: Record<string, unknown> };
+  transport?: {
+    type: string;
+    socksProxy?: string;
+    externalUrl?: string;
+    managed?: boolean;
+    managedOptions?: Record<string, unknown>;
+  };
 }
 
 function toBigInt(v: unknown): bigint {
