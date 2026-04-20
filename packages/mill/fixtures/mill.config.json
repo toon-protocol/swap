@@ -1,0 +1,26 @@
+{
+  "mnemonic": "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about",
+  "swapPairs": [
+    {
+      "from": { "assetCode": "USDC", "assetScale": 6, "chain": "evm:8453" },
+      "to": { "assetCode": "USDC", "assetScale": 6, "chain": "evm:8453" },
+      "rate": "1.0"
+    }
+  ],
+  "chains": ["evm"],
+  "channels": {
+    "evm:8453": [
+      {
+        "channelId": "0xabc0000000000000000000000000000000000000000000000000000000000001",
+        "cumulativeAmount": "0",
+        "nonce": "0",
+        "updatedAt": 0
+      }
+    ]
+  },
+  "inventory": {
+    "evm:8453": "1000000"
+  },
+  "relayUrls": ["ws://localhost:0"],
+  "blsPort": 0
+}
