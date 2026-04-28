@@ -17,7 +17,6 @@ import {
   streamSwap,
   buildSettlementTx,
   generateSolanaKeypair,
-  base58Encode,
   type StreamSwapResult,
 } from '@toon-protocol/sdk';
 
@@ -76,9 +75,12 @@ describe('Docker Swap-Flow Solana E2E (Story 12.10, Task 3)', () => {
         healthCheckPort: 19923,
         loggerName: 'mill-e2e-solana-connector',
       });
-      // Generate a Solana keypair for the chain-recipient
+      // Generate a Solana keypair for the chain-recipient.
+      // generateSolanaKeypair() returns publicKey already base58-encoded;
+      // do NOT re-encode (that would treat the string as a byte array
+      // and throw "Cannot convert R to a BigInt" inside base58Encode).
       const solanaIdentity = generateSolanaKeypair();
-      const solanaRecipient = base58Encode(solanaIdentity.publicKey);
+      const solanaRecipient = solanaIdentity.publicKey;
       sender = { ...baseSender, solanaRecipient };
       swapResult = await streamSwap({
         client: sender.client,

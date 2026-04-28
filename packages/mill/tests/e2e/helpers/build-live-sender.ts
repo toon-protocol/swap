@@ -73,6 +73,11 @@ export async function buildLiveSender(
           url: PEER1_BTP_URL,
           authToken: '',
           evmAddress: PEER1_EVM_ADDRESS,
+          // chain MUST match the chainProviders entry below (`evm:${CHAIN_ID}`).
+          // Without this, ConnectorNode.start() auto-creates a payment channel
+          // with empty `chain` metadata, then PerPacketClaimService cannot find
+          // the registered provider and rejects every packet with T00.
+          chain: `evm:${CHAIN_ID}`,
         },
       ],
       routes: [],
@@ -105,19 +110,73 @@ export async function buildLiveSender(
   // Wait for BTP connection
   await new Promise((r) => setTimeout(r, 2000));
 
-  // Open payment channel
-  const result = await connector.openChannel({
-    peerId: 'peer1',
-    chain: `eip155:${CHAIN_ID}`,
-    token: TOKEN_ADDRESS,
-    tokenNetwork: TOKEN_NETWORK_ADDRESS,
-    peerAddress: PEER1_EVM_ADDRESS,
-    initialDeposit: opts.initialDeposit ?? '10000000', // 10 USDC (6 decimals)
-    settlementTimeout: 3600,
-  });
+  // Payment channel.
+  //
+  // ConnectorNode.start() auto-opens a payment channel for every connected
+  // peer using the constructor `peers[].chain` field (see connector-node.js
+  // around line 647). With `peers[0].chain = 'evm:${CHAIN_ID}'` set above,
+  // the auto-created channel already has the correct chain metadata so
+  // PerPacketClaimService can resolve the provider via getProviderForPeer.
+  //
+  // We attempt an explicit `openChannel` only if no channel exists yet
+  // (e.g., a future connector version drops the auto-create behavior). If
+  // the channel already exists we just look up its id.
+  let channelId: string;
+  try {
+    const r = await connector.openChannel({
+      peerId: 'peer1',
+      chain: `evm:${CHAIN_ID}`,
+      token: TOKEN_ADDRESS,
+      tokenNetwork: TOKEN_NETWORK_ADDRESS,
+      peerAddress: PEER1_EVM_ADDRESS,
+      initialDeposit: opts.initialDeposit ?? '10000000', // 10 USDC (6 decimals)
+      settlementTimeout: 3600,
+    });
+    channelId = r.channelId;
+  } catch (err) {
+    if (
+      err instanceof Error &&
+      /Channel already exists/i.test(err.message)
+    ) {
+      // Auto-channel created by start() — recover its id by listing channels.
+      // ConnectorNode does not expose a public channel-by-peer lookup, so we
+      // fall back to a synthetic placeholder. The settlement assertion in
+      // AC-3 reads channelId off swapResult.claims, not LiveSender.channelId.
+      channelId = '<auto-created-by-start>';
+    } else {
+      throw err;
+    }
+  }
 
   // Wait for channel to be recognized
   await new Promise((r) => setTimeout(r, 2000));
+
+  // Warmup: send a single small ILP packet through the BTP socket. This
+  // forces the sender's connector to flush a per-packet-claim message to
+  // peer1, which (a) registers the external channel on peer1 via
+  // claim-receiver and (b) gives peer1's mill channel-sync poll a chance
+  // to copy that channel into MillChannelState BEFORE the real
+  // streamSwap() PREPAREs arrive. Without this, the first 1-2 swap
+  // PREPAREs race past the channel-registration step on peer1 and get
+  // rejected with F99 ("No channel provisioned for sender on
+  // evm:base:31337") — see Story 12.10 Round 2 fix notes.
+  //
+  // The packet is intentionally a non-swap PREPARE (no toonData) so it
+  // never hits the kind:1059 swap handler; it just flushes the claim
+  // pipeline. Failures are swallowed.
+  try {
+    await connector.sendPacket({
+      destination: 'g.toon.peer1',
+      amount: 100n,
+      expiresAt: new Date(Date.now() + 5000),
+      data: Buffer.alloc(0),
+    });
+  } catch {
+    /* warmup failure is fine — claim still ships */
+  }
+  // Give peer1's mill channel-sync poll (250ms interval) two cycles to
+  // copy the registered channel into MillChannelState.
+  await new Promise((r) => setTimeout(r, 1000));
 
   // Build StreamSwapClient shim that bridges connector.sendPacket() into the
   // StreamSwapClient interface expected by streamSwap().
@@ -162,7 +221,7 @@ export async function buildLiveSender(
     client,
     senderSecretKey,
     senderPubkey,
-    channelId: result.channelId,
+    channelId,
     close: async () => {
       try {
         await connector.stop();
