@@ -19,8 +19,10 @@ import {
   buildSettlementTx,
   fillEvmSettlementTxGas,
   wrapSwapPacketToToon,
+  __streamSwapTesting,
   type StreamSwapResult,
 } from '@toon-protocol/sdk';
+import { decodeEventFromToon } from '@toon-protocol/core/toon';
 
 import {
   buildLiveSender,
@@ -171,7 +173,22 @@ describe('Docker Swap-Flow EVM E2E (Story 12.10, Task 2)', () => {
             if (Array.isArray(msg) && msg[0] === 'EVENT' && msg[1] === subId && msg[2]) {
               clearTimeout(timer);
               ws.close();
-              resolve(msg[2] as Record<string, unknown>);
+              // The TOON relay returns events as TOON-encoded strings
+              // (see packages/core/src/toon/decoder.ts). Decode if necessary.
+              const raw = msg[2];
+              if (typeof raw === 'string') {
+                try {
+                  const decoded = decodeEventFromToon(
+                    new TextEncoder().encode(raw)
+                  );
+                  resolve(decoded as unknown as Record<string, unknown>);
+                  return;
+                } catch (decodeErr) {
+                  reject(decodeErr as Error);
+                  return;
+                }
+              }
+              resolve(raw as Record<string, unknown>);
             }
             // EOSE with no events = not published
             if (Array.isArray(msg) && msg[0] === 'EOSE' && msg[1] === subId) {
@@ -268,12 +285,10 @@ describe('Docker Swap-Flow EVM E2E (Story 12.10, Task 2)', () => {
     expect(sender, 'Sender must be built in beforeAll').not.toBeNull();
 
     // Build a raw kind:20032 rumor with malformed chain-recipient tag,
-    // bypassing streamSwap()'s sender-side validation.
-    // Import __testing surface via relative path (not re-exported from SDK index).
-    const { __testing } = await import(
-      '../../../../sdk/src/stream-swap.js'
-    );
-    const rumor = __testing.buildSwapRumor({
+    // bypassing streamSwap()'s sender-side validation. The `__testing` surface
+    // is exposed via the SDK's package entrypoint as `__streamSwapTesting`
+    // (intentionally non-public; see `packages/sdk/src/index.ts`).
+    const rumor = __streamSwapTesting.buildSwapRumor({
       senderPubkey: sender!.senderPubkey,
       pair: {
         from: {
@@ -357,9 +372,13 @@ describe('Docker Swap-Flow EVM E2E (Story 12.10, Task 2)', () => {
     expect(lastClaim.recipient).toBeDefined();
     expect(lastClaim.millSignerAddress).toBeDefined();
 
+    // buildSettlementTx requires lowercase EVM addresses (regex enforced).
+    // Both the mill signer address (returned in claim metadata) and the
+    // token-network contract address are normalized to lowercase here so
+    // the EVM_ADDRESS_REGEX guard in build-settlement-tx.ts accepts them.
     const signerConfig = {
-      address: lastClaim.millSignerAddress!,
-      contractAddress: TOKEN_NETWORK_ADDRESS,
+      address: lastClaim.millSignerAddress!.toLowerCase(),
+      contractAddress: TOKEN_NETWORK_ADDRESS.toLowerCase(),
       chainId: CHAIN_ID,
     };
 

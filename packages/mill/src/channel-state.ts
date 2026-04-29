@@ -88,6 +88,32 @@ export class MillChannelState {
   }
 
   /**
+   * Register a channel at runtime under `${assetCode}:${chain}:${channelId}`.
+   *
+   * Used by deployments where channels are discovered dynamically (e.g., the
+   * Docker SDK entrypoint syncing the connector's channel-manager into the
+   * Mill's swap-channel state). Idempotent on the storage key — re-registering
+   * the same `(assetCode, chain, channelId)` triple does NOT clobber an
+   * already-tracked nonce / cumulativeAmount.
+   */
+  provisionChannel(p: {
+    assetCode: string;
+    chain: string;
+    channelId: string;
+    cumulativeAmount?: bigint;
+    nonce?: bigint;
+  }): void {
+    const key = `${p.assetCode}:${p.chain}:${p.channelId}`;
+    if (this.channels.has(key)) return;
+    this.channels.set(key, {
+      channelId: p.channelId,
+      cumulativeAmount: p.cumulativeAmount ?? 0n,
+      nonce: p.nonce ?? 0n,
+      updatedAt: this.clock(),
+    });
+  }
+
+  /**
    * Resolve the channel for a given sender, establishing a sticky binding
    * on first use. Returns `null` if no unbound channel is available for
    * this `(asset, chain)`.

@@ -16,11 +16,7 @@
  */
 
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
-import {
-  streamSwap,
-  generateSolanaKeypair,
-  base58Encode,
-} from '@toon-protocol/sdk';
+import { streamSwap, generateSolanaKeypair } from '@toon-protocol/sdk';
 
 import {
   buildLiveSender,
@@ -66,8 +62,10 @@ function chainRecipientForTarget(
       return MILL_E2E_EVM_SENDER_ADDRESS.toLowerCase();
     case DOCKER_CHAIN_SOLANA: {
       if (!cachedSolanaRecipient) {
+        // generateSolanaKeypair() returns publicKey already base58-encoded;
+        // do NOT re-encode (would throw "Cannot convert R to a BigInt").
         const identity = generateSolanaKeypair();
-        cachedSolanaRecipient = base58Encode(identity.publicKey);
+        cachedSolanaRecipient = identity.publicKey;
       }
       return cachedSolanaRecipient;
     }
@@ -89,7 +87,18 @@ function chainRecipientForTarget(
 // ---------------------------------------------------------------------------
 
 describe('Docker Swap-Flow Pair-Matrix E2E (Story 12.10, Task 5) — 9 ordered chain pairs', () => {
-  let servicesReady = false;
+  // Core readiness — peer1/peer2 BLS+relay, Anvil. Required for any pair.
+  let coreReady = false;
+  // Per-chain readiness — gate each pair on whether its source AND target
+  // chain are actually live in the SDK E2E topology. This avoids the previous
+  // false-skip behavior where Mina lightnet's slow/flaky GraphQL endpoint
+  // (often returns ECONNRESET on `{syncStatus}`) caused the whole matrix to
+  // skip silently for ~180 s, masking 4-of-9 EVM/Solana pairs that should run.
+  const chainReady: Record<DockerChain, boolean> = {
+    [DOCKER_CHAIN_EVM]: false,
+    [DOCKER_CHAIN_SOLANA]: false,
+    [DOCKER_CHAIN_MINA]: false,
+  };
   let minaAccount: { pk: string; sk: string } | null = null;
   let sharedSender: LiveSender | null = null;
 
@@ -97,16 +106,28 @@ describe('Docker Swap-Flow Pair-Matrix E2E (Story 12.10, Task 5) — 9 ordered c
     const ready = await checkAllServicesReady();
     if (!ready) return;
 
+    // EVM availability is implied by checkAllServicesReady() (Anvil probe).
+    // Probe Solana and Mina independently in parallel — Mina uses a SHORT
+    // 30 s timeout here (not 180 s) because we now gate per-pair: a missing
+    // Mina lightnet means the 5 Mina-touching pairs skip, while the 4 pairs
+    // not touching Mina (EVM↔EVM, EVM↔Solana, Solana↔Solana) still execute.
     const [bootstrapped, solanaReady, minaReady] = await Promise.all([
       waitForPeer2Bootstrap(45_000),
       waitForSolanaHealth(30_000),
-      waitForMinaHealth(180_000),
+      waitForMinaHealth(30_000),
     ]);
-    if (!bootstrapped || !solanaReady || !minaReady) return;
+    if (!bootstrapped) return;
 
-    minaAccount = await acquireMinaAccount();
-    if (!minaAccount) return;
-    servicesReady = true;
+    chainReady[DOCKER_CHAIN_EVM] = true;
+    chainReady[DOCKER_CHAIN_SOLANA] = solanaReady;
+    chainReady[DOCKER_CHAIN_MINA] = minaReady;
+
+    if (minaReady) {
+      minaAccount = await acquireMinaAccount();
+      if (!minaAccount) chainReady[DOCKER_CHAIN_MINA] = false;
+    }
+
+    coreReady = true;
 
     try {
       sharedSender = await buildLiveSender({
@@ -144,12 +165,22 @@ describe('Docker Swap-Flow Pair-Matrix E2E (Story 12.10, Task 5) — 9 ordered c
   it.each(DOCKER_PAIR_MATRIX)(
     'AC-9 [P1] pair $from → $to — streamSwap completes with recipient-bound claims',
     async (pair) => {
-      // Runtime skip when infra is not ready.
-      // NOTE: vitest it.each does not pass test context as a second argument,
-      // so we cannot call ctx.skip(). Instead, skipIfNotReady logs and returns
-      // true (or throws in CI), and we return early. Vitest records this as
-      // a pass, not a skip — acceptable for E2E tests gated by beforeAll.
-      if (skipIfNotReady(servicesReady)) return;
+      // Runtime skip when CORE infra is not ready (Anvil/peer1/peer2 down).
+      if (skipIfNotReady(coreReady)) return;
+
+      // Per-pair skip when EITHER side of the pair targets a chain whose
+      // backing service isn't healthy in the current topology. This is the
+      // fix for the prior false-skip: instead of gating all 9 pairs on the
+      // strictest chain (Mina), we gate each pair on its own dependencies
+      // so the 4 non-Mina pairs (EVM↔EVM, EVM↔Solana, Solana↔Solana) run
+      // even when Mina lightnet is down.
+      if (!chainReady[pair.from] || !chainReady[pair.to]) {
+        console.log(
+          `Skipping pair ${pair.from} → ${pair.to}: chain not ready ` +
+            `(from=${chainReady[pair.from]}, to=${chainReady[pair.to]})`
+        );
+        return;
+      }
 
       expect(
         sharedSender,
