@@ -219,6 +219,10 @@ export interface MillHealthResponse {
   chains: readonly MillChainKind[];
   uptimeSec: number;
   inventory: Record<string, string>;
+  /** Configured swap pairs — operator-config, no secrets. */
+  swapPairs: SwapPair[];
+  /** Per-asset available reserves, parallel to `inventory` (which is total). */
+  inventoryAvailable: Record<string, string>;
 }
 
 // ---------------------------------------------------------------------------
@@ -636,6 +640,7 @@ export async function startMill(config: MillConfig): Promise<MillInstance> {
   const getHealth = (): MillHealthResponse => {
     const snapshot = inventory.snapshot();
     const inv: Record<string, string> = {};
+    const invAvailable: Record<string, string> = {};
     // Count distinct assetCodes per chain so we don't mask a multi-asset
     // chain behind a single `chain`-only key.
     const assetsPerChain = new Map<string, Set<string>>();
@@ -649,11 +654,13 @@ export async function startMill(config: MillConfig): Promise<MillInstance> {
     }
     for (const b of snapshot) {
       inv[`${b.assetCode}:${b.chain}`] = b.total.toString();
+      invAvailable[`${b.assetCode}:${b.chain}`] = b.available.toString();
       // Operator convenience: also expose the chain key alone ONLY when
       // the chain has a single asset (otherwise the chain-only key would
       // silently overwrite between assets).
       if ((assetsPerChain.get(b.chain)?.size ?? 0) === 1) {
         inv[b.chain] = b.total.toString();
+        invAvailable[b.chain] = b.available.toString();
       }
     }
     return {
@@ -664,6 +671,8 @@ export async function startMill(config: MillConfig): Promise<MillInstance> {
       chains: config.chains,
       uptimeSec: Math.max(0, Math.floor((Date.now() - startedAt) / 1000)),
       inventory: inv,
+      swapPairs: [...config.swapPairs],
+      inventoryAvailable: invAvailable,
     };
   };
 
