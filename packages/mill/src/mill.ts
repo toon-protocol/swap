@@ -87,9 +87,15 @@ export interface Publisher {
  * Configuration for starting a TOON Mill via `startMill()`.
  *
  * Exactly one of `mnemonic` or `secretKey` MUST be supplied.
- * Exactly one of `connector` or `connectorUrl` MUST be supplied (or
- * neither — a ConnectorNode is NOT auto-created in this story's scope;
- * the test suite always passes an explicit connector).
+ *
+ * Connector wiring — three modes (mutually exclusive `connector` / `connectorUrl`):
+ *   - `connector` supplied        → operator owns lifecycle; not closed on stop()
+ *   - `connectorUrl` supplied     → embedded ConnectorNode auto-created with that
+ *                                   URL as a parent BTP peer + a self-route for
+ *                                   local delivery (Mill becomes a child of the
+ *                                   parent connector). Mill owns lifecycle.
+ *   - Neither supplied            → standalone embedded connector (no parent),
+ *                                   gated on `btpServerPort`. Mill owns lifecycle.
  *
  * `swapPairs` MUST be non-empty.
  * `chains` MUST cover every distinct `pair.to.chain` family referenced.
@@ -103,7 +109,30 @@ export interface MillConfig {
 
   // --- Connector (at most one) ---
   connector?: EmbeddableConnectorLike;
+  /**
+   * Parent BTP URL. When set (and `connector` is not), the Mill auto-creates
+   * an embedded ConnectorNode wired to this URL as a parent peer with a
+   * self-route for local delivery. The Mill becomes a child of the parent
+   * connector at `parentPeerId`.
+   */
   connectorUrl?: string;
+  /**
+   * Peer ID of the parent connector when `connectorUrl` is set. Default `'apex'`.
+   * Pure-routing identifier; the connector's `PeerConfig` has no `relation`
+   * field — parent semantics live in the routing table (default `g.` route
+   * points to this peer).
+   */
+  parentPeerId?: string;
+  /**
+   * BTP auth token for the parent peer. Default `''` (apex accepts no-auth).
+   */
+  parentAuthToken?: string;
+  /**
+   * Override for the embedded connector `nodeId` derivation. Default
+   * `toon-mill-<pubkey16>`. Useful when an operator wants a stable identifier
+   * across restarts that the parent's routing table can target.
+   */
+  nodeId?: string;
 
   // --- Mill-specific ---
   swapPairs: readonly SwapPair[];
@@ -566,41 +595,103 @@ export async function startMill(config: MillConfig): Promise<MillInstance> {
 
   // 11. Connector ownership.
   //
-  // Story 12.8 AC-11: three ownership modes —
-  //   - `config.connector` supplied → caller owns → we never close.
-  //   - `config.connectorUrl` supplied → treated as opaque; not closed.
-  //   - Neither supplied → we AUTO-CREATE an embedded `ConnectorNode`
-  //     (mirrors `startTown()`'s default mode) and own its lifecycle.
+  // Three ownership modes — see MillConfig docblock:
+  //   - `config.connector` supplied         → caller owns; never closed by stop().
+  //   - `config.connectorUrl` supplied      → embedded-with-parent: auto-create
+  //                                           a ConnectorNode wired to the URL as
+  //                                           a parent BTP peer, plus a self-route
+  //                                           so packets addressed at `ilpAddress`
+  //                                           land on the local handler. Mill owns.
+  //   - Neither supplied (+ btpServerPort)  → standalone embedded connector. Mill owns.
   //
-  // The auto-create branch is what makes `startMill({ mnemonic, swapPairs,
-  // chains, channels, inventory, relayUrls })` — with no connector args —
-  // a functional boot, which is the minimal contract the Story 12.8 E2E
-  // and operator-docs-stage-9 topology both require.
+  // The embedded-with-parent path makes the Mill a child of an apex connector:
+  // outbound packets fall through `g.*` to the parent, inbound packets matching
+  // our own ilp prefix dispatch locally (PacketHandler zeros fees on local
+  // delivery — see connector packet-handler.ts:1074-1077). `connectorFeePercentage:
+  // 0` is set defensively to zero fees on the child even on non-local hops.
   let ownsConnector = false;
   let autoCreatedConnector: ConnectorNode | null = null;
   let effectiveConnector: EmbeddableConnectorLike | undefined =
     config.connector;
 
-  if (config.connectorUrl !== undefined && config.connector === undefined) {
-    // `connectorUrl` is a scoped-out standalone-mode hook (the remote-HTTP
-    // connector path). Warn the operator so a misconfigured remote URL
-    // doesn't silently fail to wire.
-    logger.warn?.('mill.connectorUrl.ignored', {
-      reason:
-        'standalone-connector (HTTP) mode is deferred; config.connectorUrl is accepted but not dispatched',
-    });
+  if (config.connector === undefined && config.connectorUrl !== undefined) {
+    const nodeId =
+      config.nodeId ?? `toon-mill-${identity.pubkey.slice(0, 16)}`;
+    // `btpServerPort` is required by ConnectorNode (rejects port=0 / undefined).
+    // Default to 3000 to match the parent-link assumption documented in the
+    // dev infra fixtures; operators may override via config.btpServerPort.
+    const btpServerPort = config.btpServerPort ?? 3000;
+    const parentPeerId = config.parentPeerId ?? 'apex';
+    const parentAuthToken = config.parentAuthToken ?? '';
+    const ilpAddress =
+      config.ilpAddress ?? `g.toon.mill.${identity.pubkey.slice(0, 16)}`;
+    const connectorLogger = createConnectorLogger(nodeId, 'warn');
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const connectorConfig: any = {
+        nodeId,
+        btpServerPort,
+        environment: 'development' as const,
+        deploymentMode: 'embedded' as const,
+        peers: [
+          {
+            id: parentPeerId,
+            url: config.connectorUrl,
+            authToken: parentAuthToken,
+          },
+        ],
+        routes: [
+          // Self-route — packets addressed to our ILP prefix dispatch to the
+          // local handler. `nextHop: nodeId` is the connector's local-delivery
+          // convention; PacketHandler zeros fees on this hop.
+          { prefix: ilpAddress, nextHop: nodeId, priority: 100 },
+          // Default-up-to-parent — anything in the global `g` namespace that
+          // didn't match the self-route falls through to the parent peer.
+          // (Connector RoutingTable does longest-prefix match with trailing-
+          // dot delimiter, so `g` matches `g.foo.bar` but not `gx`.)
+          { prefix: 'g', nextHop: parentPeerId, priority: 0 },
+        ],
+        localDelivery: { enabled: false },
+        // Children don't expose an admin API — the apex parent is the
+        // operator-facing surface. Disabling avoids a hard runtime dep on
+        // express in the mill docker bundle.
+        adminApi: { enabled: false },
+        // Belt-and-braces: zero fees on the child connector for any path
+        // (local delivery already gets fee=0 from the connector itself).
+        settlement: { connectorFeePercentage: 0 },
+      };
+      if (config.transport) {
+        connectorConfig.transport = config.transport;
+      }
+      autoCreatedConnector = new ConnectorNode(
+        connectorConfig,
+        connectorLogger
+      );
+      effectiveConnector =
+        autoCreatedConnector as unknown as EmbeddableConnectorLike;
+      ownsConnector = true;
+      logger.debug?.('mill.connector.embedded_with_parent', {
+        nodeId,
+        btpServerPort,
+        parentPeerId,
+        parentUrl: config.connectorUrl,
+        ilpAddress,
+      });
+    } catch (err) {
+      logger.warn?.('mill.connector.auto_create_failed', {
+        err: errSummary(err),
+      });
+    }
   } else if (
     config.connector === undefined &&
     config.connectorUrl === undefined &&
     config.btpServerPort !== undefined
   ) {
-    // AC-11: auto-wire an embedded ConnectorNode when the operator opts in
-    // by supplying `btpServerPort`. Mirrors `startTown()`'s default mode,
-    // less the settlement infra (swap-handler-owned in the Mill topology
-    // per D12-005). The explicit `btpServerPort` is required because
-    // `ConnectorNode` rejects port=0 (OS-assigned), so silent defaults
-    // would either collide across parallel boots or fail noisily.
-    const nodeId = `toon-mill-${identity.pubkey.slice(0, 16)}`;
+    // Standalone mode: auto-wire an embedded ConnectorNode with no parent
+    // peer or routes. `ConnectorNode` rejects port=0 (OS-assigned), so the
+    // explicit `btpServerPort` opt-in is what gates this branch.
+    const nodeId =
+      config.nodeId ?? `toon-mill-${identity.pubkey.slice(0, 16)}`;
     const btpServerPort = config.btpServerPort;
     const connectorLogger = createConnectorLogger(nodeId, 'warn');
     try {
@@ -626,9 +717,6 @@ export async function startMill(config: MillConfig): Promise<MillInstance> {
       ownsConnector = true;
       logger.debug?.('mill.connector.auto_created', { nodeId, btpServerPort });
     } catch (err) {
-      // Do not throw — the swap handler is still registered on the local
-      // HandlerRegistry, and tests may choose to observe via black-box
-      // dispatch without a live connector.
       logger.warn?.('mill.connector.auto_create_failed', {
         err: errSummary(err),
       });

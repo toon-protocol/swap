@@ -14,6 +14,11 @@
  *   MILL_SECRET_KEY_HEX    — 64-char hex-encoded 32-byte secret key
  *   MILL_BLS_PORT          — numeric port for /health server
  *   MILL_RELAYS            — comma-separated relay WebSocket URLs
+ *   TOON_CONNECTOR_URL     — parent BTP URL; activates embedded-with-parent mode
+ *   TOON_PARENT_PEER_ID    — peer id for the parent (default: "apex")
+ *   TOON_PARENT_AUTH_TOKEN — BTP auth token for the parent peer (default: "")
+ *   TOON_ILP_ADDRESS       — advertised ILP address + self-route prefix
+ *   TOON_NODE_ID           — connector nodeId override (default: toon-mill-<pk16>)
  */
 
 import { parseArgs } from 'node:util';
@@ -41,6 +46,7 @@ interface CliRawConfig {
   inventory?: Record<string, string | number>;
   relayUrls?: string[];
   blsPort?: number;
+  btpServerPort?: number;
   passphrase?: string;
   knownPeers?: { ilpAddress: string; btpUrl?: string }[];
   // Story 12.7 Review Pass #1 additions — operator-surfaced kind:10032 fields.
@@ -55,6 +61,11 @@ interface CliRawConfig {
     managed?: boolean;
     managedOptions?: Record<string, unknown>;
   };
+  // Embedded-with-parent connector wiring.
+  connectorUrl?: string;
+  parentPeerId?: string;
+  parentAuthToken?: string;
+  nodeId?: string;
 }
 
 function toBigInt(v: unknown): bigint {
@@ -128,12 +139,19 @@ function parseRawConfig(raw: CliRawConfig): MillConfig {
     cfg.secretKey = Uint8Array.from(Buffer.from(raw.secretKey, 'hex'));
   }
   if (raw.blsPort !== undefined) cfg.blsPort = raw.blsPort;
+  if (raw.btpServerPort !== undefined) cfg.btpServerPort = raw.btpServerPort;
   if (raw.passphrase) cfg.passphrase = raw.passphrase;
   if (raw.knownPeers) cfg.knownPeers = raw.knownPeers;
   if (raw.ilpAddress) cfg.ilpAddress = raw.ilpAddress;
   if (raw.btpEndpoint) cfg.btpEndpoint = raw.btpEndpoint;
   if (raw.advertisedAsset) cfg.advertisedAsset = raw.advertisedAsset;
   if (raw.transport) cfg.transport = raw.transport as MillConfig['transport'];
+  if (raw.connectorUrl) cfg.connectorUrl = raw.connectorUrl;
+  if (raw.parentPeerId) cfg.parentPeerId = raw.parentPeerId;
+  if (raw.parentAuthToken !== undefined) {
+    cfg.parentAuthToken = raw.parentAuthToken;
+  }
+  if (raw.nodeId) cfg.nodeId = raw.nodeId;
   return cfg;
 }
 
@@ -164,6 +182,16 @@ function applyEnvOverlay(cfg: MillConfig): MillConfig {
       .map((s) => s.trim())
       .filter(Boolean);
   }
+  // Embedded-with-parent connector wiring (TOON_* env vars). Setting
+  // TOON_CONNECTOR_URL activates the embedded-with-parent path; the
+  // remaining TOON_* vars are optional refinements.
+  if (env['TOON_CONNECTOR_URL']) out.connectorUrl = env['TOON_CONNECTOR_URL'];
+  if (env['TOON_PARENT_PEER_ID']) out.parentPeerId = env['TOON_PARENT_PEER_ID'];
+  if (env['TOON_PARENT_AUTH_TOKEN'] !== undefined) {
+    out.parentAuthToken = env['TOON_PARENT_AUTH_TOKEN'];
+  }
+  if (env['TOON_ILP_ADDRESS']) out.ilpAddress = env['TOON_ILP_ADDRESS'];
+  if (env['TOON_NODE_ID']) out.nodeId = env['TOON_NODE_ID'];
   return out;
 }
 
