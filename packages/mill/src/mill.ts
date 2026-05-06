@@ -172,6 +172,25 @@ export interface MillConfig {
    * ConnectorNode as `transport`. Ignored if `connector` is supplied.
    */
   transport?: TransportConfig;
+  /**
+   * Optional chainProviders to wire into the embedded connector for
+   * per-packet claim verification + signing. One entry per EVM chain the
+   * Mill plans to settle on; the shape mirrors the apex YAML
+   * `chainProviders` block exactly. Ignored if `connector` is supplied
+   * (operator owns its connector lifecycle and config in that mode).
+   *
+   * `keyId` defaults to the 0x-prefixed identity.secretKey hex when
+   * omitted — the same secp256k1 key that derives the Nostr identity
+   * doubles as the EVM signing key for claim issuance.
+   */
+  chainProviders?: ReadonlyArray<{
+    chainType: 'evm';
+    chainId: string;
+    rpcUrl: string;
+    registryAddress: string;
+    tokenAddress: string;
+    keyId?: string;
+  }>;
   passphrase?: string;
   logger?: MillLogger;
 
@@ -418,6 +437,34 @@ function validateConfig(config: MillConfig): void {
       );
     }
   }
+
+  if (config.chainProviders !== undefined) {
+    if (!Array.isArray(config.chainProviders)) {
+      throw new MillStartError(
+        'INVALID_CONFIG',
+        'MillConfig.chainProviders MUST be an array when set'
+      );
+    }
+    for (let i = 0; i < config.chainProviders.length; i++) {
+      const p = config.chainProviders[i]!;
+      const required: ReadonlyArray<keyof typeof p> = [
+        'chainType',
+        'chainId',
+        'rpcUrl',
+        'registryAddress',
+        'tokenAddress',
+      ];
+      for (const k of required) {
+        const v = p[k];
+        if (typeof v !== 'string' || v.length === 0) {
+          throw new MillStartError(
+            'INVALID_CONFIG',
+            `MillConfig.chainProviders[${i}].${String(k)} MUST be a non-empty string`
+          );
+        }
+      }
+    }
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -626,6 +673,14 @@ export async function startMill(config: MillConfig): Promise<MillInstance> {
     const ilpAddress =
       config.ilpAddress ?? `g.toon.mill.${identity.pubkey.slice(0, 16)}`;
     const connectorLogger = createConnectorLogger(nodeId, 'warn');
+    // Default each chainProviders entry's keyId to the 0x-prefixed identity
+    // secret-key hex if the operator omitted it. Same secp256k1 key derives
+    // the Nostr identity AND signs ClaimReceiver claims — keep them aligned.
+    const millKeyHex = `0x${Buffer.from(identity.secretKey).toString('hex')}`;
+    const resolvedChainProviders = config.chainProviders?.map((p) => ({
+      ...p,
+      keyId: p.keyId ?? millKeyHex,
+    }));
     try {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const connectorConfig: any = {
@@ -659,6 +714,10 @@ export async function startMill(config: MillConfig): Promise<MillInstance> {
         // Belt-and-braces: zero fees on the child connector for any path
         // (local delivery already gets fee=0 from the connector itself).
         settlement: { connectorFeePercentage: 0 },
+        ...(resolvedChainProviders &&
+          resolvedChainProviders.length > 0 && {
+            chainProviders: resolvedChainProviders,
+          }),
       };
       if (config.transport) {
         connectorConfig.transport = config.transport;
@@ -694,6 +753,14 @@ export async function startMill(config: MillConfig): Promise<MillInstance> {
       config.nodeId ?? `toon-mill-${identity.pubkey.slice(0, 16)}`;
     const btpServerPort = config.btpServerPort;
     const connectorLogger = createConnectorLogger(nodeId, 'warn');
+    // Same chainProviders default-keyId behaviour as the embedded-with-parent
+    // branch — see comment above. Standalone mills still benefit from
+    // per-packet claim signing/verification when an operator wants it.
+    const millKeyHex = `0x${Buffer.from(identity.secretKey).toString('hex')}`;
+    const resolvedChainProviders = config.chainProviders?.map((p) => ({
+      ...p,
+      keyId: p.keyId ?? millKeyHex,
+    }));
     try {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const connectorConfig: any = {
@@ -704,6 +771,10 @@ export async function startMill(config: MillConfig): Promise<MillInstance> {
         peers: [],
         routes: [],
         localDelivery: { enabled: false },
+        ...(resolvedChainProviders &&
+          resolvedChainProviders.length > 0 && {
+            chainProviders: resolvedChainProviders,
+          }),
       };
       if (config.transport) {
         connectorConfig.transport = config.transport;

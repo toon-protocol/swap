@@ -690,6 +690,100 @@ describe('Embedded-with-parent connector mode (connectorUrl)', () => {
       await instance.stop();
     }
   });
+
+  it('[P1] passes chainProviders through to the embedded ConnectorNode when set', async () => {
+    const startMill = await loadStartMill();
+    const port = 29000 + Math.floor(Math.random() * 1000);
+    const { connector: _ignored, ...withoutConnector } = baseConfig();
+    const providers = [
+      {
+        chainType: 'evm' as const,
+        chainId: 'evm:31337',
+        rpcUrl: 'http://localhost:8545',
+        registryAddress: '0x1111111111111111111111111111111111111111',
+        tokenAddress: '0x2222222222222222222222222222222222222222',
+        // keyId omitted → mill defaults it to identity-derived hex.
+      },
+    ];
+    const instance = (await startMill({
+      ...withoutConnector,
+      connectorUrl: 'ws://parent.invalid:3000',
+      btpServerPort: port,
+      chainProviders: providers,
+    })) as MillInstanceShape & { connector?: unknown };
+    try {
+      const c = (instance.connector as unknown as {
+        _config: {
+          chainProviders?: ReadonlyArray<{
+            chainType: string;
+            chainId: string;
+            rpcUrl: string;
+            registryAddress: string;
+            tokenAddress: string;
+            keyId: string;
+          }>;
+        };
+      })._config;
+      expect(c.chainProviders).toBeDefined();
+      expect(c.chainProviders!).toHaveLength(1);
+      const entry = c.chainProviders![0]!;
+      expect(entry.chainType).toBe('evm');
+      expect(entry.chainId).toBe('evm:31337');
+      expect(entry.rpcUrl).toBe('http://localhost:8545');
+      expect(entry.registryAddress).toBe(
+        '0x1111111111111111111111111111111111111111'
+      );
+      expect(entry.tokenAddress).toBe(
+        '0x2222222222222222222222222222222222222222'
+      );
+      // keyId defaulted to identity.secretKey hex (0x + 64 chars).
+      expect(entry.keyId).toMatch(/^0x[0-9a-f]{64}$/);
+    } finally {
+      await instance.stop();
+    }
+  });
+
+  it('[P1] omits chainProviders when MillConfig.chainProviders is unset', async () => {
+    const startMill = await loadStartMill();
+    const port = 30000 + Math.floor(Math.random() * 1000);
+    const { connector: _ignored, ...withoutConnector } = baseConfig();
+    const instance = (await startMill({
+      ...withoutConnector,
+      connectorUrl: 'ws://parent.invalid:3000',
+      btpServerPort: port,
+    })) as MillInstanceShape & { connector?: unknown };
+    try {
+      const c = (instance.connector as unknown as {
+        _config: { chainProviders?: unknown };
+      })._config;
+      expect(c.chainProviders).toBeUndefined();
+    } finally {
+      await instance.stop();
+    }
+  });
+
+  it('[P1] rejects chainProviders entries missing tokenAddress at validateConfig', async () => {
+    const startMill = await loadStartMill();
+    const MillStartError = await loadMillStartError();
+    const { connector: _ignored, ...withoutConnector } = baseConfig();
+    const bad = [
+      {
+        chainType: 'evm' as const,
+        chainId: 'evm:31337',
+        rpcUrl: 'http://localhost:8545',
+        registryAddress: '0x1111111111111111111111111111111111111111',
+        // tokenAddress intentionally missing
+      },
+    ];
+    await expect(
+      startMill({
+        ...withoutConnector,
+        connectorUrl: 'ws://parent.invalid:3000',
+        btpServerPort: 31000 + Math.floor(Math.random() * 1000),
+        chainProviders: bad as unknown,
+      })
+    ).rejects.toBeInstanceOf(MillStartError);
+  });
 });
 
 describe('Story 12.8 AC-13 — publisher injection', () => {
