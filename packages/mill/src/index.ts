@@ -66,3 +66,12 @@ export type { CreateSwapHandlerConfig } from '@toon-protocol/sdk';
 
 // Re-export transport config from connector for convenience
 export type { TransportConfig } from '@toon-protocol/connector';
+
+// Settlement event payload (Story D3) — emitted when a Mill-issued claim is
+// settled on-chain; consumed by the townhouse-web earnings aggregator (D4).
+export { buildSettlementEvent } from './settlement-event.js';
+export type {
+  SettlementEvent,
+  SettlementChain,
+  BuildSettlementEventParams,
+} from './settlement-event.js';
