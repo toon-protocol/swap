@@ -191,6 +191,23 @@ export interface MillConfig {
     tokenAddress: string;
     keyId?: string;
   }>;
+  /**
+   * EVM private key for embedded-connector ClaimReceiver / chainProviders
+   * `keyId` defaults. When set, used in place of the 0x-hex identity
+   * secret key. Lets operators wire the embedded connector's signer to a
+   * funded EVM account (e.g. Anvil deterministic privkey) distinct from
+   * the Nostr identity. Validated as `0x[0-9a-fA-F]{64}` at boot.
+   */
+  settlementPrivateKey?: string;
+  /**
+   * EVM treasury address advertised to the parent connector for the
+   * embedded-with-parent peer entry. The apex's PerPacketClaimService uses
+   * this as `peerAddress` when opening a settlement channel toward the
+   * Mill. Only meaningful when `connectorUrl` is set; when omitted, the
+   * parent peer entry has no `evmAddress` and the apex must supply
+   * `peerAddress` explicitly via the `/channels` admin call.
+   */
+  parentEvmAddress?: string;
   passphrase?: string;
   logger?: MillLogger;
 
@@ -672,11 +689,30 @@ export async function startMill(config: MillConfig): Promise<MillInstance> {
     const parentAuthToken = config.parentAuthToken ?? '';
     const ilpAddress =
       config.ilpAddress ?? `g.toon.mill.${identity.pubkey.slice(0, 16)}`;
-    const connectorLogger = createConnectorLogger(nodeId, 'warn');
-    // Default each chainProviders entry's keyId to the 0x-prefixed identity
-    // secret-key hex if the operator omitted it. Same secp256k1 key derives
-    // the Nostr identity AND signs ClaimReceiver claims — keep them aligned.
-    const millKeyHex = `0x${Buffer.from(identity.secretKey).toString('hex')}`;
+    const connectorLogger = createConnectorLogger(
+      nodeId,
+      (process.env['TOON_CONNECTOR_LOG_LEVEL'] as
+        | 'debug'
+        | 'info'
+        | 'warn'
+        | 'error'
+        | undefined) ?? 'warn'
+    );
+    // Default each chainProviders entry's keyId to the operator-supplied
+    // settlementPrivateKey when set, otherwise the 0x-prefixed identity
+    // secret-key hex. Setting `settlementPrivateKey` lets the embedded
+    // connector's ClaimReceiver/PerPacketClaimService sign with a funded
+    // EVM account (e.g. Anvil deterministic privkey) distinct from the
+    // Nostr identity.
+    const millKeyHex =
+      config.settlementPrivateKey ??
+      `0x${Buffer.from(identity.secretKey).toString('hex')}`;
+    if (!/^0x[0-9a-fA-F]{64}$/.test(millKeyHex)) {
+      throw new MillStartError(
+        'INVALID_CONFIG',
+        `MillConfig.settlementPrivateKey must be a 0x-prefixed 32-byte hex string`
+      );
+    }
     const resolvedChainProviders = config.chainProviders?.map((p) => ({
       ...p,
       keyId: p.keyId ?? millKeyHex,
@@ -693,6 +729,12 @@ export async function startMill(config: MillConfig): Promise<MillInstance> {
             id: parentPeerId,
             url: config.connectorUrl,
             authToken: parentAuthToken,
+            // Advertise our EVM treasury to the parent so the apex's
+            // PerPacketClaimService can open a settlement channel toward
+            // this Mill without needing kind:10032 discovery first.
+            ...(config.parentEvmAddress && {
+              evmAddress: config.parentEvmAddress,
+            }),
           },
         ],
         routes: [
@@ -752,11 +794,27 @@ export async function startMill(config: MillConfig): Promise<MillInstance> {
     const nodeId =
       config.nodeId ?? `toon-mill-${identity.pubkey.slice(0, 16)}`;
     const btpServerPort = config.btpServerPort;
-    const connectorLogger = createConnectorLogger(nodeId, 'warn');
+    const connectorLogger = createConnectorLogger(
+      nodeId,
+      (process.env['TOON_CONNECTOR_LOG_LEVEL'] as
+        | 'debug'
+        | 'info'
+        | 'warn'
+        | 'error'
+        | undefined) ?? 'warn'
+    );
     // Same chainProviders default-keyId behaviour as the embedded-with-parent
     // branch — see comment above. Standalone mills still benefit from
     // per-packet claim signing/verification when an operator wants it.
-    const millKeyHex = `0x${Buffer.from(identity.secretKey).toString('hex')}`;
+    const millKeyHex =
+      config.settlementPrivateKey ??
+      `0x${Buffer.from(identity.secretKey).toString('hex')}`;
+    if (!/^0x[0-9a-fA-F]{64}$/.test(millKeyHex)) {
+      throw new MillStartError(
+        'INVALID_CONFIG',
+        `MillConfig.settlementPrivateKey must be a 0x-prefixed 32-byte hex string`
+      );
+    }
     const resolvedChainProviders = config.chainProviders?.map((p) => ({
       ...p,
       keyId: p.keyId ?? millKeyHex,
