@@ -183,14 +183,14 @@ export interface MillConfig {
    * omitted — the same secp256k1 key that derives the Nostr identity
    * doubles as the EVM signing key for claim issuance.
    */
-  chainProviders?: ReadonlyArray<{
+  chainProviders?: readonly {
     chainType: 'evm';
     chainId: string;
     rpcUrl: string;
     registryAddress: string;
     tokenAddress: string;
     keyId?: string;
-  }>;
+  }[];
   /**
    * EVM private key for embedded-connector ClaimReceiver / chainProviders
    * `keyId` defaults. When set, used in place of the 0x-hex identity
@@ -462,9 +462,8 @@ function validateConfig(config: MillConfig): void {
         'MillConfig.chainProviders MUST be an array when set'
       );
     }
-    for (let i = 0; i < config.chainProviders.length; i++) {
-      const p = config.chainProviders[i]!;
-      const required: ReadonlyArray<keyof typeof p> = [
+    for (const [i, p] of config.chainProviders.entries()) {
+      const required: readonly (keyof typeof p)[] = [
         'chainType',
         'chainId',
         'rpcUrl',
@@ -679,8 +678,7 @@ export async function startMill(config: MillConfig): Promise<MillInstance> {
     config.connector;
 
   if (config.connector === undefined && config.connectorUrl !== undefined) {
-    const nodeId =
-      config.nodeId ?? `toon-mill-${identity.pubkey.slice(0, 16)}`;
+    const nodeId = config.nodeId ?? `toon-mill-${identity.pubkey.slice(0, 16)}`;
     // `btpServerPort` is required by ConnectorNode (rejects port=0 / undefined).
     // Default to 3000 to match the parent-link assumption documented in the
     // dev infra fixtures; operators may override via config.btpServerPort.
@@ -791,8 +789,7 @@ export async function startMill(config: MillConfig): Promise<MillInstance> {
     // Standalone mode: auto-wire an embedded ConnectorNode with no parent
     // peer or routes. `ConnectorNode` rejects port=0 (OS-assigned), so the
     // explicit `btpServerPort` opt-in is what gates this branch.
-    const nodeId =
-      config.nodeId ?? `toon-mill-${identity.pubkey.slice(0, 16)}`;
+    const nodeId = config.nodeId ?? `toon-mill-${identity.pubkey.slice(0, 16)}`;
     const btpServerPort = config.btpServerPort;
     const connectorLogger = createConnectorLogger(
       nodeId,

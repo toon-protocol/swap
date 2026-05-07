@@ -612,21 +612,25 @@ describe('Embedded-with-parent connector mode (connectorUrl)', () => {
       expect(instance.connector).toBeDefined();
       // Inspect the live ConnectorNode config — it stores its own config under
       // `.config` for introspection.
-      const c = (instance.connector as unknown as {
-        _config: {
-          peers: { id: string; url: string; authToken: string }[];
-          routes: { prefix: string; nextHop: string; priority?: number }[];
-          settlement?: { connectorFeePercentage?: number };
-          nodeId: string;
-        };
-      })._config;
+      const c = (
+        instance.connector as unknown as {
+          _config: {
+            peers: { id: string; url: string; authToken: string }[];
+            routes: { prefix: string; nextHop: string; priority?: number }[];
+            settlement?: { connectorFeePercentage?: number };
+            nodeId: string;
+          };
+        }
+      )._config;
       // Parent peer wired with the supplied URL.
       expect(c.peers).toHaveLength(1);
       expect(c.peers[0]!.id).toBe('apex');
       expect(c.peers[0]!.url).toBe('ws://parent.invalid:3000');
       expect(c.peers[0]!.authToken).toBe('');
       // Routes: self-route on ilpAddress + default-up-to-parent on `g.`.
-      const selfRoute = c.routes.find((r) => r.prefix === 'g.townhouse.mill.test');
+      const selfRoute = c.routes.find(
+        (r) => r.prefix === 'g.townhouse.mill.test'
+      );
       expect(selfRoute).toBeDefined();
       expect(selfRoute!.nextHop).toBe(c.nodeId);
       const parentRoute = c.routes.find(
@@ -652,13 +656,15 @@ describe('Embedded-with-parent connector mode (connectorUrl)', () => {
       btpServerPort: port,
     })) as MillInstanceShape & { connector?: unknown };
     try {
-      const c = (instance.connector as unknown as {
-        _config: {
-          nodeId: string;
-          peers: { id: string }[];
-          routes: { prefix: string; nextHop: string }[];
-        };
-      })._config;
+      const c = (
+        instance.connector as unknown as {
+          _config: {
+            nodeId: string;
+            peers: { id: string }[];
+            routes: { prefix: string; nextHop: string }[];
+          };
+        }
+      )._config;
       expect(c.nodeId).toBe('my-mill-id');
       expect(c.peers[0]!.id).toBe('my-parent');
       expect(
@@ -678,12 +684,14 @@ describe('Embedded-with-parent connector mode (connectorUrl)', () => {
       btpServerPort: port,
     })) as MillInstanceShape & { connector?: unknown };
     try {
-      const c = (instance.connector as unknown as {
-        _config: {
-          peers: unknown[];
-          routes: unknown[];
-        };
-      })._config;
+      const c = (
+        instance.connector as unknown as {
+          _config: {
+            peers: unknown[];
+            routes: unknown[];
+          };
+        }
+      )._config;
       expect(c.peers).toEqual([]);
       expect(c.routes).toEqual([]);
     } finally {
@@ -712,18 +720,20 @@ describe('Embedded-with-parent connector mode (connectorUrl)', () => {
       chainProviders: providers,
     })) as MillInstanceShape & { connector?: unknown };
     try {
-      const c = (instance.connector as unknown as {
-        _config: {
-          chainProviders?: ReadonlyArray<{
-            chainType: string;
-            chainId: string;
-            rpcUrl: string;
-            registryAddress: string;
-            tokenAddress: string;
-            keyId: string;
-          }>;
-        };
-      })._config;
+      const c = (
+        instance.connector as unknown as {
+          _config: {
+            chainProviders?: readonly {
+              chainType: string;
+              chainId: string;
+              rpcUrl: string;
+              registryAddress: string;
+              tokenAddress: string;
+              keyId: string;
+            }[];
+          };
+        }
+      )._config;
       expect(c.chainProviders).toBeDefined();
       expect(c.chainProviders!).toHaveLength(1);
       const entry = c.chainProviders![0]!;
@@ -753,9 +763,11 @@ describe('Embedded-with-parent connector mode (connectorUrl)', () => {
       btpServerPort: port,
     })) as MillInstanceShape & { connector?: unknown };
     try {
-      const c = (instance.connector as unknown as {
-        _config: { chainProviders?: unknown };
-      })._config;
+      const c = (
+        instance.connector as unknown as {
+          _config: { chainProviders?: unknown };
+        }
+      )._config;
       expect(c.chainProviders).toBeUndefined();
     } finally {
       await instance.stop();

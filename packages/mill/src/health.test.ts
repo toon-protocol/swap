@@ -162,11 +162,11 @@ describe('AC-1 swapPairs field in /health', () => {
     try {
       const res = await fetch(`http://127.0.0.1:${instance.blsPort}/health`);
       const body = (await res.json()) as {
-        swapPairs: Array<{
+        swapPairs: {
           from: { assetCode: string; chain: string };
           to: { assetCode: string; chain: string };
           rate: string;
-        }>;
+        }[];
       };
       expect(body.swapPairs).toHaveLength(1);
       expect(body.swapPairs[0].from.assetCode).toBe('USDC');
