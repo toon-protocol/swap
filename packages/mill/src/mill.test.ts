@@ -31,6 +31,19 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
 import { describe, it, expect } from 'vitest';
+import { encodeEventToToon } from '@toon-protocol/core';
+import type { NostrEvent } from 'nostr-tools/pure';
+import { generateSecretKey } from 'nostr-tools/pure';
+import {
+  wrapSwapPacketToToon,
+  decryptFulfillClaim,
+  generateSolanaKeypair,
+  __streamSwapTesting,
+} from '@toon-protocol/sdk';
+import {
+  createPaymentHandlerAdapter,
+  createLogger,
+} from '@toon-protocol/connector';
 
 // NOTE: the following imports reference symbols that DO NOT YET EXIST.
 // TypeScript will error on these lines until Story 12.7's dev work lands.
@@ -56,6 +69,10 @@ interface MillInstanceShape {
     inventory: Record<string, string>;
   };
   _handlerRegistry?: { get(kind: number): unknown };
+  connector?: {
+    _packetHandler?: (req: unknown) => Promise<unknown>;
+    _calls?: string[];
+  };
 }
 
 // Dynamic import so TS doesn't fail at collection time.
@@ -82,8 +99,21 @@ const VALID_MNEMONIC =
 
 function fakeConnector(): any {
   const calls: string[] = [];
-  return {
+  const conn: any = {
     _calls: calls,
+    // Captures the local-delivery callback startMill wires via setPacketHandler
+    // so tests can drive an inbound ILP packet through the real dispatch path.
+    _packetHandler: undefined as
+      | ((req: {
+          amount: string;
+          destination: string;
+          data: string;
+        }) => Promise<unknown>)
+      | undefined,
+    setPacketHandler(handler: any) {
+      calls.push('setPacketHandler');
+      conn._packetHandler = handler;
+    },
     close: async () => {
       calls.push('close');
     },
@@ -91,6 +121,7 @@ function fakeConnector(): any {
     // the real interface turns out to be larger (see `@toon-protocol/core`).
     send: async () => ({ ok: true }),
   };
+  return conn;
 }
 
 function baseConfig(overrides: Record<string, unknown> = {}) {
@@ -177,6 +208,300 @@ describe('T-055 startMill boots and registers swap handler (AC-4, AC-8, AC-10)',
       expect(h.uptimeSec).toBeGreaterThanOrEqual(0);
       // Inventory serialized as bigint → decimal string (MAX_SAFE_INTEGER guard).
       expect(h.inventory['evm:8453']).toBe('1000000');
+    } finally {
+      await instance.stop();
+    }
+  });
+});
+
+// ===========================================================================
+// Story 50.3 (SOL settlement leg, AC#4): inbound kind:1059 dispatch
+//
+// Regression guard for the swap-handler DISPATCH bug — an inbound gift-wrap
+// (kind:1059) ILP packet destined for Mill's OWN address MUST be routed to the
+// registered swap handler, NOT fall through to the connector's auto-fulfill
+// "Local delivery - auto-fulfill stub" (which the sender's streamSwap FULFILL
+// decoder cannot JSON.parse → FULFILL_DECODE_FAILED).
+// ===========================================================================
+
+describe('Story 50.3 inbound kind:1059 dispatches to swap handler (AC#4)', () => {
+  it('[P0] wires the registry to the connector via setPacketHandler', async () => {
+    const startMill = await loadStartMill();
+    const cfg = baseConfig();
+    const instance = (await startMill(cfg)) as MillInstanceShape;
+    try {
+      const conn = cfg.connector as ReturnType<typeof fakeConnector>;
+      expect(conn._calls).toContain('setPacketHandler');
+      expect(typeof conn._packetHandler).toBe('function');
+    } finally {
+      await instance.stop();
+    }
+  });
+
+  it('[P0] routes an inbound kind:1059 packet to the swap handler (NOT the local-delivery stub)', async () => {
+    const startMill = await loadStartMill();
+    const cfg = baseConfig();
+    const instance = (await startMill(cfg)) as MillInstanceShape;
+    try {
+      const conn = cfg.connector as ReturnType<typeof fakeConnector>;
+      const handlePacket = conn._packetHandler!;
+      expect(handlePacket).toBeDefined();
+
+      // A kind:1059-shaped event whose content is NOT a real gift wrap. The swap
+      // handler will reject it with its OWN code ('F01' Invalid gift wrap), which
+      // PROVES dispatch reached the swap handler rather than the connector's
+      // default auto-fulfill stub.
+      const fakeGiftWrap: NostrEvent = {
+        id: '0'.repeat(64),
+        pubkey: '1'.repeat(64),
+        created_at: Math.floor(Date.now() / 1000),
+        kind: 1059,
+        tags: [],
+        content: 'not a real gift wrap',
+        sig: '0'.repeat(128),
+      };
+      const data = Buffer.from(encodeEventToToon(fakeGiftWrap)).toString(
+        'base64'
+      );
+
+      const res = (await handlePacket({
+        amount: '1000000',
+        destination: 'g.townhouse.mill',
+        data,
+      })) as {
+        accept: boolean;
+        code?: string;
+        data?: string;
+        rejectReason?: { code: string; message: string };
+      };
+
+      // Reached the swap handler → swap-specific reject, NOT a local-delivery ACK.
+      expect(res.accept).toBe(false);
+      expect(res.code).toBe('F01');
+      // The connector adapter requires a semantic rejectReason (else collapses to F99).
+      expect(res.rejectReason).toBeDefined();
+      // Must NOT be the auto-fulfill stub literal.
+      if (res.data) {
+        expect(Buffer.from(res.data, 'base64').toString('utf8')).not.toContain(
+          'Local delivery'
+        );
+      }
+    } finally {
+      await instance.stop();
+    }
+  });
+
+  it('[P0] returns swap-handler FULFILL metadata as base64-JSON data (not a stub string)', async () => {
+    // Verifies the metadata→data serialization: when the registered kind:1059
+    // handler accepts with metadata, the wired packet handler MUST surface that
+    // metadata as base64-JSON FULFILL `data` (the shape streamSwap decodes).
+    const startMill = await loadStartMill();
+    const cfg = baseConfig();
+    const instance = (await startMill(cfg)) as MillInstanceShape;
+    try {
+      const registry = instance._handlerRegistry as unknown as {
+        on(kind: number, handler: (ctx: unknown) => Promise<unknown>): void;
+      };
+      // Swap out the kind:1059 handler with a stub that accepts + emits metadata,
+      // mirroring createSwapHandler's `ctx.accept({ claim, ... })` shape.
+      const claim = { claim: 'BASE64CLAIM', claimId: 'abc', chain: 'solana' };
+      registry.on(1059, async (ctx: any) => ctx.accept(claim));
+
+      const conn = cfg.connector as ReturnType<typeof fakeConnector>;
+      const handlePacket = conn._packetHandler!;
+
+      const evt: NostrEvent = {
+        id: '0'.repeat(64),
+        pubkey: '1'.repeat(64),
+        created_at: Math.floor(Date.now() / 1000),
+        kind: 1059,
+        tags: [],
+        content: 'x',
+        sig: '0'.repeat(128),
+      };
+      const data = Buffer.from(encodeEventToToon(evt)).toString('base64');
+
+      const res = (await handlePacket({
+        amount: '1000000',
+        destination: 'g.townhouse.mill',
+        data,
+      })) as { accept: boolean; data?: string };
+
+      expect(res.accept).toBe(true);
+      expect(typeof res.data).toBe('string');
+      const decoded = JSON.parse(
+        Buffer.from(res.data as string, 'base64').toString('utf8')
+      );
+      expect(decoded).toMatchObject(claim);
+    } finally {
+      await instance.stop();
+    }
+  });
+
+  // -------------------------------------------------------------------------
+  // Story 50.3 AC#4 — END-TO-END FULFILL-DATA CONTRACT (SOL leg).
+  //
+  // The single most load-bearing assertion for the SOL settlement gate: an
+  // inbound REAL kind:1059 gift-wrap swap (built by the SDK's own
+  // `wrapSwapPacketToToon`) dispatched to Mill's REAL `createSwapHandler` +
+  // `MultiChainClaimIssuer` + Solana signer MUST produce a FULFILL whose
+  // `data`, after passing through the REAL connector
+  // (`createPaymentHandlerAdapter` → `convertLocalDeliveryResponse`
+  // re-encode/decode) and the client-side base64 re-encode, round-trips
+  // through `streamSwap`'s OWN `decodeFulfillMetadata` decoder AND
+  // `decryptFulfillClaim` to a NON-EMPTY signed claim.
+  //
+  // This locks the mill-handler ↔ sdk-streamSwap serialization contract:
+  // any future drift in the metadata→base64-JSON shape, the connector
+  // adapter's `validateResponseData` canonical-base64 gate, or the
+  // settlement-context field set fails HERE rather than only in the live
+  // Docker+Akash gate. Mirrors the wire hops in
+  // `packages/mill/tests/e2e/helpers/build-live-sender.ts` (FULFILL
+  // `ilpResult.data.toString('base64')`) and the client's
+  // `BtpRuntimeClient._sendIlpPacketWithClaimOnce` (`toBase64(response.data)`).
+  it('[P0] inbound kind:1059 SOL swap → FULFILL data round-trips through streamSwap decoder to a non-empty claim', async () => {
+    const startMill = await loadStartMill();
+
+    // Sender + SOL payout identities (the sender's chain-recipient).
+    const senderSecretKey = generateSecretKey();
+    const solRecipient = generateSolanaKeypair().publicKey; // base58 32-byte
+
+    // A valid base58 32-byte Solana channelId so streamSwap's per-chain
+    // `decodeFulfillMetadata(data, 'solana:devnet')` accepts the channelId
+    // (length-only checks would pass too, but we exercise the strict path).
+    const solChannelId = generateSolanaKeypair().publicKey;
+
+    const SOL_CHAIN = 'solana:devnet';
+    const pair = {
+      from: { assetCode: 'USDC', assetScale: 6, chain: 'evm:8453' },
+      to: { assetCode: 'USDC', assetScale: 6, chain: SOL_CHAIN },
+      rate: '1.0',
+    };
+
+    const cfg = baseConfig({
+      swapPairs: [pair],
+      chains: ['evm', 'solana'] as const,
+      channels: {
+        [SOL_CHAIN]: [
+          {
+            channelId: solChannelId,
+            cumulativeAmount: 0n,
+            nonce: 0n,
+            updatedAt: 0,
+          },
+        ],
+      },
+      inventory: { [SOL_CHAIN]: 1_000_000n },
+    });
+    const instance = (await startMill(cfg)) as MillInstanceShape & {
+      identity: { pubkey: string };
+    };
+
+    try {
+      // Build a REAL gift-wrapped swap PREPARE via the SDK using streamSwap's
+      // own rumor builder so the rumor tags (swap-from/to, chain-recipient)
+      // match exactly what streamSwap emits on the wire.
+      const sourceAmount = 1_000_000n;
+      const rumor = __streamSwapTesting.buildSwapRumor({
+        senderPubkey: '', // overwritten by getPublicKey inside the wrap
+        pair,
+        sourceAmount,
+        packetIndex: 1,
+        totalPackets: 1,
+        nonce: new Uint8Array(16),
+        createdAt: Math.floor(Date.now() / 1000),
+        chainRecipient: solRecipient,
+      });
+
+      const wrapped = wrapSwapPacketToToon({
+        rumor,
+        senderSecretKey,
+        recipientPubkey: instance.identity.pubkey,
+        destination: 'g.townhouse.mill',
+        amount: sourceAmount,
+      });
+      // `wrapped.ilpPrepare.data` is already base64 of the TOON gift-wrap —
+      // exactly the `request.data` shape Mill's handlePacket receives.
+      const requestData = wrapped.ilpPrepare.data;
+
+      // 1) Drive Mill's REAL packet handler (real createSwapHandler +
+      //    MultiChainClaimIssuer + Solana signer).
+      const handlePacket = (cfg.connector as ReturnType<typeof fakeConnector>)
+        ._packetHandler!;
+      const millResult = (await handlePacket({
+        amount: sourceAmount.toString(),
+        destination: 'g.townhouse.mill',
+        data: requestData,
+      })) as {
+        accept: boolean;
+        data?: string;
+        code?: string;
+        rejectReason?: { code: string; message: string };
+      };
+
+      // The swap MUST be accepted (provisioned SOL channel + inventory +
+      // signer). A reject here is the real "claims=0" gate failure.
+      expect(
+        millResult.accept,
+        `swap handler rejected: code=${millResult.code} reason=${JSON.stringify(
+          millResult.rejectReason
+        )}`
+      ).toBe(true);
+      expect(typeof millResult.data).toBe('string');
+
+      // 2) Pass Mill's response through the REAL connector
+      //    PaymentHandlerAdapter (what ConnectorNode.setPacketHandler wraps
+      //    the handler with) → `{ fulfill: { data } }`.
+      const adapter = createPaymentHandlerAdapter(
+        async () => millResult as never,
+        createLogger('mill-test-fulfill-roundtrip', 'error') as never
+      );
+      const adapterOut = (await adapter({
+        destination: 'g.townhouse.mill',
+        amount: sourceAmount.toString(),
+        expiresAt: new Date(Date.now() + 30_000).toISOString(),
+        data: requestData,
+      } as never)) as { fulfill?: { data?: string }; reject?: unknown };
+
+      // The adapter MUST NOT drop the data (validateResponseData canonical
+      // base64 gate) and MUST take the fulfill branch.
+      expect(
+        adapterOut.reject,
+        'connector adapter rejected the FULFILL'
+      ).toBeUndefined();
+      expect(adapterOut.fulfill).toBeDefined();
+      expect(typeof adapterOut.fulfill!.data).toBe('string');
+
+      // 3) `convertLocalDeliveryResponse` ships the FULFILL wire bytes as
+      //    `Buffer.from(fulfill.data, 'base64')` — the raw JSON bytes.
+      const fulfillWireBytes = Buffer.from(adapterOut.fulfill!.data!, 'base64');
+      expect(fulfillWireBytes.length).toBeGreaterThan(0);
+
+      // 4) The client (BtpRuntimeClient / build-live-sender) re-encodes the
+      //    FULFILL packet bytes as `toBase64(response.data)` before handing
+      //    them to streamSwap.
+      const streamSwapInputData = fulfillWireBytes.toString('base64');
+
+      // 5) streamSwap's OWN decoder — the canonical contract surface.
+      const meta = __streamSwapTesting.decodeFulfillMetadata(
+        streamSwapInputData,
+        SOL_CHAIN
+      );
+      expect(meta.recipient).toBe(solRecipient);
+      expect(meta.channelId).toBe(solChannelId);
+      expect(meta.nonce).toBeDefined();
+      expect(meta.cumulativeAmount).toBe(sourceAmount.toString());
+      expect(meta.millSignerAddress).toBeDefined();
+
+      // 6) Decrypt the NIP-44 claim exactly as streamSwap does and assert a
+      //    NON-EMPTY signed SOL claim (the AC#4 settlement payload).
+      const claimBytes = decryptFulfillClaim({
+        ciphertext: new Uint8Array(Buffer.from(meta.claim, 'base64')),
+        ephemeralPubkey: meta.ephemeralPubkey,
+        recipientSecretKey: senderSecretKey,
+      });
+      expect(claimBytes).toBeInstanceOf(Uint8Array);
+      expect(claimBytes.length).toBeGreaterThan(0);
     } finally {
       await instance.stop();
     }
@@ -837,5 +1162,152 @@ describe('Story 12.8 AC-13 — publisher injection', () => {
     )) as MillInstanceShape;
     expect(instance.health().status).toBe('ok');
     await instance.stop();
+  });
+});
+
+// ===========================================================================
+// Story 50.4 — kind:10032 ILP advertisement via the embedded connector
+//
+// A TOON relay is pay-to-write (its WS EVENT handler rejects unpaid writes),
+// so the legacy SimplePool publish is silently dropped. When a connector and
+// `peerInfoIlpDestination` are present, Mill must instead route the
+// TOON-encoded kind:10032 to that ILP address via an ILP PREPARE.
+// ===========================================================================
+
+describe('Story 50.4 — kind:10032 ILP advertisement (peerInfoIlpDestination)', () => {
+  // Fake connector that fulfills sendPacket and records each call. Operator-
+  // supplied (config.connector), so startMill does NOT call .start() on it.
+  function fulfillingConnector() {
+    const calls: { destination: string; amount: string; data: string }[] = [];
+    return {
+      _calls: calls,
+      close: async () => {},
+      sendPacket: async (p: any) => {
+        calls.push({
+          destination: p.destination,
+          amount: String(p.amount),
+          data: Buffer.from(p.data).toString('base64'),
+        });
+        return { type: 'fulfill' as const };
+      },
+    };
+  }
+
+  it('[P1] routes the kind:10032 through the connector via ILP PREPARE to peerInfoIlpDestination', async () => {
+    const startMill = await loadStartMill();
+    const connector = fulfillingConnector();
+    let built: any;
+    const { connector: _ignored, ...withoutConnector } = baseConfig();
+    const instance = (await startMill({
+      ...withoutConnector,
+      connector,
+      peerInfoIlpDestination: 'g.townhouse',
+      peerInfoPricePerByte: 0n,
+      __testHooks: { onPeerInfoBuilt: (e: unknown) => (built = e) },
+    } as any)) as MillInstanceShape;
+    try {
+      const deadline = Date.now() + 2_000;
+      while (connector._calls.length === 0 && Date.now() < deadline) {
+        await new Promise((r) => setTimeout(r, 20));
+      }
+      // The advertisement went out via ILP (sendPacket), not the Nostr WS path.
+      expect(connector._calls.length).toBe(1);
+      expect(connector._calls[0]!.destination).toBe('g.townhouse');
+      // amount = toonBytes * 0n = 0 (pilot relays advertise FEE_PER_EVENT=0).
+      expect(connector._calls[0]!.amount).toBe('0');
+      expect(connector._calls[0]!.data.length).toBeGreaterThan(0);
+      // The dispatched payload is the signed kind:10032 peer-info event.
+      expect(built.kind).toBe(10032);
+    } finally {
+      await instance.stop();
+    }
+  });
+
+  it('[P1] ILP path takes priority over the relayUrls Nostr publish', async () => {
+    const startMill = await loadStartMill();
+    const connector = fulfillingConnector();
+    const { connector: _ignored, ...withoutConnector } = baseConfig();
+    const instance = (await startMill({
+      ...withoutConnector,
+      connector,
+      // A relayUrls is still present; with a destination set the ILP path wins.
+      relayUrls: ['ws://localhost:0'],
+      peerInfoIlpDestination: 'g.townhouse',
+    } as any)) as MillInstanceShape;
+    try {
+      const deadline = Date.now() + 2_000;
+      while (connector._calls.length === 0 && Date.now() < deadline) {
+        await new Promise((r) => setTimeout(r, 20));
+      }
+      expect(connector._calls.length).toBe(1);
+    } finally {
+      await instance.stop();
+    }
+  });
+
+  it('[P1] a rejecting relay does NOT fail Mill boot but logs a loud error (AC #2)', async () => {
+    const startMill = await loadStartMill();
+    const connector = {
+      close: async () => {},
+      sendPacket: async () => ({
+        type: 'reject' as const,
+        code: 'F02',
+        message: 'no route to destination',
+      }),
+    };
+    const errors: { msg: string; fields?: Record<string, unknown> }[] = [];
+    const logger = {
+      debug: () => undefined,
+      info: () => undefined,
+      warn: () => undefined,
+      error: (msg: string, fields?: Record<string, unknown>) =>
+        errors.push({ msg, fields }),
+    };
+    const { connector: _ignored, ...withoutConnector } = baseConfig();
+    const instance = (await startMill({
+      ...withoutConnector,
+      connector,
+      logger,
+      peerInfoIlpDestination: 'g.townhouse',
+      // Collapse the retry window so the exhausted-retry path completes fast.
+      __testHooks: { peerInfoPublishRetry: { maxAttempts: 2, delayMs: 5 } },
+    } as any)) as MillInstanceShape;
+    // Boot resolves immediately regardless of the (fire-and-forget) publish.
+    expect(instance.health().status).toBe('ok');
+    // Let the bounded retry loop exhaust + log its terminal error (AC #2:
+    // failure is surfaced loudly rather than swallowed).
+    const deadline = Date.now() + 2_000;
+    while (
+      !errors.some((e) => e.msg === 'mill.peerInfo.publish_failed') &&
+      Date.now() < deadline
+    ) {
+      await new Promise((r) => setTimeout(r, 20));
+    }
+    const failLog = errors.find(
+      (e) => e.msg === 'mill.peerInfo.publish_failed'
+    );
+    expect(failLog).toBeDefined();
+    expect(failLog!.fields?.['destination']).toBe('g.townhouse');
+    await instance.stop();
+  });
+
+  it('[P1] falls back to the Nostr WS publish when no peerInfoIlpDestination is set', async () => {
+    const startMill = await loadStartMill();
+    const connector = fulfillingConnector();
+    const { connector: _ignored, ...withoutConnector } = baseConfig();
+    const instance = (await startMill({
+      ...withoutConnector,
+      connector,
+      relayUrls: ['ws://localhost:0'],
+      // peerInfoIlpDestination intentionally omitted → legacy WS path.
+    } as any)) as MillInstanceShape;
+    try {
+      // No ILP advertisement was attempted (connector.sendPacket untouched).
+      await new Promise((r) => setTimeout(r, 100));
+      expect(connector._calls.length).toBe(0);
+      expect(instance.health().status).toBe('ok');
+    } finally {
+      await instance.stop();
+    }
   });
 });

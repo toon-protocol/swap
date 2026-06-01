@@ -38,12 +38,24 @@ import {
   base58Encode,
 } from '@toon-protocol/sdk';
 import type { NodeIdentity, CreateSwapHandlerConfig } from '@toon-protocol/sdk';
-import { buildIlpPeerInfoEvent, VERSION } from '@toon-protocol/core';
+import {
+  buildIlpPeerInfoEvent,
+  createDirectIlpClient,
+  encodeEventToToon,
+  decodeEventFromToon,
+  shallowParseToon,
+  ilpCodeToSemantic,
+  VERSION,
+} from '@toon-protocol/core';
 import type {
+  ConnectorNodeLike,
   EmbeddableConnectorLike,
+  HandlePacketRequest,
+  HandlePacketResponse,
   IlpPeerInfo,
   SwapPair,
 } from '@toon-protocol/core';
+import { createHandlerContext } from '@toon-protocol/sdk';
 
 import { deriveMillKeys } from './wallet.js';
 import type { MillKeys, MillChainKind } from './wallet.js';
@@ -118,9 +130,12 @@ export interface MillConfig {
   connectorUrl?: string;
   /**
    * Peer ID of the parent connector when `connectorUrl` is set. Default `'apex'`.
-   * Pure-routing identifier; the connector's `PeerConfig` has no `relation`
-   * field — parent semantics live in the routing table (default `g.` route
-   * points to this peer).
+   * MUST equal the parent connector's **nodeId** — the embedded ConnectorNode
+   * registers this peer with `relation: 'parent'`, and connector >=3.8.0 keys
+   * peerRelations by the auth-declared peerId of the inbound BTP session (= the
+   * parent's nodeId). A mismatch means the relation-aware inbound-claim skip
+   * (toon-protocol/connector#78) never fires and parent-forwarded claimless
+   * paid packets are F06-rejected.
    */
   parentPeerId?: string;
   /**
@@ -231,6 +246,31 @@ export interface MillConfig {
   advertisedAsset?: { assetCode: string; assetScale: number };
 
   /**
+   * Story 50.4 — ILP destination for the kind:10032 advertisement.
+   *
+   * A TOON relay is pay-to-write: its WebSocket `EVENT` handler rejects
+   * unpaid writes ('restricted: writes require ILP payment'), so a plain
+   * Nostr publish (the `relayUrls`/SimplePool path) is NEVER stored by a
+   * TOON relay. When this is set, `startMill()` instead routes the
+   * TOON-encoded kind:10032 to this ILP address via an ILP PREPARE through
+   * the embedded connector (mirrors `startTown()`'s self-advertise via
+   * `ilpClient.sendIlpPacket`). Point it at the ILP address of a relay node
+   * that stores events (e.g. the apex `g.townhouse`). Requires a connector
+   * (`connector` or `connectorUrl`). When unset, falls back to the legacy
+   * SimplePool Nostr publish against `relayUrls` (only useful for a vanilla
+   * Nostr relay).
+   */
+  peerInfoIlpDestination?: string;
+  /**
+   * Story 50.4 — price-per-byte used to compute the ILP PREPARE `amount`
+   * for the kind:10032 advertisement (`amount = toonBytes * pricePerByte`).
+   * Must be >= the destination relay's per-byte price or the packet is
+   * rejected. Defaults to `0n` (TOON pilot relays advertise `FEE_PER_EVENT=0`).
+   * Only meaningful when `peerInfoIlpDestination` is set.
+   */
+  peerInfoPricePerByte?: bigint;
+
+  /**
    * Story 12.8 AC-13 — optional injectable relay publisher.
    *
    * When omitted, the default implementation uses a
@@ -250,6 +290,12 @@ export interface MillConfig {
    */
   __testHooks?: {
     onPeerInfoBuilt?: (event: unknown) => void;
+    /**
+     * @internal — overrides the ILP-advertisement retry budget so tests can
+     * exercise the exhausted-retry (loud-failure) path without waiting the
+     * production ~24s window. NOT part of the public contract.
+     */
+    peerInfoPublishRetry?: { maxAttempts?: number; delayMs?: number };
   };
 }
 
@@ -727,6 +773,16 @@ export async function startMill(config: MillConfig): Promise<MillInstance> {
             id: parentPeerId,
             url: config.connectorUrl,
             authToken: parentAuthToken,
+            // Tag the upstream as our PARENT so the embedded connector's
+            // relation-aware inbound claim validation (toon-protocol/connector#78)
+            // skips the per-packet-claim requirement for PREPAREs forwarded by the
+            // parent (which settles in aggregate and attaches no per-packet claim
+            // to a child). Without this the peer defaults to 'peer' and Mill
+            // F06-rejects any claimless parent-forwarded paid packet. NOTE:
+            // `parentPeerId` MUST equal the parent connector's nodeId — the
+            // connector keys peerRelations by the auth-declared peerId of the
+            // inbound BTP session, not a local alias.
+            relation: 'parent',
             // Advertise our EVM treasury to the parent so the apex's
             // PerPacketClaimService can open a settlement channel toward
             // this Mill without needing kind:10032 discovery first.
@@ -849,6 +905,147 @@ export async function startMill(config: MillConfig): Promise<MillInstance> {
     }
   }
 
+  // 11a. Wire the HandlerRegistry to the connector's local-delivery path.
+  //
+  // Story 50.3 (SOL settlement leg, AC#4): inbound kind:1059 (NIP-59 gift-wrap)
+  // swap-request packets destined for Mill's OWN ILP address MUST be dispatched
+  // to `swapHandler` so Mill returns a signed claim in the FULFILL `data`. Mill
+  // does NOT route through `createToonNode()` (the SDK helper that performs this
+  // wiring for town nodes), so without an explicit `setPacketHandler()` call the
+  // embedded ConnectorNode has no `localDeliveryHandler` set. With
+  // `localDelivery: { enabled: false }`, the connector's PacketHandler then falls
+  // through to its auto-fulfill stub, returning the literal string
+  // `"Local delivery - auto-fulfill stub"` as FULFILL data — which the sender's
+  // streamSwap decoder cannot JSON.parse (`FULFILL_DECODE_FAILED`).
+  //
+  // This handler mirrors the canonical pipeline in
+  // `@toon-protocol/sdk` `create-node.ts`:
+  //   1. Shallow-parse the TOON to recover the real event kind for routing.
+  //   2. Build a HandlerContext and dispatch to the registry (kind:1059 →
+  //      swapHandler). Verification/replay-protection happen INSIDE the swap
+  //      handler (it unwraps + verifies the gift-wrap itself); payment was
+  //      already gated by the apex parent on the inbound hop.
+  //   3. Serialize the handler's `accept()` metadata → base64-JSON FULFILL
+  //      `data` (connector v3.3.2 PaymentHandlerAdapter consumes `data`, not
+  //      `metadata`). This is the exact shape streamSwap's FULFILL decoder reads.
+  //   4. Reverse-map the handler's ILP reject code → the connector adapter's
+  //      semantic `rejectReason` (otherwise every reject collapses to F99).
+  const toonDecoder = (toon: string): NostrEvent =>
+    decodeEventFromToon(Buffer.from(toon, 'base64'));
+
+  const handlePacket = async (
+    request: HandlePacketRequest
+  ): Promise<HandlePacketResponse> => {
+    let meta;
+    try {
+      meta = shallowParseToon(Buffer.from(request.data, 'base64'));
+    } catch {
+      return {
+        accept: false,
+        code: 'F06',
+        message: 'Invalid TOON payload',
+      };
+    }
+
+    let amount: bigint;
+    try {
+      amount = BigInt(request.amount);
+    } catch {
+      return { accept: false, code: 'T00', message: 'Invalid payment amount' };
+    }
+
+    const ctx = createHandlerContext({
+      toon: request.data,
+      meta,
+      amount,
+      destination: request.destination,
+      toonDecoder,
+    });
+
+    let result: HandlePacketResponse;
+    try {
+      result = (await registry.dispatch(ctx)) as HandlePacketResponse;
+    } catch (err) {
+      logger.error?.('mill.packet.dispatch_failed', { err: errSummary(err) });
+      return { accept: false, code: 'T00', message: 'Internal error' };
+    }
+
+    // Connector v3.3.2: the embedded ConnectorNode's PaymentHandlerAdapter
+    // consumes `response.data` (base64) and ignores `response.metadata`.
+    // The swap handler returns the signed claim via `ctx.accept(metadata)`;
+    // serialize it into `data` as the base64-JSON shape streamSwap expects.
+    if (result.accept && result.metadata && !result.data) {
+      try {
+        const json = JSON.stringify(result.metadata);
+        (result as { data?: string }).data = Buffer.from(json, 'utf8').toString(
+          'base64'
+        );
+      } catch (err) {
+        logger.error?.('mill.packet.metadata_serialize_failed', {
+          err: errSummary(err),
+        });
+      }
+    }
+
+    // Connector v3.3.2: the adapter's reject path reads
+    // `response.rejectReason.{code,message}` and feeds `code` through
+    // `mapRejectCode()` (semantic-reason → ILP-code). The handler's
+    // `ctx.reject(ilpCode, message)` returns the ILP code directly, so
+    // reverse-map it to the semantic reason or every reject collapses to F99.
+    if (
+      !result.accept &&
+      !(result as { rejectReason?: unknown }).rejectReason &&
+      (result as { code?: string }).code
+    ) {
+      const ilpCode = (result as { code: string }).code;
+      (
+        result as { rejectReason?: { code: string; message: string } }
+      ).rejectReason = {
+        code: ilpCodeToSemantic(ilpCode),
+        message: (result as { message?: string }).message ?? 'Payment rejected',
+      };
+    }
+
+    return result;
+  };
+
+  // Register the handler as the connector's local-delivery callback. Guarded
+  // because `setPacketHandler` is optional on EmbeddableConnectorLike (HTTP-mode
+  // connectors and test doubles may omit it).
+  if (effectiveConnector?.setPacketHandler) {
+    effectiveConnector.setPacketHandler(handlePacket);
+    logger.debug?.('mill.connector.packet_handler_wired', {});
+  } else {
+    logger.warn?.('mill.connector.packet_handler_unavailable', {
+      reason:
+        'connector exposes no setPacketHandler; inbound kind:1059 swap packets cannot be dispatched to the swap handler',
+    });
+  }
+
+  // 11b. Start the auto-created connector.
+  //
+  // Story 50.4: an auto-created ConnectorNode does NOT open its BTP server or
+  // dial its parent peer until `.start()` is called (ConnectorNode.sendPacket
+  // throws `ConnectorNotStartedError` until then). Without this, every outbound
+  // `sendPacket()` (including the kind:10032 ILP advertisement below) has no
+  // live session to route through. Operator-supplied connectors
+  // (`config.connector`) are the caller's responsibility to start — mirrors
+  // `startTown()`, which only starts the connectors it auto-creates.
+  //
+  // `start()` resolves promptly even when the parent is unreachable (the BTP
+  // peer dial retries in the background), so a flaky/absent parent MUST NOT
+  // abort boot (R-8N2). A genuine start failure is surfaced at `error`.
+  if (ownsConnector && autoCreatedConnector) {
+    try {
+      await autoCreatedConnector.start();
+      logger.debug?.('mill.connector.started', {
+        nodeId: config.nodeId ?? `toon-mill-${identity.pubkey.slice(0, 16)}`,
+      });
+    } catch (err) {
+      logger.error?.('mill.connector.start_failed', { err: errSummary(err) });
+    }
+  }
+
   // 12. BLS server (Hono).
   let status: MillHealthResponse['status'] = 'starting';
   const getHealth = (): MillHealthResponse => {
@@ -918,39 +1115,144 @@ export async function startMill(config: MillConfig): Promise<MillInstance> {
     });
   }
 
+  // Flipped by `stop()` so the ILP advertisement retry loop below bails out
+  // promptly during teardown instead of retrying for ~24s against a connector
+  // that is being closed.
+  let stopRequested = false;
+
   // 13. Publish kind:10032 with swapPairs.
   //
-  // Story 12.8 AC-13: resolve the publisher seam (either the operator-
-  // supplied injection or a SimplePool-backed default), then broadcast
-  // the built event. Publish is fire-and-forget with Promise.allSettled
-  // semantics — a rejecting relay MUST NOT fail boot. The broadcast
-  // runs on the next microtask (after `startMill()` resolves) so the
-  // caller observes a ready Mill before relay I/O begins.
+  // Two publish paths (Story 50.4):
+  //   (a) ILP advertisement (production) — when `config.publisher` is not
+  //       injected and `peerInfoIlpDestination` + a connector are present,
+  //       route the TOON-encoded kind:10032 to that relay's ILP address via an
+  //       ILP PREPARE through the embedded connector. This is the ONLY write
+  //       path a TOON relay accepts: its WebSocket EVENT handler rejects unpaid
+  //       writes, so a plain Nostr publish (path b) is silently dropped by a
+  //       TOON relay. Mirrors `startTown()`'s self-advertise via
+  //       `ilpClient.sendIlpPacket`.
+  //   (b) Nostr WS publish (legacy) — SimplePool.publish against
+  //       `config.relayUrls`. Retained for vanilla Nostr relays and as the
+  //       fallback when no ILP destination is configured; a no-op against a
+  //       pay-to-write TOON relay.
+  //
+  // Publish is fire-and-forget — a failing/absent relay MUST NOT fail boot
+  // (R-8N2). The ILP path retries across a window (the parent BTP session
+  // establishes asynchronously after `start()`); exhausting it logs at `error`
+  // so a gate run fails LOUDLY with a reason instead of timing out 30s
+  // downstream on a silently-dropped advertisement (Story 50.4 AC #2).
   let autoPool: SimplePool | undefined;
-  const effectivePublisher: Publisher =
-    config.publisher ??
-    (() => {
-      autoPool = new SimplePool();
-      return {
-        async publish(event: unknown): Promise<void> {
-          // `Promise.allSettled` ensures a single rejecting relay cannot
-          // surface an aggregate rejection back to the caller.
-          // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
-          const promises = autoPool!.publish(
-            [...config.relayUrls],
-            event as NostrEvent
+
+  const wsPublisher: Publisher = {
+    async publish(event: unknown): Promise<void> {
+      autoPool ??= new SimplePool();
+      // `Promise.allSettled` ensures a single rejecting relay cannot
+      // surface an aggregate rejection back to the caller.
+      const promises = autoPool.publish(
+        [...config.relayUrls],
+        event as NostrEvent
+      );
+      const results = await Promise.allSettled(promises);
+      const rejected = results.filter((r) => r.status === 'rejected');
+      for (const r of rejected) {
+        logger.warn?.('mill.peerInfo.relay_publish_failed', {
+          err: errSummary((r as PromiseRejectedResult).reason),
+        });
+      }
+      // A TOON relay ACKs the WS EVENT with OK=false rather than dropping the
+      // socket, so `allSettled` resolves even though nothing was stored. Surface
+      // the limitation loudly so a misconfigured (ILP-less) Mill is diagnosable
+      // instead of silently never-advertising (Story 50.4 AC #2).
+      logger.warn?.('mill.peerInfo.ws_publish_unverified', {
+        relayUrls: config.relayUrls,
+        reason:
+          'Nostr WS publish cannot be confirmed stored; a TOON relay is pay-to-write. Set peerInfoIlpDestination to advertise via ILP.',
+      });
+    },
+  };
+
+  const ilpPublisher: Publisher | undefined =
+    effectiveConnector && config.peerInfoIlpDestination
+      ? (() => {
+          const destination = config.peerInfoIlpDestination;
+          const pricePerByte = config.peerInfoPricePerByte ?? 0n;
+          const ilpClient = createDirectIlpClient(
+            effectiveConnector as unknown as ConnectorNodeLike
           );
-          const results = await Promise.allSettled(promises);
-          for (const r of results) {
-            if (r.status === 'rejected') {
-              logger.warn?.('mill.peerInfo.relay_publish_failed', {
-                err: errSummary(r.reason),
+          const maxAttempts =
+            config.__testHooks?.peerInfoPublishRetry?.maxAttempts ?? 12;
+          const retryDelayMs =
+            config.__testHooks?.peerInfoPublishRetry?.delayMs ?? 2_000;
+          return {
+            async publish(event: unknown): Promise<void> {
+              const toonBytes = encodeEventToToon(event as NostrEvent);
+              const data = Buffer.from(toonBytes).toString('base64');
+              const amount = String(BigInt(toonBytes.length) * pricePerByte);
+              let lastReason = 'no attempt made';
+              for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+                if (stopRequested) return;
+                try {
+                  const res = await ilpClient.sendIlpPacket({
+                    destination,
+                    amount,
+                    data,
+                  });
+                  if (res.accepted) {
+                    logger.info?.('mill.peerInfo.published', {
+                      destination,
+                      attempt,
+                      eventId: (event as NostrEvent).id,
+                    });
+                    return;
+                  }
+                  lastReason = `${res.code ?? 'reject'}: ${res.message ?? 'rejected by relay'}`;
+                } catch (err) {
+                  lastReason = errSummary(err).message;
+                }
+                logger.debug?.('mill.peerInfo.publish_retry', {
+                  destination,
+                  attempt,
+                  maxAttempts,
+                  reason: lastReason,
+                });
+                if (attempt < maxAttempts && !stopRequested) {
+                  await new Promise((r) => setTimeout(r, retryDelayMs));
+                }
+              }
+              if (stopRequested) return;
+              // Loud, terminal failure (Story 50.4 AC #2). Logged at `error`
+              // (→ stderr via the entrypoint logger) rather than thrown: the
+              // call site is fire-and-forget, so a throw would only become a
+              // floating rejection it already logs. Logging here keeps the
+              // diagnosis attached to the per-attempt context.
+              logger.error?.('mill.peerInfo.publish_failed', {
+                destination,
+                attempts: maxAttempts,
+                reason: lastReason,
+                hint: 'kind:10032 advertisement never stored — gate discovery will time out. Check the relay ILP route + price.',
               });
-            }
-          }
-        },
-      };
-    })();
+            },
+          };
+        })()
+      : undefined;
+
+  // Story 50.4: if an operator set `peerInfoIlpDestination` but supplied no
+  // connector (neither `config.connector` nor `config.connectorUrl`, so no
+  // connector was auto-created), `ilpPublisher` is undefined and the kind:10032
+  // silently falls back to the WS path — which a pay-to-write TOON relay drops,
+  // and whose warning misleadingly tells the operator to "Set
+  // peerInfoIlpDestination" they already set. Surface the misconfiguration
+  // loudly so the dead advertisement is diagnosable at boot (AC #2).
+  if (config.peerInfoIlpDestination && !effectiveConnector) {
+    logger.error?.('mill.peerInfo.ilp_destination_ignored', {
+      destination: config.peerInfoIlpDestination,
+      reason:
+        'peerInfoIlpDestination is set but no connector is available (set config.connector or config.connectorUrl). kind:10032 will fall back to an unpaid Nostr WS publish that a TOON relay rejects.',
+    });
+  }
+
+  const effectivePublisher: Publisher =
+    config.publisher ?? ilpPublisher ?? wsPublisher;
 
   try {
     const ownIlpInfo: IlpPeerInfo = {
@@ -967,16 +1269,20 @@ export async function startMill(config: MillConfig): Promise<MillInstance> {
     logger.debug?.('mill.peerInfo.built', {
       id: ilpInfoEvent.id,
       swapPairs: config.swapPairs.length,
+      via: ilpPublisher && !config.publisher ? 'ilp' : 'ws',
+      destination: config.peerInfoIlpDestination,
       relayUrls: config.relayUrls,
     });
 
-    // Actually broadcast. Swallow promise rejection at this level — the
-    // publisher impl already logs per-relay failures.
+    // Fire-and-forget so boot is not blocked on relay I/O. Failures are logged
+    // at error here (the publisher impls already log per-attempt detail).
     void effectivePublisher.publish(ilpInfoEvent).catch((err) => {
-      logger.warn?.('mill.peerInfo.publish_failed', { err: errSummary(err) });
+      logger.error?.('mill.peerInfo.publish_failed', {
+        err: errSummary(err),
+      });
     });
   } catch (err) {
-    logger.warn?.('mill.peerInfo.publish_failed', { err: errSummary(err) });
+    logger.error?.('mill.peerInfo.publish_failed', { err: errSummary(err) });
   }
 
   status = 'ok';
@@ -993,6 +1299,7 @@ export async function startMill(config: MillConfig): Promise<MillInstance> {
     async stop() {
       if (stopped) return;
       stopped = true;
+      stopRequested = true;
       status = 'stopping';
       try {
         await new Promise<void>((resolve) => {
