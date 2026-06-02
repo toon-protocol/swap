@@ -9,13 +9,14 @@
 import { secp256k1 } from '@noble/curves/secp256k1.js';
 import { ed25519 } from '@noble/curves/ed25519.js';
 import { sha256 } from '@noble/hashes/sha2.js';
-import { bytesToHex } from '@noble/hashes/utils.js';
 
 // Story 12.6 AC-6: balance-proof hashes moved to @toon-protocol/sdk so the
 // Mill-side signer and the sender-side verifier share a single source of truth.
 import {
   balanceProofHashEvm,
   balanceProofHashSolana,
+  balanceProofFieldsMina,
+  base58Encode,
   bigintToBytes32BE,
   concatBytes,
   hexToBytes,
@@ -133,6 +134,44 @@ export interface MinaPaymentChannelSignerConfig {
   publicKey: string;
 }
 
+/**
+ * Mina private-key version byte for the base58check encoding mina-signer
+ * expects (the `EK…` prefix). Followed by a `0x01` non-zero tag byte and the
+ * 32-byte field scalar in LITTLE-ENDIAN order, then a 4-byte double-sha256
+ * checksum.
+ */
+const MINA_PRIVATE_KEY_VERSION = 0x5a;
+
+/**
+ * Convert a big-endian 32-byte hex scalar (the form `deriveMillKeys()` emits
+ * for Mina — see `packages/mill/src/wallet.ts` `deriveMina`) into the Mina
+ * base58check private-key string mina-signer's `signFields`/`derivePublicKey`
+ * require. If the input already looks like a base58 `EK…` key it is returned
+ * unchanged.
+ *
+ * Layout (pre-checksum): `[0x5a, 0x01, <scalar bytes little-endian>]`, then
+ * append the first 4 bytes of `sha256(sha256(payload))` and base58-encode.
+ *
+ * This closes the Story 12.4/12.8 gap where the Mill stored a hex scalar but
+ * passed it verbatim to mina-signer (which rejected it as invalid base58),
+ * preventing the Mill from ever producing a sender-verifiable Mina claim.
+ */
+export function hexToMinaBase58PrivateKey(privateKey: string): string {
+  // Already a Mina base58 private key (EK… ~52 chars) — pass through.
+  if (!/^(0x)?[0-9a-fA-F]{64}$/.test(privateKey)) {
+    return privateKey;
+  }
+  const beScalar = hexToBytes(privateKey); // 32 bytes, big-endian
+  // mina-signer/Pallas serializes the scalar little-endian.
+  const leScalar = Uint8Array.from(beScalar).reverse();
+  const payload = concatBytes(
+    Uint8Array.from([MINA_PRIVATE_KEY_VERSION, 0x01]),
+    leScalar
+  );
+  const checksum = sha256(sha256(payload)).slice(0, 4);
+  return base58Encode(concatBytes(payload, checksum));
+}
+
 export class MinaPaymentChannelSigner implements PaymentChannelSigner {
   public readonly chain: string;
   public readonly chainKind: MillChainKind = 'mina';
@@ -164,24 +203,17 @@ export class MinaPaymentChannelSigner implements PaymentChannelSigner {
         signerModule = null;
       }
 
-      // Pack params into field elements. Pallas field order is slightly
-      // less than 2^254, so we hash `channelId`/`recipient` to sha256 and
-      // take the first 240 bits (60 hex chars / 30 bytes) as a
-      // conservative, guaranteed-in-field representation. This is a
-      // documented stand-in until Story 12.8 E2E wires the real
-      // mina-signer + in-field encoding.
-      const hashToField = (s: string): bigint => {
-        const digestHex = bytesToHex(sha256(new TextEncoder().encode(s)));
-        return BigInt('0x' + digestHex.slice(0, 60));
-      };
-      const channelField = hashToField(params.channelId);
-      const recipientField = hashToField(params.recipient);
-      const fields = [
-        channelField,
+      // Pack params into field elements via the SHARED helper in
+      // `@toon-protocol/sdk` so the Mill signer and the sender-side
+      // `verifyMinaSignature` cannot drift (Story 12.6 AC-6 pattern). The
+      // helper hashes `channelId`/`recipient` to a Pallas-field-safe bigint
+      // (first 240 bits of sha256) — see `balanceProofFieldsMina`.
+      const fields = balanceProofFieldsMina(
+        params.channelId,
         params.cumulativeAmount,
         params.nonce,
-        recipientField,
-      ];
+        params.recipient
+      );
 
       if (signerModule) {
         // mina-signer peer dep IS present — any signing failure here is a
@@ -203,7 +235,12 @@ export class MinaPaymentChannelSigner implements PaymentChannelSigner {
           ) => { signature: unknown };
         };
         const client = new ClientCtor({ network: 'mainnet' });
-        const signed = client.signFields(fields, this.privateKey);
+        // `deriveMillKeys()` emits a big-endian hex scalar; mina-signer needs a
+        // Mina base58check (`EK…`) private key. Convert before signing so the
+        // produced signature is verifiable by the sender-side
+        // `verifyMinaSignature` (Story 12.8).
+        const minaPrivateKey = hexToMinaBase58PrivateKey(this.privateKey);
+        const signed = client.signFields(fields, minaPrivateKey);
         const sigStr =
           typeof signed.signature === 'string'
             ? signed.signature

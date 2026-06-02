@@ -66,6 +66,13 @@ interface CliRawConfig {
   parentPeerId?: string;
   parentAuthToken?: string;
   nodeId?: string;
+  // Embedded-connector chain providers (EVM / Solana / Mina). Forwarded
+  // verbatim to startMill(), which validates the discriminated-union shape and
+  // defaults each entry's keyId. See MillConfig.chainProviders.
+  chainProviders?: unknown;
+  // Embedded-connector ClaimReceiver signer + parent treasury address.
+  settlementPrivateKey?: string;
+  parentEvmAddress?: string;
 }
 
 function toBigInt(v: unknown): bigint {
@@ -152,6 +159,15 @@ function parseRawConfig(raw: CliRawConfig): MillConfig {
     cfg.parentAuthToken = raw.parentAuthToken;
   }
   if (raw.nodeId) cfg.nodeId = raw.nodeId;
+  if (raw.chainProviders !== undefined) {
+    // Forward verbatim; startMill()'s validateConfig() enforces the
+    // discriminated-union shape (EVM / Solana / Mina) and defaults keyId.
+    cfg.chainProviders = raw.chainProviders as MillConfig['chainProviders'];
+  }
+  if (raw.settlementPrivateKey) {
+    cfg.settlementPrivateKey = raw.settlementPrivateKey;
+  }
+  if (raw.parentEvmAddress) cfg.parentEvmAddress = raw.parentEvmAddress;
   return cfg;
 }
 

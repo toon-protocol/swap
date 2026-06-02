@@ -114,6 +114,78 @@ export interface Publisher {
  * `channels[chain]` + `inventory[chain]` MUST exist for every distinct
  * `pair.to.chain`.
  */
+
+/**
+ * Per-chain provider config wired into the Mill's embedded connector for
+ * per-packet claim verification + signing. This is a structural mirror of
+ * the connector's `ChainProviderConfigEntry` (`ProviderConfig & { chainId }`)
+ * discriminated union — declared here (rather than imported) so the Mill's
+ * public config surface does not take a compile-time type dep on a connector
+ * internal. The connector validates these again at boot; the shapes MUST stay
+ * in sync with `@toon-protocol/connector`'s
+ * `settlement/provider/payment-channel-provider.ts`.
+ *
+ * `keyId` is declared optional on every variant because the Mill defaults it
+ * (see {@link MillConfig.chainProviders}); the connector requires it for
+ * evm/solana and treats it as optional for mina.
+ */
+export interface MillEvmChainProvider {
+  chainType: 'evm';
+  /** Namespaced chain id used by the connector registry, e.g. `evm:base:8453`. */
+  chainId: string;
+  /** JSON-RPC endpoint URL. */
+  rpcUrl: string;
+  /** TokenNetworkRegistry / PaymentChannel registry contract address. */
+  registryAddress: string;
+  /** Settlement token (USDC, M2M, …) contract address. */
+  tokenAddress: string;
+  /** Hex private key used to sign settlement claims. Defaulted by the Mill. */
+  keyId?: string;
+}
+
+export interface MillSolanaChainProvider {
+  chainType: 'solana';
+  /** Namespaced chain id, e.g. `solana:devnet`. */
+  chainId: string;
+  /** Solana cluster RPC endpoint (HTTP). */
+  rpcUrl: string;
+  /** Solana WebSocket endpoint for account subscriptions (derived if absent). */
+  wsUrl?: string;
+  /** Payment-channel program ID (base58-encoded). */
+  programId: string;
+  /** SPL token mint address (base58-encoded) for the channel token. */
+  tokenMint?: string;
+  /** Solana cluster name for chain-id namespacing (e.g. `devnet`). */
+  cluster?: string;
+  /** Hex/base58 key used to sign Ed25519 settlement claims. Defaulted by the Mill. */
+  keyId?: string;
+}
+
+export interface MillMinaChainProvider {
+  chainType: 'mina';
+  /** Namespaced chain id, e.g. `mina:devnet`. */
+  chainId: string;
+  /** Mina GraphQL endpoint. */
+  graphqlUrl: string;
+  /** zkApp address for the payment-channel contract (base58-encoded public key). */
+  zkAppAddress: string;
+  /** Mina token id (native MINA or a custom fungible token). */
+  tokenId?: string;
+  /** Mina network name for chain-id namespacing (e.g. `devnet`). */
+  network?: string;
+  /** Base58 key used to sign Poseidon-commitment settlement claims. Defaulted by the Mill. */
+  keyId?: string;
+}
+
+/**
+ * Discriminated union of all supported Mill chain-provider configs. Narrow on
+ * the `chainType` field. Mirrors the connector's `ChainProviderConfigEntry`.
+ */
+export type MillChainProvider =
+  | MillEvmChainProvider
+  | MillSolanaChainProvider
+  | MillMinaChainProvider;
+
 export interface MillConfig {
   // --- Identity (exactly one required) ---
   mnemonic?: string;
@@ -189,23 +261,21 @@ export interface MillConfig {
   transport?: TransportConfig;
   /**
    * Optional chainProviders to wire into the embedded connector for
-   * per-packet claim verification + signing. One entry per EVM chain the
-   * Mill plans to settle on; the shape mirrors the apex YAML
-   * `chainProviders` block exactly. Ignored if `connector` is supplied
-   * (operator owns its connector lifecycle and config in that mode).
+   * per-packet claim verification + signing. One entry per chain the Mill
+   * plans to settle on; the shape mirrors the apex YAML `chainProviders`
+   * block exactly (the connector's `ChainProviderConfigEntry =
+   * ProviderConfig & { chainId }` discriminated union — EVM / Solana /
+   * Mina). Ignored if `connector` is supplied (operator owns its connector
+   * lifecycle and config in that mode).
    *
-   * `keyId` defaults to the 0x-prefixed identity.secretKey hex when
-   * omitted — the same secp256k1 key that derives the Nostr identity
-   * doubles as the EVM signing key for claim issuance.
+   * `keyId` defaults to the operator-supplied {@link settlementPrivateKey}
+   * or the 0x-prefixed identity.secretKey hex when omitted — the same
+   * secp256k1 key that derives the Nostr identity doubles as the signing
+   * key for claim issuance. (Mina's `keyId` is optional per the connector
+   * contract, but the Mill still defaults it so claim signing works out of
+   * the box on every chain type.)
    */
-  chainProviders?: readonly {
-    chainType: 'evm';
-    chainId: string;
-    rpcUrl: string;
-    registryAddress: string;
-    tokenAddress: string;
-    keyId?: string;
-  }[];
+  chainProviders?: readonly MillChainProvider[];
   /**
    * EVM private key for embedded-connector ClaimReceiver / chainProviders
    * `keyId` defaults. When set, used in place of the 0x-hex identity
@@ -509,22 +579,58 @@ function validateConfig(config: MillConfig): void {
       );
     }
     for (const [i, p] of config.chainProviders.entries()) {
-      const required: readonly (keyof typeof p)[] = [
-        'chainType',
-        'chainId',
-        'rpcUrl',
-        'registryAddress',
-        'tokenAddress',
-      ];
-      for (const k of required) {
-        const v = p[k];
-        if (typeof v !== 'string' || v.length === 0) {
-          throw new MillStartError(
-            'INVALID_CONFIG',
-            `MillConfig.chainProviders[${i}].${String(k)} MUST be a non-empty string`
-          );
-        }
-      }
+      validateChainProviderEntry(p, i);
+    }
+  }
+}
+
+/**
+ * Required non-empty string fields per chain type, mirroring the connector's
+ * `REQUIRED_FIELDS_BY_CHAIN_TYPE` in `@toon-protocol/connector`'s
+ * `config/types.ts`. `keyId` is intentionally omitted from every list because
+ * the Mill defaults it before forwarding to the connector (see
+ * `MillConfig.chainProviders`).
+ */
+const MILL_REQUIRED_PROVIDER_FIELDS: Record<
+  MillChainProvider['chainType'],
+  readonly string[]
+> = {
+  evm: ['chainId', 'rpcUrl', 'registryAddress', 'tokenAddress'],
+  solana: ['chainId', 'rpcUrl', 'programId'],
+  mina: ['chainId', 'graphqlUrl', 'zkAppAddress'],
+};
+
+/**
+ * Validate a single `chainProviders` entry. Discriminates on `chainType` and
+ * enforces the per-chain required-field set above. Unknown chain types are
+ * rejected with a domain-specific error rather than silently forwarded to the
+ * connector (which would reject them later with a less actionable message).
+ */
+function validateChainProviderEntry(p: unknown, i: number): void {
+  if (typeof p !== 'object' || p === null) {
+    throw new MillStartError(
+      'INVALID_CONFIG',
+      `MillConfig.chainProviders[${i}] MUST be an object`
+    );
+  }
+  const rec = p as Record<string, unknown>;
+  const chainType = rec['chainType'];
+  if (chainType !== 'evm' && chainType !== 'solana' && chainType !== 'mina') {
+    throw new MillStartError(
+      'INVALID_CONFIG',
+      `MillConfig.chainProviders[${i}].chainType MUST be one of 'evm' | 'solana' | 'mina' (got ${JSON.stringify(
+        chainType
+      )})`
+    );
+  }
+  const required = MILL_REQUIRED_PROVIDER_FIELDS[chainType];
+  for (const k of required) {
+    const v = rec[k];
+    if (typeof v !== 'string' || v.length === 0) {
+      throw new MillStartError(
+        'INVALID_CONFIG',
+        `MillConfig.chainProviders[${i}].${k} MUST be a non-empty string for chainType '${chainType}'`
+      );
     }
   }
 }

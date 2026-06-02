@@ -1121,6 +1121,163 @@ describe('Embedded-with-parent connector mode (connectorUrl)', () => {
       })
     ).rejects.toBeInstanceOf(MillStartError);
   });
+
+  it('[P1] passes a Solana chainProviders entry through to the embedded ConnectorNode', async () => {
+    const startMill = await loadStartMill();
+    const port = 31500 + Math.floor(Math.random() * 500);
+    const { connector: _ignored, ...withoutConnector } = baseConfig();
+    const providers = [
+      {
+        chainType: 'solana' as const,
+        chainId: 'solana:devnet',
+        rpcUrl: 'http://localhost:8899',
+        wsUrl: 'ws://localhost:8900',
+        programId: 'Foo1111111111111111111111111111111111111111',
+        tokenMint: 'Mint111111111111111111111111111111111111111',
+        cluster: 'devnet',
+        // keyId omitted → mill defaults it.
+      },
+    ];
+    const instance = (await startMill({
+      ...withoutConnector,
+      connectorUrl: 'ws://parent.invalid:3000',
+      btpServerPort: port,
+      chainProviders: providers,
+    })) as MillInstanceShape & { connector?: unknown };
+    try {
+      const c = (
+        instance.connector as unknown as {
+          _config: {
+            chainProviders?: readonly Record<string, unknown>[];
+          };
+        }
+      )._config;
+      expect(c.chainProviders).toBeDefined();
+      expect(c.chainProviders!).toHaveLength(1);
+      const entry = c.chainProviders![0]!;
+      expect(entry['chainType']).toBe('solana');
+      expect(entry['chainId']).toBe('solana:devnet');
+      expect(entry['programId']).toBe(
+        'Foo1111111111111111111111111111111111111111'
+      );
+      expect(entry['wsUrl']).toBe('ws://localhost:8900');
+      expect(entry['tokenMint']).toBe(
+        'Mint111111111111111111111111111111111111111'
+      );
+      // keyId defaulted to identity-derived hex.
+      expect(entry['keyId']).toMatch(/^0x[0-9a-f]{64}$/);
+    } finally {
+      await instance.stop();
+    }
+  });
+
+  it('[P1] passes a Mina chainProviders entry through to the embedded ConnectorNode', async () => {
+    const startMill = await loadStartMill();
+    const port = 32000 + Math.floor(Math.random() * 500);
+    const { connector: _ignored, ...withoutConnector } = baseConfig();
+    const providers = [
+      {
+        chainType: 'mina' as const,
+        chainId: 'mina:devnet',
+        graphqlUrl: 'http://localhost:8080/graphql',
+        zkAppAddress: 'B62qtestzkappaddressxxxxxxxxxxxxxxxxxxxxxxxxxxx',
+        network: 'devnet',
+        // keyId omitted → mill defaults it (optional on the connector contract).
+      },
+    ];
+    const instance = (await startMill({
+      ...withoutConnector,
+      connectorUrl: 'ws://parent.invalid:3000',
+      btpServerPort: port,
+      chainProviders: providers,
+    })) as MillInstanceShape & { connector?: unknown };
+    try {
+      const c = (
+        instance.connector as unknown as {
+          _config: {
+            chainProviders?: readonly Record<string, unknown>[];
+          };
+        }
+      )._config;
+      expect(c.chainProviders).toBeDefined();
+      expect(c.chainProviders!).toHaveLength(1);
+      const entry = c.chainProviders![0]!;
+      expect(entry['chainType']).toBe('mina');
+      expect(entry['chainId']).toBe('mina:devnet');
+      expect(entry['graphqlUrl']).toBe('http://localhost:8080/graphql');
+      expect(entry['zkAppAddress']).toBe(
+        'B62qtestzkappaddressxxxxxxxxxxxxxxxxxxxxxxxxxxx'
+      );
+      // Mill defaults keyId even though Mina treats it as optional.
+      expect(entry['keyId']).toMatch(/^0x[0-9a-f]{64}$/);
+    } finally {
+      await instance.stop();
+    }
+  });
+
+  it('[P1] rejects a Solana chainProviders entry missing programId', async () => {
+    const startMill = await loadStartMill();
+    const MillStartError = await loadMillStartError();
+    const { connector: _ignored, ...withoutConnector } = baseConfig();
+    const bad = [
+      {
+        chainType: 'solana' as const,
+        chainId: 'solana:devnet',
+        rpcUrl: 'http://localhost:8899',
+        // programId intentionally missing
+      },
+    ];
+    await expect(
+      startMill({
+        ...withoutConnector,
+        connectorUrl: 'ws://parent.invalid:3000',
+        btpServerPort: 32500 + Math.floor(Math.random() * 300),
+        chainProviders: bad as unknown,
+      })
+    ).rejects.toBeInstanceOf(MillStartError);
+  });
+
+  it('[P1] rejects a Mina chainProviders entry missing zkAppAddress', async () => {
+    const startMill = await loadStartMill();
+    const MillStartError = await loadMillStartError();
+    const { connector: _ignored, ...withoutConnector } = baseConfig();
+    const bad = [
+      {
+        chainType: 'mina' as const,
+        chainId: 'mina:devnet',
+        graphqlUrl: 'http://localhost:8080/graphql',
+        // zkAppAddress intentionally missing
+      },
+    ];
+    await expect(
+      startMill({
+        ...withoutConnector,
+        connectorUrl: 'ws://parent.invalid:3000',
+        btpServerPort: 32800 + Math.floor(Math.random() * 200),
+        chainProviders: bad as unknown,
+      })
+    ).rejects.toBeInstanceOf(MillStartError);
+  });
+
+  it('[P1] rejects a chainProviders entry with an unknown chainType', async () => {
+    const startMill = await loadStartMill();
+    const MillStartError = await loadMillStartError();
+    const { connector: _ignored, ...withoutConnector } = baseConfig();
+    const bad = [
+      {
+        chainType: 'bitcoin',
+        chainId: 'bitcoin:mainnet',
+      },
+    ];
+    await expect(
+      startMill({
+        ...withoutConnector,
+        connectorUrl: 'ws://parent.invalid:3000',
+        btpServerPort: 33000 + Math.floor(Math.random() * 200),
+        chainProviders: bad as unknown,
+      })
+    ).rejects.toBeInstanceOf(MillStartError);
+  });
 });
 
 describe('Story 12.8 AC-13 — publisher injection', () => {

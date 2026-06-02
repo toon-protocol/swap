@@ -10,9 +10,13 @@ import {
   EvmPaymentChannelSigner,
   MinaPaymentChannelSigner,
   SolanaPaymentChannelSigner,
+  hexToMinaBase58PrivateKey,
 } from './payment-channel-signer.js';
 
 import { deriveMillKeys } from './wallet.js';
+
+import { verifyMinaSignature } from '@toon-protocol/sdk';
+import type { AccumulatedClaim } from '@toon-protocol/sdk';
 
 import { MillWalletError } from './errors.js';
 
@@ -169,6 +173,74 @@ describe.skipIf(!hasMinaSigner)(
       expect(sig).toBeInstanceOf(Uint8Array);
       expect(sig.length).toBeGreaterThan(0);
       expect(signer.chainKind).toBe('mina');
+    });
+
+    it('[P0] Mill signature round-trips through the SDK verifier (Story 12.8)', async () => {
+      // End-to-end Mill↔sender contract: the Mill signs a balance proof, and
+      // the SDK's `verifyMinaSignature` accepts it against the Mill's REAL
+      // Mina public key (derived from the converted private key, not the
+      // keccak placeholder `deriveMillKeys` stores).
+      const minaSigner = await import('mina-signer');
+      const Client = (minaSigner.default ?? minaSigner) as new (cfg: {
+        network: 'mainnet' | 'testnet';
+      }) => { derivePublicKey: (sk: string) => string };
+
+      const keys = await deriveMillKeys({
+        mnemonic: ZERO_MNEMONIC,
+        chains: ['mina'],
+      });
+      const minaPriv = hexToMinaBase58PrivateKey(keys.mina!.privateKey);
+      const client = new Client({ network: 'mainnet' });
+      const realPubKey = client.derivePublicKey(minaPriv);
+
+      const signer = new MinaPaymentChannelSigner({
+        chain: 'mina:mainnet',
+        privateKey: keys.mina!.privateKey,
+        publicKey: realPubKey,
+      });
+
+      const channelId = 'B62qChannelRoundTrip1111111111111111111111111';
+      const recipient = 'B62qRecipientRoundTrip22222222222222222222222';
+      const cumulativeAmount = 1_000n;
+      const nonce = 4n;
+
+      const sig = await signer.signBalanceProof({
+        channelId,
+        cumulativeAmount,
+        nonce,
+        recipient,
+      });
+
+      // Build the AccumulatedClaim shape the SDK verifier consumes.
+      const claim = {
+        packetIndex: 0,
+        sourceAmount: 1n,
+        targetAmount: 1n,
+        claimBytes: sig,
+        millEphemeralPubkey: '0'.repeat(64),
+        pair: {
+          from: { assetCode: 'USDC', assetScale: 6, chain: 'evm:base:8453' },
+          to: { assetCode: 'MINA', assetScale: 9, chain: 'mina:mainnet' },
+          rate: '0.5',
+        },
+        receivedAt: Date.now(),
+        channelId,
+        nonce: nonce.toString(),
+        cumulativeAmount: cumulativeAmount.toString(),
+        recipient,
+        millSignerAddress: realPubKey,
+      } as unknown as AccumulatedClaim;
+
+      const verifyClient = new Client({
+        network: 'mainnet',
+      }) as unknown as Parameters<typeof verifyMinaSignature>[2];
+
+      expect(verifyMinaSignature(claim, realPubKey, verifyClient)).toBe(true);
+      // Tampered nonce must fail.
+      const tampered = { ...claim, nonce: '99' } as AccumulatedClaim;
+      expect(verifyMinaSignature(tampered, realPubKey, verifyClient)).toBe(
+        false
+      );
     });
   }
 );
