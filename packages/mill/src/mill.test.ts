@@ -38,6 +38,7 @@ import {
   wrapSwapPacketToToon,
   decryptFulfillClaim,
   generateSolanaKeypair,
+  fromMnemonic,
   __streamSwapTesting,
 } from '@toon-protocol/sdk';
 import {
@@ -623,6 +624,31 @@ describe('T-057 startMill publishes kind:10032 with swapPairs (AC-6)', () => {
       const content = JSON.parse(evt.content) as { swapPairs: typeof pairs };
       expect(content.swapPairs.length).toBe(1);
       expect(content.swapPairs[0]).toEqual(pairs[0]);
+    } finally {
+      await instance.stop();
+    }
+  });
+
+  it('[P1] published kind:10032 pubkey == MILL_MNEMONIC-derived pubkey (swap gift-wrap recipient — issues #80/#88)', async () => {
+    // A streamSwap caller discovers the mill via its kind:10032 IlpPeerInfo and
+    // gift-wraps the swap request to the advertised `pubkey` (== `millPubkey`).
+    // That recipient key MUST be the MILL_MNEMONIC-derived identity (the same
+    // key used as the swap-handler `recipientSecretKey`), NOT a
+    // NODE_NOSTR_SECRET_KEY-derived node identity. Encrypting to the wrong key
+    // produces F01/F00 "Invalid gift wrap".
+    const startMill = await loadStartMill();
+    const expectedPubkey = fromMnemonic(VALID_MNEMONIC).pubkey;
+    let built: unknown;
+    const instance = (await startMill({
+      ...baseConfig(),
+      __testHooks: { onPeerInfoBuilt: (e: unknown) => (built = e) },
+    })) as MillInstanceShape;
+    try {
+      // The published kind:10032 event's author pubkey is the swap recipient.
+      const evt = built as { pubkey: string; content: string };
+      expect(evt.pubkey).toBe(expectedPubkey);
+      // And it matches the instance's nostr identity (single key, no town/node split).
+      expect(instance.identity.pubkey).toBe(expectedPubkey);
     } finally {
       await instance.stop();
     }

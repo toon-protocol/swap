@@ -669,6 +669,13 @@ export async function startMill(config: MillConfig): Promise<MillInstance> {
     );
   }
 
+  // The mill's Nostr identity is derived from the MILL_MNEMONIC (NOT from any
+  // NODE_NOSTR_SECRET_KEY). This SAME `identity` is the swap-handler gift-wrap
+  // recipient (`recipientSecretKey: identity.secretKey`, below) and is
+  // published as the kind:10032 IlpPeerInfo `pubkey` (below). streamSwap
+  // callers therefore gift-wrap to `identity.pubkey` and pass it as
+  // `millPubkey`. See issues #80/#88 and docs/protocol.md ("Swap recipient
+  // key discovery").
   const identity: NodeIdentity = fromMnemonic(config.mnemonic);
   const millKeys: MillKeys = await deriveMillKeys({
     mnemonic: config.mnemonic,
@@ -1362,6 +1369,9 @@ export async function startMill(config: MillConfig): Promise<MillInstance> {
 
   try {
     const ownIlpInfo: IlpPeerInfo = {
+      // The MILL_MNEMONIC-derived identity pubkey — the authoritative
+      // `millPubkey` streamSwap callers discover here and gift-wrap to. Signed
+      // below with the matching `identity.secretKey`. (issues #80/#88)
       pubkey: identity.pubkey,
       ilpAddress:
         config.ilpAddress ?? `g.toon.mill.${identity.pubkey.slice(0, 16)}`,
