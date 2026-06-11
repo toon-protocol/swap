@@ -493,7 +493,17 @@ function chainFamily(chain: string): MillChainKind | null {
   return null;
 }
 
-function validateConfig(config: MillConfig): void {
+/**
+ * Validate a {@link MillConfig} and throw {@link MillStartError} with code
+ * `INVALID_CONFIG` on the first violation. Pure and synchronous — it allocates
+ * no resources and boots nothing, so it is safe to call directly in tests
+ * (notably without triggering the embedded connector's Mina zkApp pre-compile).
+ * `startMill` calls this first, before any resource allocation.
+ *
+ * @internal Exported for unit testing of the config-validation surface; not
+ * part of the supported package API.
+ */
+export function validateConfig(config: MillConfig): void {
   const hasMnemonic = config.mnemonic !== undefined;
   const hasSecretKey = config.secretKey !== undefined;
 

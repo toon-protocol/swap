@@ -89,6 +89,13 @@ async function loadMillStartError(): Promise<new (...a: any[]) => Error> {
   return mod.MillStartError;
 }
 
+async function loadValidateConfig(): Promise<(config: unknown) => void> {
+  const mod = (await import('./mill.js')) as {
+    validateConfig: (config: unknown) => void;
+  };
+  return mod.validateConfig;
+}
+
 // ---------------------------------------------------------------------------
 // Test fixtures — minimal-yet-valid MillConfig shape.
 // Every field here is a placeholder. Dev implementation is expected to
@@ -1303,6 +1310,51 @@ describe('Embedded-with-parent connector mode (connectorUrl)', () => {
         chainProviders: bad as unknown,
       })
     ).rejects.toBeInstanceOf(MillStartError);
+  });
+
+  // Regression for #152: a stale mill image applied the EVM required-field set
+  // (chainType/chainId/rpcUrl/registryAddress/tokenAddress) to EVERY
+  // chainProviders entry, so a legitimate solana/mina entry — which omits
+  // registryAddress/tokenAddress — was rejected at boot
+  // ("...registryAddress MUST be a non-empty string") and the container
+  // crash-looped. A chainProviders array mixing one evm + one solana + one
+  // mina entry (each carrying only its per-chainType required fields) MUST
+  // pass validateConfig.
+  //
+  // This asserts against validateConfig DIRECTLY rather than booting a mill:
+  // a real boot would register the mina provider with the embedded connector
+  // and kick off an o1js zkApp pre-compile, which corrupts o1js' global
+  // context when it overlaps the single-mina pass-through test above (o1js
+  // forbids concurrent async proving) and crashes the whole vitest worker.
+  // The validator is pure/synchronous, so it exercises the exact per-chainType
+  // field-set logic this issue is about without any of that runtime weight.
+  it('[P1] validateConfig accepts a mixed evm+solana+mina chainProviders array (regression #152)', async () => {
+    const validateConfig = await loadValidateConfig();
+    const providers = [
+      {
+        chainType: 'evm' as const,
+        chainId: 'evm:31337',
+        rpcUrl: 'http://localhost:8545',
+        registryAddress: '0x1111111111111111111111111111111111111111',
+        tokenAddress: '0x2222222222222222222222222222222222222222',
+      },
+      {
+        // Index [1]: the entry the stale image rejected on registryAddress.
+        chainType: 'solana' as const,
+        chainId: 'solana:devnet',
+        rpcUrl: 'http://localhost:8899',
+        programId: 'Foo1111111111111111111111111111111111111111',
+      },
+      {
+        chainType: 'mina' as const,
+        chainId: 'mina:devnet',
+        graphqlUrl: 'http://localhost:8080/graphql',
+        zkAppAddress: 'B62qtestzkappaddressxxxxxxxxxxxxxxxxxxxxxxxxxxx',
+      },
+    ];
+    expect(() =>
+      validateConfig(baseConfig({ chainProviders: providers }))
+    ).not.toThrow();
   });
 });
 
