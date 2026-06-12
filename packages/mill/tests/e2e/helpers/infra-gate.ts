@@ -31,6 +31,10 @@
  * at the top of the suite rather than grabbing claimed accounts.
  */
 
+// Local binding (the block below RE-exports CHAIN_ID, which does not create a
+// usable local binding) so DOCKER_CHAIN_EVM can track the active chain id.
+import { CHAIN_ID } from '../../../../sdk/tests/e2e/helpers/docker-e2e-setup.js';
+
 export {
   // Endpoints
   ANVIL_RPC,
@@ -90,19 +94,26 @@ export {
  * for Mill E2E tests. Account #0 is peer1's settlement key, account #2 is
  * peer2's settlement key, and accounts #3-#9 are claimed by SDK E2E tests.
  */
-export const MILL_E2E_EVM_SENDER_PRIVATE_KEY =
-  '0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d' as const;
+// Public mode overrides this with a mnemonic-derived, treasury-funded key
+// (idx11) the harness writes to .env.sdk-e2e (EVM_MILL_CLIENT_PRIVATE_KEY) —
+// the hardcoded Anvil account #1 has no funds on Base Sepolia.
+export const MILL_E2E_EVM_SENDER_PRIVATE_KEY = (process.env[
+  'EVM_MILL_CLIENT_PRIVATE_KEY'
+] ||
+  '0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d') as `0x${string}`;
 
-/** Anvil account #1 address (derived, hardcoded for cheap lookup). */
-export const MILL_E2E_EVM_SENDER_ADDRESS =
-  '0x70997970C51812dc3A010C7d01b50e0d17dc79C8' as const;
+/** Sender address — public: EVM_MILL_CLIENT_ADDRESS; local: Anvil account #1. */
+export const MILL_E2E_EVM_SENDER_ADDRESS = (process.env[
+  'EVM_MILL_CLIENT_ADDRESS'
+] || '0x70997970C51812dc3A010C7d01b50e0d17dc79C8') as `0x${string}`;
 
 // ---------------------------------------------------------------------------
 // Chain-string constants (must match docker-compose-sdk-e2e.yml env vars)
 // ---------------------------------------------------------------------------
 
-/** Exact chain strings advertised in `SUPPORTED_CHAINS` on peer1/peer2. */
-export const DOCKER_CHAIN_EVM = 'evm:base:31337' as const;
+/** Exact chain strings advertised in `SUPPORTED_CHAINS` on peer1/peer2.
+ * Tracks the active EVM chain id (31337 Anvil / 84532 Base Sepolia public). */
+export const DOCKER_CHAIN_EVM = `evm:base:${CHAIN_ID}` as const;
 export const DOCKER_CHAIN_SOLANA = 'solana:devnet' as const;
 export const DOCKER_CHAIN_MINA = 'mina:devnet' as const;
 
