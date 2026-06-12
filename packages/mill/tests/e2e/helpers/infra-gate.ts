@@ -69,6 +69,7 @@ export {
   getParticipantInfo,
   getTokenBalance,
   getChannelCounter,
+  publicModeSettlementKey,
 
   // Wait / probe helpers
   waitForEventOnRelay,

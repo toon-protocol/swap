@@ -20,6 +20,7 @@ import {
   CHAIN_ID,
   ANVIL_RPC,
   MILL_E2E_EVM_SENDER_PRIVATE_KEY,
+  publicModeSettlementKey,
 } from './infra-gate.js';
 
 export type StreamSwapClient = StreamSwapParams['client'];
@@ -59,6 +60,16 @@ export async function buildLiveSender(
   const senderSecretKey = generateSecretKey();
   const senderPubkey = getPublicKey(senderSecretKey);
 
+  // Public mode (persistent testnet): open this connector's channel with a
+  // FRESH, just-in-time-funded participant so each run/connector gets its own
+  // channelId and never collides with a prior run's channel
+  // (InvalidChannelState). Local Anvil: pass-through to the deterministic key.
+  // Called per builder invocation, so every mill connector gets its own
+  // ephemeral participant (issue #191).
+  const evmKeyId = await publicModeSettlementKey(
+    MILL_E2E_EVM_SENDER_PRIVATE_KEY
+  );
+
   const connectorLogger = createLogger(opts.loggerName, 'warn');
   const connector = new ConnectorNode(
     {
@@ -89,7 +100,7 @@ export async function buildLiveSender(
           rpcUrl: ANVIL_RPC,
           registryAddress: REGISTRY_ADDRESS,
           tokenAddress: TOKEN_ADDRESS,
-          keyId: MILL_E2E_EVM_SENDER_PRIVATE_KEY,
+          keyId: evmKeyId,
         },
       ],
     },
