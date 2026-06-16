@@ -29,7 +29,7 @@ export default defineConfig({
       '@toon-protocol/core': resolve(__dirname, '../core/src/index.ts'),
       '@toon-protocol/relay': resolve(__dirname, '../relay/src/index.ts'),
       '@toon-protocol/sdk': resolve(__dirname, '../sdk/src/index.ts'),
-      '@toon-protocol/mill': resolve(__dirname, './src/index.ts'),
+      '@toon-protocol/swap': resolve(__dirname, './src/index.ts'),
     },
   },
   test: {

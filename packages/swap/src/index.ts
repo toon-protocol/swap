@@ -1,5 +1,5 @@
 /**
- * @toon-protocol/mill — public API (Story 12.4 AC-9).
+ * @toon-protocol/swap — public API (Story 12.4 AC-9).
  */
 
 // Wallet + key derivation (Story 12.4)

@@ -8,7 +8,7 @@ import { describe, it, expect } from 'vitest';
 
 import * as mill from './index.js';
 
-describe('@toon-protocol/mill public API exports (Story 12.4 AC-9)', () => {
+describe('@toon-protocol/swap public API exports (Story 12.4 AC-9)', () => {
   it('[P2] exports deriveMillKeys function', () => {
     expect(typeof mill.deriveMillKeys).toBe('function');
   });

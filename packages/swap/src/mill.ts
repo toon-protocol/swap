@@ -216,7 +216,7 @@ export interface MillConfig {
   parentAuthToken?: string;
   /**
    * Override for the embedded connector `nodeId` derivation. Default
-   * `toon-mill-<pubkey16>`. Useful when an operator wants a stable identifier
+   * `toon-swap-<pubkey16>`. Useful when an operator wants a stable identifier
    * across restarts that the parent's routing table can target.
    */
   nodeId?: string;
@@ -847,7 +847,7 @@ export async function startMill(config: MillConfig): Promise<MillInstance> {
     config.connector;
 
   if (config.connector === undefined && config.connectorUrl !== undefined) {
-    const nodeId = config.nodeId ?? `toon-mill-${identity.pubkey.slice(0, 16)}`;
+    const nodeId = config.nodeId ?? `toon-swap-${identity.pubkey.slice(0, 16)}`;
     // `btpServerPort` is required by ConnectorNode (rejects port=0 / undefined).
     // Default to 3000 to match the parent-link assumption documented in the
     // dev infra fixtures; operators may override via config.btpServerPort.
@@ -968,7 +968,7 @@ export async function startMill(config: MillConfig): Promise<MillInstance> {
     // Standalone mode: auto-wire an embedded ConnectorNode with no parent
     // peer or routes. `ConnectorNode` rejects port=0 (OS-assigned), so the
     // explicit `btpServerPort` opt-in is what gates this branch.
-    const nodeId = config.nodeId ?? `toon-mill-${identity.pubkey.slice(0, 16)}`;
+    const nodeId = config.nodeId ?? `toon-swap-${identity.pubkey.slice(0, 16)}`;
     const btpServerPort = config.btpServerPort;
     const connectorLogger = createConnectorLogger(
       nodeId,
@@ -1162,7 +1162,7 @@ export async function startMill(config: MillConfig): Promise<MillInstance> {
     try {
       await autoCreatedConnector.start();
       logger.debug?.('mill.connector.started', {
-        nodeId: config.nodeId ?? `toon-mill-${identity.pubkey.slice(0, 16)}`,
+        nodeId: config.nodeId ?? `toon-swap-${identity.pubkey.slice(0, 16)}`,
       });
     } catch (err) {
       logger.error?.('mill.connector.start_failed', { err: errSummary(err) });

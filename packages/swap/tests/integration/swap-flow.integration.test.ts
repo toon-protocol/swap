@@ -35,7 +35,7 @@ import type { BuildSettlementTxResult } from '@toon-protocol/sdk';
 import { generateSecretKey, getPublicKey } from 'nostr-tools/pure';
 import { nip44 } from 'nostr-tools';
 
-import type { MillInstance } from '@toon-protocol/mill';
+import type { MillInstance } from '@toon-protocol/swap';
 
 import {
   FIXTURE_MNEMONIC,

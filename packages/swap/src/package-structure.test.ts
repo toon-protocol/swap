@@ -22,11 +22,11 @@ function readJson(p: string): Record<string, unknown> {
 }
 
 describe('AC-1 package.json declares Mill CLI bin + runtime deps', () => {
-  it('[P1] bin.toon-mill points at ./dist/cli.js', () => {
+  it('[P1] bin.toon-swap points at ./dist/cli.js', () => {
     const pkg = readJson(millPackagePath());
     const bin = pkg['bin'] as Record<string, string> | undefined;
     expect(bin).toBeDefined();
-    expect(bin!['toon-mill']).toBe('./dist/cli.js');
+    expect(bin!['toon-swap']).toBe('./dist/cli.js');
   });
 
   it('[P1] @toon-protocol/sdk is in dependencies (moved from devDependencies)', () => {

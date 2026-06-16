@@ -1,13 +1,13 @@
 #!/usr/bin/env node
 
 /**
- * CLI entrypoint for `@toon-protocol/mill` (Story 12.7 AC-9).
+ * CLI entrypoint for `@toon-protocol/swap` (Story 12.7 AC-9).
  *
  * Thin wrapper around `startMill()`. Reads a JSON config file and overlays
  * env-var overrides. Mirrors `packages/town/src/cli.ts`'s shape.
  *
  * Usage:
- *   toon-mill --config ./mill.config.json
+ *   toon-swap --config ./mill.config.json
  *
  * Environment variables (override config file):
  *   MILL_MNEMONIC          — BIP-39 mnemonic
@@ -18,7 +18,7 @@
  *   TOON_PARENT_PEER_ID    — peer id for the parent (default: "apex")
  *   TOON_PARENT_AUTH_TOKEN — BTP auth token for the parent peer (default: "")
  *   TOON_ILP_ADDRESS       — advertised ILP address + self-route prefix
- *   TOON_NODE_ID           — connector nodeId override (default: toon-mill-<pk16>)
+ *   TOON_NODE_ID           — connector nodeId override (default: toon-swap-<pk16>)
  */
 
 import { parseArgs } from 'node:util';
@@ -218,7 +218,7 @@ function applyEnvOverlay(cfg: MillConfig): MillConfig {
  */
 export class CliHelpRequested extends Error {
   constructor() {
-    super('Usage: toon-mill --config <path>');
+    super('Usage: toon-swap --config <path>');
     this.name = 'CliHelpRequested';
   }
 }
@@ -237,7 +237,7 @@ export async function main(argv: string[]): Promise<MillInstance> {
   if (values.help) {
     // Library-safe: do NOT call process.exit() here — the CLI entrypoint
     // below handles exit codes. Tests can catch this to assert --help path.
-    console.log(`Usage: toon-mill --config <path>`);
+    console.log(`Usage: toon-swap --config <path>`);
     throw new CliHelpRequested();
   }
 

@@ -8,7 +8,7 @@ import { resolve } from 'path';
  *
  * The default `packages/mill/vitest.config.ts` runs ONLY `src/**\/*.test.ts`
  * so these integration tests do not double-execute under `pnpm --filter
- * @toon-protocol/mill test` (AC-15.4).
+ * @toon-protocol/swap test` (AC-15.4).
  *
  * Pool: `forks` — process-per-test isolation matters because each test
  * boots an in-process `MillInstance` + peered `ConnectorNode` pair and
@@ -24,7 +24,7 @@ export default defineConfig({
       '@toon-protocol/core/toon': resolve(__dirname, '../../packages/core/src/toon/index.ts'),
       '@toon-protocol/core': resolve(__dirname, '../../packages/core/src/index.ts'),
       '@toon-protocol/sdk': resolve(__dirname, '../../packages/sdk/src/index.ts'),
-      '@toon-protocol/mill': resolve(__dirname, './src/index.ts'),
+      '@toon-protocol/swap': resolve(__dirname, './src/index.ts'),
     },
   },
   test: {

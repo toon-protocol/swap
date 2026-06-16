@@ -1,6 +1,6 @@
 # swap
 
-The TOON Protocol **multi-chain swap node**: `@toon-protocol/mill` — receives a paid swap request and returns a **signed target-chain payment-channel claim** (pay asset A → get a claim redeemable for asset B), across EVM / Solana / Mina. The repo is named `swap`; the npm package keeps the name `@toon-protocol/mill` pending the `mill → swap` rename (it was never published, so the rename is clean when done).
+The TOON Protocol **multi-chain swap node**: `@toon-protocol/swap` — receives a paid swap request and returns a **signed target-chain payment-channel claim** (pay asset A → get a claim redeemable for asset B), across EVM / Solana / Mina. (Renamed from `@toon-protocol/mill`; bin `toon-swap`. Internal symbols like `startMill`/`MillInventory` are an optional further cleanup.)
 
 Part of the **TOON Protocol** — pay-to-write Nostr over Interledger (ILP), split into per-team repos. The swap node runs an embedded connector as a child of the apex and publishes its swap pairs as kind:10032 peer-info.
 

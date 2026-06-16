@@ -1,5 +1,5 @@
 /**
- * Error classes for @toon-protocol/mill (Story 12.4 AC-2).
+ * Error classes for @toon-protocol/swap (Story 12.4 AC-2).
  *
  * Two shapes:
  *   - `MillInventoryError` — raised from inventory operations (debit/credit).

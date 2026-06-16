@@ -32,7 +32,7 @@ import {
   type MillInstance,
   type MillConfig,
   type Publisher,
-} from '@toon-protocol/mill';
+} from '@toon-protocol/swap';
 import type {
   HandlePacketAcceptResponse,
   HandlePacketRejectResponse,

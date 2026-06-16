@@ -50,7 +50,7 @@ import {
 // TypeScript will error on these lines until Story 12.7's dev work lands.
 // This is the definition of TDD red phase.
 //
-// We use a type-only import guard so `pnpm --filter @toon-protocol/mill test`
+// We use a type-only import guard so `pnpm --filter @toon-protocol/swap test`
 // can still enumerate the skipped specs without the test file exploding at
 // collection time. Once `mill.ts` is implemented, change these to real imports.
 
