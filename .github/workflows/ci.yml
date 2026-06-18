@@ -38,7 +38,8 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: ${{ github.head_ref }}
-      - uses: jetify-com/devbox-install-action@v0.12.0
+          repository: ${{ github.event.pull_request.head.repo.full_name }}
+      - uses: jetify-com/devbox-install-action@734088efddca47cf44ff8a09289c6d0e51b73218  # v0.12.0
         with:
           enable-cache: true
       - name: Resolve devbox.lock
