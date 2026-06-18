@@ -2,7 +2,6 @@
   "$schema": "https://raw.githubusercontent.com/jetify-com/devbox/0.13.2/.schema/devbox.schema.json",
   "packages": [
     "nodejs@22",
-    "pnpm_8@8.15.0",
     "rustup@1.29.0",
     "solana-cli@1.18.26",
     "foundry@1.7.1",
