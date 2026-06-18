@@ -1,12 +1,12 @@
 {
   "$schema": "https://raw.githubusercontent.com/jetify-com/devbox/0.13.2/.schema/devbox.schema.json",
   "packages": [
-    "nodejs@20",
-    "pnpm@8",
-    "rustup@latest",
-    "solana@stable",
-    "foundry@latest",
-    "jq@1"
+    "nodejs@20.19.2",
+    "pnpm_8@8.15.9",
+    "rustup@1.29.0",
+    "solana-cli@1.18.26",
+    "foundry@1.7.1",
+    "jq@1.8.1"
   ],
   "shell": {
     "init_hook": [],
