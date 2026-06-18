@@ -1,0 +1,19 @@
+{
+  "$schema": "https://raw.githubusercontent.com/jetify-com/devbox/0.13.2/.schema/devbox.schema.json",
+  "packages": [
+    "nodejs@20",
+    "pnpm@8",
+    "rustup@latest",
+    "solana@stable",
+    "foundry@latest",
+    "jq@1"
+  ],
+  "shell": {
+    "init_hook": [],
+    "scripts": {
+      "build": "pnpm -r run build",
+      "test": "pnpm -r test --if-present",
+      "lint": "pnpm lint"
+    }
+  }
+}
