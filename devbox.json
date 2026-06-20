@@ -3,7 +3,7 @@
   "packages": [
     "nodejs@20",
     "pnpm@8.15.0",
-    "foundry",
+    "foundry@0.3.0",
     "jq"
   ],
   "shell": {
