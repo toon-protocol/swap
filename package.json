@@ -25,9 +25,7 @@
     "ilp",
     "toon",
     "payment",
-    "agent",
-    "nip-02",
-    "social-graph"
+    "agent"
   ],
   "author": "",
   "license": "MIT",

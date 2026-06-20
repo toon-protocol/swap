@@ -42,8 +42,8 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/toon-protocol/town.git",
-    "directory": "packages/mill"
+    "url": "https://github.com/toon-protocol/swap.git",
+    "directory": "packages/swap"
   },
   "author": "ALLiDoizCode",
   "engines": {
