@@ -11,20 +11,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: pnpm/action-setup@v4
+      - uses: jetify-com/devbox-install-action@v0.12.0
         with:
-          version: 8.15.0
+          enable-cache: true
 
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 20
-          cache: pnpm
+      - run: devbox run -- pnpm install --no-frozen-lockfile
 
-      - run: pnpm install --no-frozen-lockfile
-
-      - run: pnpm lint
+      - run: devbox run -- pnpm lint
         continue-on-error: true
 
-      - run: pnpm -r build
+      - run: devbox run -- pnpm -r build
 
-      - run: pnpm -r test --if-present
+      - run: devbox run -- pnpm -r test --if-present
