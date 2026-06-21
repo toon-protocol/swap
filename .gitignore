@@ -91,6 +91,9 @@ __pycache__/
 !_bmad-output/branding/**/*.png
 !_bmad-output/dev-signals/assets/**/*.png
 
+# Devbox local environment (nix store symlinks, shell state)
+.devbox/
+
 # Nix build output (symlink to /nix/store result)
 /result
 
