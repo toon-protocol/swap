@@ -1,7 +1,7 @@
 {
   "name": "@toon-protocol/swap",
   "version": "0.1.0",
-  "description": "TOON Mill — multi-chain payment-channel claim issuer for the Token Swap Primitive (Epic 12)",
+  "description": "TOON Swap — multi-chain payment-channel claim issuer for the Token Swap Primitive (Epic 12)",
   "type": "module",
   "main": "./dist/index.js",
   "module": "./dist/index.js",
@@ -35,15 +35,14 @@
     "toon",
     "nostr",
     "ilp",
-    "mill",
     "swap",
     "payment-channel"
   ],
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/toon-protocol/town.git",
-    "directory": "packages/mill"
+    "url": "https://github.com/toon-protocol/swap.git",
+    "directory": "packages/swap"
   },
   "author": "ALLiDoizCode",
   "engines": {

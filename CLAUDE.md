@@ -25,4 +25,4 @@ Canonical rules/decisions: `toon-meta` → `_bmad-output/project-context.md`.
 - Image-publish workflow (the `swap` Docker image) is a follow-up.
 
 ## Publishing
-CI publishes via **changesets + `pnpm`** using the org `NPM_TOKEN` secret. **Never run `npm publish`**. This will be `mill`'s first-ever npm publish.
+CI publishes via **changesets + `pnpm`** using the org `NPM_TOKEN` secret. **Never run `npm publish`**. This will be `swap`'s first-ever npm publish.
