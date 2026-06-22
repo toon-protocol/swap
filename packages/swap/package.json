@@ -46,7 +46,7 @@
   },
   "author": "ALLiDoizCode",
   "engines": {
-    "node": ">=20"
+    "node": ">=22"
   },
   "publishConfig": {
     "access": "public"
