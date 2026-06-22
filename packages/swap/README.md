@@ -1,6 +1,6 @@
 # @toon-protocol/swap
 
-TOON Mill — multi-chain payment-channel claim issuer for the Token Swap Primitive (Epic 12).
+TOON Swap — multi-chain payment-channel claim issuer for the Token Swap Primitive (Epic 12).
 
 ## Integration Tests
 
