@@ -81,8 +81,9 @@ export interface MultiChainClaimIssuerConfig {
    * in the FULFILL path so the sender can verify claims against the correct
    * Mill signer address.
    *
-   * TODO(12.7): `startMill()` will populate this from the derived wallet.
-   * Until then, callers must supply the map explicitly.
+   * `startMill()` populates this automatically via `buildSignerAddresses()`.
+   * This field stays optional only for callers constructing
+   * `MultiChainClaimIssuer` directly, outside `startMill()`.
    */
   signerAddresses?: Record<string, string>;
 }
