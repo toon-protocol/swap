@@ -86,7 +86,7 @@ describe('AC-9 Mill CLI — main() smoke test', () => {
 // The story's AC-9 lists four env vars (MILL_MNEMONIC, MILL_SECRET_KEY_HEX,
 // MILL_BLS_PORT, MILL_RELAYS); only MILL_MNEMONIC was previously exercised.
 // These tests pin the remaining three plus the invalid-value validation
-// branches inside `applyEnvOverlay` (packages/swap/src/cli.ts:94-122).
+// branches inside `applyEnvOverlay` (packages/swap/src/cli.ts:174-212).
 // ---------------------------------------------------------------------------
 
 describe('AC-9 Mill CLI — env-overlay gap-fill', () => {
