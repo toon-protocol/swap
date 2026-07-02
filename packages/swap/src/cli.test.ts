@@ -1,5 +1,5 @@
 /**
- * ATDD RED-phase tests for the swap node CLI (`packages/swap/src/cli.ts`, Story 12.7 AC-9).
+ * ATDD tests for the swap node CLI (`packages/swap/src/cli.ts`, Story 12.7 AC-9).
  *
  * The CLI mirrors `packages/town/src/cli.ts`:
  *   - shebang `#!/usr/bin/env node`
@@ -8,8 +8,6 @@
  *   - env overlay: SWAP_MNEMONIC, SWAP_SECRET_KEY_HEX, SWAP_BLS_PORT, SWAP_RELAYS
  *   - SIGINT / SIGTERM → instance.stop() → process.exit(0)
  *   - prints "Swap node listening on http://localhost:<port>"
- *
- * All describe/it blocks are `.skip` — remove .skip as dev delivers each piece.
  */
 
 import { describe, it, expect } from 'vitest';
