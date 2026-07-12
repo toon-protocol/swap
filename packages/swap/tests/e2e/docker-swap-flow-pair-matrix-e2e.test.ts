@@ -35,7 +35,7 @@ import {
   DOCKER_CHAIN_SOLANA,
   DOCKER_CHAIN_MINA,
   DOCKER_PAIR_MATRIX,
-  MILL_E2E_EVM_SENDER_ADDRESS,
+  SWAP_E2E_EVM_SENDER_ADDRESS,
   type DockerChain,
 } from './helpers/infra-gate.js';
 
@@ -59,7 +59,7 @@ function chainRecipientForTarget(
 ): string {
   switch (target) {
     case DOCKER_CHAIN_EVM:
-      return MILL_E2E_EVM_SENDER_ADDRESS.toLowerCase();
+      return SWAP_E2E_EVM_SENDER_ADDRESS.toLowerCase();
     case DOCKER_CHAIN_SOLANA: {
       if (!cachedSolanaRecipient) {
         // generateSolanaKeypair() returns publicKey already base58-encoded;
@@ -80,7 +80,7 @@ function chainRecipientForTarget(
 }
 
 // Sender builder extracted to helpers/build-live-sender.ts (shared across all
-// Mill E2E test files to eliminate ~80 lines of duplicated wiring per file).
+// swap-node E2E test files to eliminate ~80 lines of duplicated wiring per file).
 
 // ---------------------------------------------------------------------------
 // Suite
@@ -131,10 +131,10 @@ describe('Docker Swap-Flow Pair-Matrix E2E (Story 12.10, Task 5) — 9 ordered c
 
     try {
       sharedSender = await buildLiveSender({
-        nodeIdPrefix: 'mill-mtx',
+        nodeIdPrefix: 'swap-mtx',
         btpServerPort: 19926,
         healthCheckPort: 19927,
-        loggerName: 'mill-e2e-matrix-connector',
+        loggerName: 'swap-e2e-matrix-connector',
         initialDeposit: '50000000', // 50 USDC -- enough for 9 x 1 USDC swaps
       });
     } catch (err) {
@@ -197,8 +197,8 @@ describe('Docker Swap-Flow Pair-Matrix E2E (Story 12.10, Task 5) — 9 ordered c
       // Run streamSwap for this pair
       const result = await streamSwap({
         client: sharedSender!.client,
-        millPubkey: PEER1_NOSTR_PUBKEY,
-        millIlpAddress: 'g.toon.peer1',
+        swapPubkey: PEER1_NOSTR_PUBKEY,
+        swapIlpAddress: 'g.toon.peer1',
         pair: {
           from: {
             assetCode: 'USD',

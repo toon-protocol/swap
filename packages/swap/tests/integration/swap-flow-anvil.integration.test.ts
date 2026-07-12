@@ -7,7 +7,7 @@
  *
  * Run with:
  *   ./scripts/sdk-e2e-infra.sh up
- *   cd packages/mill && pnpm test:integration:anvil
+ *   cd packages/swap && pnpm test:integration:anvil
  *
  * Scope: this test VALIDATES tx bytes via `eth_call` / `eth_estimateGas`.
  * It does NOT broadcast — Anvil state is untouched. The on-chain
@@ -22,7 +22,7 @@ import { streamSwap, buildSettlementTx } from '@toon-protocol/sdk';
 import {
   ANVIL_URL,
   ANVIL_CHAIN_ID,
-  buildFixtureMill,
+  buildFixtureSwapNode,
   buildFixtureSender,
   fixtureSwapPair,
 } from './helpers/fixture-topology.js';
@@ -51,7 +51,7 @@ async function isAnvilReachable(): Promise<boolean> {
 }
 
 const FIXTURE_EVM_RECIPIENT = '0x' + '11'.repeat(20);
-const FIXTURE_MILL_ILP_ADDRESS = 'g.toon.mill.fixture';
+const FIXTURE_SWAP_NODE_ILP_ADDRESS = 'g.toon.swap.fixture';
 
 describe('AC-9 [P2] Anvil-backed settlement tx well-formedness (opt-in, SDK E2E infra required)', () => {
   it('AC-9 — buildSettlementTx bytes are RLP-well-formed and target the live Anvil chain', async (ctx) => {
@@ -61,13 +61,13 @@ describe('AC-9 [P2] Anvil-backed settlement tx well-formedness (opt-in, SDK E2E 
       return;
     }
 
-    const mill = await buildFixtureMill();
-    const sender = await buildFixtureSender(mill, new Uint8Array(32).fill(20));
+    const swapNode = await buildFixtureSwapNode();
+    const sender = await buildFixtureSender(swapNode, new Uint8Array(32).fill(20));
     try {
       const result = await streamSwap({
         client: sender.client,
-        millPubkey: mill.identity.pubkey,
-        millIlpAddress: FIXTURE_MILL_ILP_ADDRESS,
+        swapPubkey: swapNode.identity.pubkey,
+        swapIlpAddress: FIXTURE_SWAP_NODE_ILP_ADDRESS,
         pair: fixtureSwapPair(),
         senderSecretKey: sender.secretKey,
         chainRecipient: FIXTURE_EVM_RECIPIENT,
@@ -86,7 +86,7 @@ describe('AC-9 [P2] Anvil-backed settlement tx well-formedness (opt-in, SDK E2E 
         claims: result.claims,
         signers: {
           [chain]: {
-            address: mill.millKeys.evm!.address.toLowerCase(),
+            address: swapNode.swapNodeKeys.evm!.address.toLowerCase(),
             contractAddress: channelContractAddress,
             chainId: ANVIL_CHAIN_ID,
           },
@@ -118,7 +118,7 @@ describe('AC-9 [P2] Anvil-backed settlement tx well-formedness (opt-in, SDK E2E 
       // and the response would not reflect tx well-formedness. A true
       // "accept as tx" gate requires `eth_sendRawTransaction` with a signed
       // tx; that is broadcast-adjacent and out of AC-9 scope (a real
-      // deployed channel contract + Mill-side signing would be required).
+      // deployed channel contract + swap-node-side signing would be required).
       const chainIdRes = await fetch(ANVIL_URL, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
@@ -135,7 +135,7 @@ describe('AC-9 [P2] Anvil-backed settlement tx well-formedness (opt-in, SDK E2E 
       expect(bundle.chain).toBe(`evm:${ANVIL_CHAIN_ID}`);
     } finally {
       await sender.close();
-      await mill.stop();
+      await swapNode.stop();
     }
   });
 });

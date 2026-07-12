@@ -13,10 +13,10 @@ import type {
   IssueClaimResult,
 } from '@toon-protocol/sdk';
 
-import type { MillInventory } from './inventory.js';
-import type { MillChannelState, Reservation } from './channel-state.js';
+import type { SwapInventory } from './inventory.js';
+import type { SwapChannelState, Reservation } from './channel-state.js';
 import type { PaymentChannelSigner } from './payment-channel-signer.js';
-import { MillWalletError } from './errors.js';
+import { SwapWalletError } from './errors.js';
 
 // ---------------------------------------------------------------------------
 // Story 12.9 AC-2 — claim-issuer (pre-sign) chain-recipient validation
@@ -28,7 +28,7 @@ import { MillWalletError } from './errors.js';
 // block adds the third boundary as defense-in-depth, guarding against:
 //   - future non-EVM signers (Solana, Mina) that may not enforce shape;
 //   - direct callers of `MultiChainClaimIssuer.issueClaim()` that bypass the
-//     swap-handler (e.g., unit tests, internal Mill integrations);
+//     swap-handler (e.g., unit tests, internal swap node integrations);
 //   - any downstream regression that silently relaxes handler-side validation.
 //
 // Rules MUST stay byte-for-byte in sync with
@@ -50,7 +50,7 @@ function validateClaimIssuerChainRecipient(
   if (chain.startsWith('solana:')) {
     // Shape-only (regex + length) at the claim-issuer boundary. A full
     // base58-decode check already runs at sender + handler; we deliberately
-    // do NOT add a base58 dep to the mill package for this third tier.
+    // do NOT add a base58 dep to the swap node package for this third tier.
     if (!CLAIM_ISSUER_BASE58_REGEX.test(value)) return false;
     return value.length >= 32 && value.length <= 44;
   }
@@ -62,7 +62,7 @@ function validateClaimIssuerChainRecipient(
   return value.length > 0;
 }
 
-export interface MillClaimIssuerLogger {
+export interface SwapClaimIssuerLogger {
   debug?: (...a: unknown[]) => void;
   info?: (...a: unknown[]) => void;
   warn?: (...a: unknown[]) => void;
@@ -70,28 +70,28 @@ export interface MillClaimIssuerLogger {
 }
 
 export interface MultiChainClaimIssuerConfig {
-  inventory: MillInventory;
+  inventory: SwapInventory;
   signers: Record<string, PaymentChannelSigner>;
-  channelState: MillChannelState;
-  logger?: MillClaimIssuerLogger;
+  channelState: SwapChannelState;
+  logger?: SwapClaimIssuerLogger;
   newClaimId?: () => string;
   /**
    * Per-chain on-chain signer addresses. Keyed by target-chain string (e.g.
    * `'evm:base:8453'`). Required for Story 12.6 settlement-context metadata
    * in the FULFILL path so the sender can verify claims against the correct
-   * Mill signer address.
+   * swap node signer address.
    *
-   * TODO(12.7): `startMill()` will populate this from the derived wallet.
+   * TODO(12.7): `startSwapNode()` will populate this from the derived wallet.
    * Until then, callers must supply the map explicitly.
    */
   signerAddresses?: Record<string, string>;
 }
 
 export class MultiChainClaimIssuer implements ClaimIssuer {
-  private readonly inventory: MillInventory;
+  private readonly inventory: SwapInventory;
   private readonly signers: Record<string, PaymentChannelSigner>;
-  private readonly channelState: MillChannelState;
-  private readonly logger?: MillClaimIssuerLogger;
+  private readonly channelState: SwapChannelState;
+  private readonly logger?: SwapClaimIssuerLogger;
   private readonly newClaimId: () => string;
   private readonly signerAddresses: Record<string, string>;
 
@@ -101,19 +101,19 @@ export class MultiChainClaimIssuer implements ClaimIssuer {
     // missing signer for a specific pair at claim time — a runtime routing
     // issue, not a static setup bug).
     if (!config.inventory) {
-      throw new MillWalletError(
+      throw new SwapWalletError(
         'INVALID_CONFIG',
         'MultiChainClaimIssuer requires an inventory'
       );
     }
     if (!config.signers || typeof config.signers !== 'object') {
-      throw new MillWalletError(
+      throw new SwapWalletError(
         'INVALID_CONFIG',
         'MultiChainClaimIssuer requires a signers map'
       );
     }
     if (!config.channelState) {
-      throw new MillWalletError(
+      throw new SwapWalletError(
         'INVALID_CONFIG',
         'MultiChainClaimIssuer requires a channelState'
       );
@@ -148,7 +148,7 @@ export class MultiChainClaimIssuer implements ClaimIssuer {
     // 1. Look up signer by target chain.
     const signer = this.signers[targetChain];
     if (!signer) {
-      throw new MillWalletError(
+      throw new SwapWalletError(
         'UNSUPPORTED_CHAIN',
         `No signer for chain: ${targetChain}`
       );
@@ -163,14 +163,14 @@ export class MultiChainClaimIssuer implements ClaimIssuer {
       typeof chainRecipient !== 'string' ||
       !validateClaimIssuerChainRecipient(chainRecipient, targetChain)
     ) {
-      throw new MillWalletError(
+      throw new SwapWalletError(
         'SIGNING_FAILED',
         `chainRecipient is missing or malformed for chain ${targetChain}`
       );
     }
 
     // 2. Debit inventory SYNCHRONOUSLY (before any await). Throws
-    //    MillInventoryError('INSUFFICIENT_INVENTORY') when reserves are
+    //    SwapInventoryError('INSUFFICIENT_INVENTORY') when reserves are
     //    exhausted — Story 12.3's handler maps this to ILP T04.
     this.inventory.debit(targetAsset, targetChain, targetAmount);
 
@@ -211,12 +211,12 @@ export class MultiChainClaimIssuer implements ClaimIssuer {
         senderPubkey,
         cumulativeDelta: targetAmount,
       });
-      this.logger?.error?.('mill.issueClaim.signing_failed', {
+      this.logger?.error?.('swap.issueClaim.signing_failed', {
         err,
         chain: targetChain,
         asset: targetAsset,
       });
-      throw new MillWalletError(
+      throw new SwapWalletError(
         'SIGNING_FAILED',
         'Balance-proof signing failed',
         { cause: err }
@@ -224,7 +224,7 @@ export class MultiChainClaimIssuer implements ClaimIssuer {
     }
 
     const claimId = this.newClaimId();
-    this.logger?.debug?.('mill.issueClaim.ok', {
+    this.logger?.debug?.('swap.issueClaim.ok', {
       claimId,
       chain: targetChain,
       asset: targetAsset,
@@ -235,8 +235,8 @@ export class MultiChainClaimIssuer implements ClaimIssuer {
     // provided a signer-address map. Absent signer address = legacy caller,
     // metadata stays in the pre-12.6 shape.
     const result: IssueClaimResult = { claim, claimId };
-    const millSignerAddress = this.signerAddresses[targetChain];
-    if (millSignerAddress !== undefined) {
+    const swapSignerAddress = this.signerAddresses[targetChain];
+    if (swapSignerAddress !== undefined) {
       result.channelId = reservation.channelId;
       result.nonce = reservation.nonce;
       result.cumulativeAmount = reservation.cumulativeAmount;
@@ -244,7 +244,7 @@ export class MultiChainClaimIssuer implements ClaimIssuer {
       // address, not the Nostr identity key. The sender's AC-7 equality
       // check asserts `metadata.recipient === params.chainRecipient`.
       result.recipient = chainRecipient;
-      result.millSignerAddress = millSignerAddress;
+      result.swapSignerAddress = swapSignerAddress;
     }
     return result;
   }

@@ -37,7 +37,7 @@ import {
   TOKEN_NETWORK_ADDRESS,
   CHAIN_ID,
   createViemClient,
-  MILL_E2E_EVM_SENDER_ADDRESS,
+  SWAP_E2E_EVM_SENDER_ADDRESS,
   DOCKER_CHAIN_EVM,
   DOCKER_CHAIN_SOLANA,
   DOCKER_CHAIN_MINA,
@@ -48,7 +48,7 @@ import {
 // ---------------------------------------------------------------------------
 
 /** Sender's 20-byte EVM payout address (lowercase hex with `0x`). AC-3. */
-const EVM_CHAIN_RECIPIENT = MILL_E2E_EVM_SENDER_ADDRESS.toLowerCase();
+const EVM_CHAIN_RECIPIENT = SWAP_E2E_EVM_SENDER_ADDRESS.toLowerCase();
 
 /** Invalid chain-recipient value used for AC-5 T00 probe. */
 const MALFORMED_CHAIN_RECIPIENT = '0xdeadbeef';
@@ -64,7 +64,7 @@ const PEER1_NOSTR_PUBKEY =
   'd6bfe100d1600c0d8f769501676fc74c3809500bd131c8a549f88cf616c21f35';
 
 // Sender builder extracted to helpers/build-live-sender.ts (shared across all
-// Mill E2E test files to eliminate ~80 lines of duplicated wiring per file).
+// swap-node E2E test files to eliminate ~80 lines of duplicated wiring per file).
 
 // ---------------------------------------------------------------------------
 // Suite
@@ -86,15 +86,15 @@ describe('Docker Swap-Flow EVM E2E (Story 12.10, Task 2)', () => {
     // can reference the same result (AC-3 swap, AC-6 settlement reuse claims).
     try {
       sender = await buildLiveSender({
-        nodeIdPrefix: 'mill-evm',
+        nodeIdPrefix: 'swap-evm',
         btpServerPort: 19920,
         healthCheckPort: 19921,
-        loggerName: 'mill-e2e-evm-connector',
+        loggerName: 'swap-e2e-evm-connector',
       });
       swapResult = await streamSwap({
         client: sender.client,
-        millPubkey: PEER1_NOSTR_PUBKEY,
-        millIlpAddress: 'g.toon.peer1',
+        swapPubkey: PEER1_NOSTR_PUBKEY,
+        swapIlpAddress: 'g.toon.peer1',
         pair: {
           from: {
             assetCode: 'USD',
@@ -151,7 +151,7 @@ describe('Docker Swap-Flow EVM E2E (Story 12.10, Task 2)', () => {
     const event = await new Promise<Record<string, unknown> | null>(
       (resolve, reject) => {
         const ws = new WebSocket(PEER1_RELAY_URL);
-        const subId = `mill-e2e-10032-${Date.now()}`;
+        const subId = `swap-e2e-10032-${Date.now()}`;
         const timer = setTimeout(() => {
           try { ws.close(); } catch { /* ignore */ }
           resolve(null);
@@ -332,7 +332,7 @@ describe('Docker Swap-Flow EVM E2E (Story 12.10, Task 2)', () => {
       timeout: 15000,
     });
 
-    // The Mill should reject with T00 (INVALID_CHAIN_RECIPIENT)
+    // The swap node should reject with T00 (INVALID_CHAIN_RECIPIENT)
     expect(result.accepted).toBe(false);
     expect(result.code).toMatch(/T00|F00/);
   });
@@ -370,14 +370,14 @@ describe('Docker Swap-Flow EVM E2E (Story 12.10, Task 2)', () => {
     expect(lastClaim.nonce).toBeDefined();
     expect(lastClaim.cumulativeAmount).toBeDefined();
     expect(lastClaim.recipient).toBeDefined();
-    expect(lastClaim.millSignerAddress).toBeDefined();
+    expect(lastClaim.swapSignerAddress).toBeDefined();
 
     // buildSettlementTx requires lowercase EVM addresses (regex enforced).
-    // Both the mill signer address (returned in claim metadata) and the
+    // Both the swap node signer address (returned in claim metadata) and the
     // token-network contract address are normalized to lowercase here so
     // the EVM_ADDRESS_REGEX guard in build-settlement-tx.ts accepts them.
     const signerConfig = {
-      address: lastClaim.millSignerAddress!.toLowerCase(),
+      address: lastClaim.swapSignerAddress!.toLowerCase(),
       contractAddress: TOKEN_NETWORK_ADDRESS.toLowerCase(),
       chainId: CHAIN_ID,
     };
@@ -408,7 +408,7 @@ describe('Docker Swap-Flow EVM E2E (Story 12.10, Task 2)', () => {
     expect(bundle.nonce).toBe(lastClaim.nonce);
     expect(bundle.cumulativeAmount).toBe(lastClaim.cumulativeAmount);
     expect(bundle.recipient).toBe(EVM_CHAIN_RECIPIENT);
-    expect(bundle.millSignerAddress).toBe(lastClaim.millSignerAddress);
+    expect(bundle.swapSignerAddress).toBe(lastClaim.swapSignerAddress);
     expect(bundle.unsignedTxBytes.length).toBeGreaterThan(0);
     expect(bundle.claimsMerged).toBeGreaterThanOrEqual(1);
 

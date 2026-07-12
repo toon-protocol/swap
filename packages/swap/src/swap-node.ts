@@ -1,9 +1,9 @@
 /**
- * `startMill()` — programmatic entrypoint for a TOON Mill (swap peer).
+ * `startSwapNode()` — programmatic entrypoint for a TOON swap node (swap peer).
  *
  * Story 12.7 — wires together:
  *   - Node identity          (`fromMnemonic` / `fromSecretKey` from SDK)
- *   - Mill chain keys        (`deriveMillKeys` from ./wallet.js — BIP-44
+ *   - swap node chain keys        (`deriveSwapNodeKeys` from ./wallet.js — BIP-44
  *                             account index 2 per D12-011)
  *   - Payment-channel signers per chain family
  *   - Inventory + channel state
@@ -18,7 +18,7 @@
  *
  * The shape mirrors `packages/town/src/town.ts`'s `startTown()` — same
  * composition pipeline, same ownership-based cleanup semantics, same
- * `MillInstance.stop()` idempotence guarantees.
+ * `SwapNodeInstance.stop()` idempotence guarantees.
  */
 
 import { serve, type ServerType } from '@hono/node-server';
@@ -57,10 +57,10 @@ import type {
 } from '@toon-protocol/core';
 import { createHandlerContext } from '@toon-protocol/sdk';
 
-import { deriveMillKeys } from './wallet.js';
-import type { MillKeys, MillChainKind } from './wallet.js';
-import { MillInventory } from './inventory.js';
-import { MillChannelState } from './channel-state.js';
+import { deriveSwapNodeKeys } from './wallet.js';
+import type { SwapNodeKeys, SwapNodeChainKind } from './wallet.js';
+import { SwapInventory } from './inventory.js';
+import { SwapChannelState } from './channel-state.js';
 import type { ChannelEntry } from './channel-state.js';
 import {
   EvmPaymentChannelSigner,
@@ -69,13 +69,13 @@ import {
 } from './payment-channel-signer.js';
 import type { PaymentChannelSigner } from './payment-channel-signer.js';
 import { MultiChainClaimIssuer } from './claim-issuer.js';
-import { MillStartError } from './errors.js';
+import { SwapNodeStartError } from './errors.js';
 
 // ---------------------------------------------------------------------------
 // Public types
 // ---------------------------------------------------------------------------
 
-export interface MillLogger {
+export interface SwapNodeLogger {
   debug: (...args: unknown[]) => void;
   info: (...args: unknown[]) => void;
   warn: (...args: unknown[]) => void;
@@ -88,15 +88,15 @@ export interface MillLogger {
  * Default implementation uses `SimplePool.publish()` against
  * `config.relayUrls`. Tests substitute a capturing implementation so
  * they can assert the kind:10032 broadcast without spinning up a relay.
- * Publish failures are logged at `warn` and DO NOT fail Mill boot — a
- * flaky relay must not prevent a Mill from coming up.
+ * Publish failures are logged at `warn` and DO NOT fail swap node boot — a
+ * flaky relay must not prevent a swap node from coming up.
  */
 export interface Publisher {
   publish(event: unknown): Promise<void>;
 }
 
 /**
- * Configuration for starting a TOON Mill via `startMill()`.
+ * Configuration for starting a TOON swap node via `startSwapNode()`.
  *
  * Exactly one of `mnemonic` or `secretKey` MUST be supplied.
  *
@@ -104,10 +104,10 @@ export interface Publisher {
  *   - `connector` supplied        → operator owns lifecycle; not closed on stop()
  *   - `connectorUrl` supplied     → embedded ConnectorNode auto-created with that
  *                                   URL as a parent BTP peer + a self-route for
- *                                   local delivery (Mill becomes a child of the
- *                                   parent connector). Mill owns lifecycle.
+ *                                   local delivery (swap node becomes a child of the
+ *                                   parent connector). swap node owns lifecycle.
  *   - Neither supplied            → standalone embedded connector (no parent),
- *                                   gated on `btpServerPort`. Mill owns lifecycle.
+ *                                   gated on `btpServerPort`. swap node owns lifecycle.
  *
  * `swapPairs` MUST be non-empty.
  * `chains` MUST cover every distinct `pair.to.chain` family referenced.
@@ -116,20 +116,20 @@ export interface Publisher {
  */
 
 /**
- * Per-chain provider config wired into the Mill's embedded connector for
+ * Per-chain provider config wired into the swap node's embedded connector for
  * per-packet claim verification + signing. This is a structural mirror of
  * the connector's `ChainProviderConfigEntry` (`ProviderConfig & { chainId }`)
- * discriminated union — declared here (rather than imported) so the Mill's
+ * discriminated union — declared here (rather than imported) so the swap node's
  * public config surface does not take a compile-time type dep on a connector
  * internal. The connector validates these again at boot; the shapes MUST stay
  * in sync with `@toon-protocol/connector`'s
  * `settlement/provider/payment-channel-provider.ts`.
  *
- * `keyId` is declared optional on every variant because the Mill defaults it
- * (see {@link MillConfig.chainProviders}); the connector requires it for
+ * `keyId` is declared optional on every variant because the swap node defaults it
+ * (see {@link SwapNodeConfig.chainProviders}); the connector requires it for
  * evm/solana and treats it as optional for mina.
  */
-export interface MillEvmChainProvider {
+export interface SwapNodeEvmChainProvider {
   chainType: 'evm';
   /** Namespaced chain id used by the connector registry, e.g. `evm:base:8453`. */
   chainId: string;
@@ -139,11 +139,11 @@ export interface MillEvmChainProvider {
   registryAddress: string;
   /** Settlement token (USDC, M2M, …) contract address. */
   tokenAddress: string;
-  /** Hex private key used to sign settlement claims. Defaulted by the Mill. */
+  /** Hex private key used to sign settlement claims. Defaulted by the swap node. */
   keyId?: string;
 }
 
-export interface MillSolanaChainProvider {
+export interface SwapNodeSolanaChainProvider {
   chainType: 'solana';
   /** Namespaced chain id, e.g. `solana:devnet`. */
   chainId: string;
@@ -157,11 +157,11 @@ export interface MillSolanaChainProvider {
   tokenMint?: string;
   /** Solana cluster name for chain-id namespacing (e.g. `devnet`). */
   cluster?: string;
-  /** Hex/base58 key used to sign Ed25519 settlement claims. Defaulted by the Mill. */
+  /** Hex/base58 key used to sign Ed25519 settlement claims. Defaulted by the swap node. */
   keyId?: string;
 }
 
-export interface MillMinaChainProvider {
+export interface SwapNodeMinaChainProvider {
   chainType: 'mina';
   /** Namespaced chain id, e.g. `mina:devnet`. */
   chainId: string;
@@ -173,20 +173,20 @@ export interface MillMinaChainProvider {
   tokenId?: string;
   /** Mina network name for chain-id namespacing (e.g. `devnet`). */
   network?: string;
-  /** Base58 key used to sign Poseidon-commitment settlement claims. Defaulted by the Mill. */
+  /** Base58 key used to sign Poseidon-commitment settlement claims. Defaulted by the swap node. */
   keyId?: string;
 }
 
 /**
- * Discriminated union of all supported Mill chain-provider configs. Narrow on
+ * Discriminated union of all supported swap node chain-provider configs. Narrow on
  * the `chainType` field. Mirrors the connector's `ChainProviderConfigEntry`.
  */
-export type MillChainProvider =
-  | MillEvmChainProvider
-  | MillSolanaChainProvider
-  | MillMinaChainProvider;
+export type SwapNodeChainProvider =
+  | SwapNodeEvmChainProvider
+  | SwapNodeSolanaChainProvider
+  | SwapNodeMinaChainProvider;
 
-export interface MillConfig {
+export interface SwapNodeConfig {
   // --- Identity (exactly one required) ---
   mnemonic?: string;
   secretKey?: Uint8Array;
@@ -194,9 +194,9 @@ export interface MillConfig {
   // --- Connector (at most one) ---
   connector?: EmbeddableConnectorLike;
   /**
-   * Parent BTP URL. When set (and `connector` is not), the Mill auto-creates
+   * Parent BTP URL. When set (and `connector` is not), the swap node auto-creates
    * an embedded ConnectorNode wired to this URL as a parent peer with a
-   * self-route for local delivery. The Mill becomes a child of the parent
+   * self-route for local delivery. The swap node becomes a child of the parent
    * connector at `parentPeerId`.
    */
   connectorUrl?: string;
@@ -221,9 +221,9 @@ export interface MillConfig {
    */
   nodeId?: string;
 
-  // --- Mill-specific ---
+  // --- swap-node-specific ---
   swapPairs: readonly SwapPair[];
-  chains: readonly MillChainKind[];
+  chains: readonly SwapNodeChainKind[];
   channels: Record<string, readonly ChannelEntry[]>;
   inventory: Record<string, bigint>;
 
@@ -231,13 +231,13 @@ export interface MillConfig {
   /**
    * Optional operator-supplied replay-protection set for the swap handler.
    *
-   * SECURITY: this `Set<string>` is unbounded by default. The Mill accepts
+   * SECURITY: this `Set<string>` is unbounded by default. The swap node accepts
    * gift-wrap packets from any peer (handler-level dispatch), so a malicious
-   * sender can flood the Mill with distinct packet IDs and grow this set
+   * sender can flood the swap node with distinct packet IDs and grow this set
    * until memory is exhausted. Operators SHOULD supply a bounded / LRU-backed
    * `Set`-like impl (or rely on `createSwapHandler`'s default policy — see
    * `@toon-protocol/sdk/swap-handler` for the in-process bound). This field
-   * is forwarded verbatim; `startMill()` does NOT size-cap it.
+   * is forwarded verbatim; `startSwapNode()` does NOT size-cap it.
    */
   seenPacketIds?: Set<string>;
 
@@ -249,7 +249,7 @@ export interface MillConfig {
    * Story 12.8 AC-11 — BTP server port for the auto-created embedded
    * ConnectorNode (when `config.connector` and `config.connectorUrl`
    * are both omitted). Ignored if the operator supplies a connector.
-   * Defaults to `3400` (distinct from Town's `3000` default so a Mill
+   * Defaults to `3400` (distinct from Town's `3000` default so a swap node
    * and a Town can run side-by-side on one host without collision).
    */
   btpServerPort?: number;
@@ -261,7 +261,7 @@ export interface MillConfig {
   transport?: TransportConfig;
   /**
    * Optional chainProviders to wire into the embedded connector for
-   * per-packet claim verification + signing. One entry per chain the Mill
+   * per-packet claim verification + signing. One entry per chain the swap node
    * plans to settle on; the shape mirrors the apex YAML `chainProviders`
    * block exactly (the connector's `ChainProviderConfigEntry =
    * ProviderConfig & { chainId }` discriminated union — EVM / Solana /
@@ -272,10 +272,10 @@ export interface MillConfig {
    * or the 0x-prefixed identity.secretKey hex when omitted — the same
    * secp256k1 key that derives the Nostr identity doubles as the signing
    * key for claim issuance. (Mina's `keyId` is optional per the connector
-   * contract, but the Mill still defaults it so claim signing works out of
+   * contract, but the swap node still defaults it so claim signing works out of
    * the box on every chain type.)
    */
-  chainProviders?: readonly MillChainProvider[];
+  chainProviders?: readonly SwapNodeChainProvider[];
   /**
    * EVM private key for embedded-connector ClaimReceiver / chainProviders
    * `keyId` defaults. When set, used in place of the 0x-hex identity
@@ -288,21 +288,21 @@ export interface MillConfig {
    * EVM treasury address advertised to the parent connector for the
    * embedded-with-parent peer entry. The apex's PerPacketClaimService uses
    * this as `peerAddress` when opening a settlement channel toward the
-   * Mill. Only meaningful when `connectorUrl` is set; when omitted, the
+   * swap node. Only meaningful when `connectorUrl` is set; when omitted, the
    * parent peer entry has no `evmAddress` and the apex must supply
    * `peerAddress` explicitly via the `/channels` admin call.
    */
   parentEvmAddress?: string;
   passphrase?: string;
-  logger?: MillLogger;
+  logger?: SwapNodeLogger;
 
   /**
-   * Published in kind:10032 as the Mill's ILP address. Used by peers to
-   * route packets toward this node. Default: `g.toon.mill.<pubkey16>`.
+   * Published in kind:10032 as the swap node's ILP address. Used by peers to
+   * route packets toward this node. Default: `g.toon.swap.<pubkey16>`.
    */
   ilpAddress?: string;
   /**
-   * Published in kind:10032 as the Mill's BTP endpoint. Operators SHOULD
+   * Published in kind:10032 as the swap node's BTP endpoint. Operators SHOULD
    * supply a reachable WebSocket URL (use the `wss://host:port` scheme for
    * production; the unencrypted WebSocket scheme is acceptable only for
    * local development) so peers can establish BTP sessions. Default: `''`
@@ -321,7 +321,7 @@ export interface MillConfig {
    * A TOON relay is pay-to-write: its WebSocket `EVENT` handler rejects
    * unpaid writes ('restricted: writes require ILP payment'), so a plain
    * Nostr publish (the `relayUrls`/SimplePool path) is NEVER stored by a
-   * TOON relay. When this is set, `startMill()` instead routes the
+   * TOON relay. When this is set, `startSwapNode()` instead routes the
    * TOON-encoded kind:10032 to this ILP address via an ILP PREPARE through
    * the embedded connector (mirrors `startTown()`'s self-advertise via
    * `ilpClient.sendIlpPacket`). Point it at the ILP address of a relay node
@@ -369,12 +369,12 @@ export interface MillConfig {
   };
 }
 
-export interface MillInstance {
+export interface SwapNodeInstance {
   readonly identity: NodeIdentity;
   readonly blsPort: number;
-  readonly millKeys: MillKeys;
+  readonly swapNodeKeys: SwapNodeKeys;
   /**
-   * Story 12.8 AC-11 — the effective connector the Mill is wired to.
+   * Story 12.8 AC-11 — the effective connector the swap node is wired to.
    *
    * - When `config.connector` was supplied: that value, verbatim.
    * - When neither `config.connector` nor `config.connectorUrl` were
@@ -382,22 +382,22 @@ export interface MillInstance {
    * - Otherwise: `undefined`.
    *
    * Ownership: lifecycle of auto-created connectors is managed by the
-   * Mill (`stop()` closes them). Operator-supplied connectors are
+   * swap node (`stop()` closes them). Operator-supplied connectors are
    * owned by the caller and NOT closed on `stop()`.
    */
   readonly connector?: EmbeddableConnectorLike;
   stop(): Promise<void>;
-  health(): MillHealthResponse;
+  health(): SwapNodeHealthResponse;
   /** @internal — AC-10 test hook. */
   readonly _handlerRegistry?: HandlerRegistry;
 }
 
-export interface MillHealthResponse {
+export interface SwapNodeHealthResponse {
   status: 'ok' | 'starting' | 'stopping' | 'stopped';
   version: string;
   nodePubkey: string;
   swapPairsCount: number;
-  chains: readonly MillChainKind[];
+  chains: readonly SwapNodeChainKind[];
   uptimeSec: number;
   inventory: Record<string, string>;
   /** Configured swap pairs — operator-config, no secrets. */
@@ -411,22 +411,22 @@ export interface MillHealthResponse {
 // ---------------------------------------------------------------------------
 
 /**
- * Map each distinct `pair.to.chain` to the Mill's on-chain signer address
+ * Map each distinct `pair.to.chain` to the swap node's on-chain signer address
  * for that chain. Closes the TODO(12.7) hook from
- * `packages/mill/src/claim-issuer.ts:40-43`.
+ * `packages/swap/src/claim-issuer.ts:40-43`.
  *
  * @internal — exported for unit testability (AC-5).
  */
 export function buildSignerAddresses(
   pairs: readonly SwapPair[],
-  keys: MillKeys
+  keys: SwapNodeKeys
 ): Record<string, string> {
   const result: Record<string, string> = {};
   const distinctChains = new Set(pairs.map((p) => p.to.chain));
   for (const chain of distinctChains) {
     if (chain.startsWith('evm:')) {
       if (!keys.evm) {
-        throw new MillStartError(
+        throw new SwapNodeStartError(
           'MISSING_KEY',
           `No EVM key derived but pair targets ${chain}`
         );
@@ -439,7 +439,7 @@ export function buildSignerAddresses(
       result[chain] = keys.evm.address.toLowerCase();
     } else if (chain.startsWith('solana:')) {
       if (!keys.solana) {
-        throw new MillStartError(
+        throw new SwapNodeStartError(
           'MISSING_KEY',
           `No Solana key derived but pair targets ${chain}`
         );
@@ -447,14 +447,14 @@ export function buildSignerAddresses(
       result[chain] = base58Encode(keys.solana.publicKey);
     } else if (chain.startsWith('mina:')) {
       if (!keys.mina) {
-        throw new MillStartError(
+        throw new SwapNodeStartError(
           'MISSING_KEY',
           `No Mina key derived but pair targets ${chain}`
         );
       }
       result[chain] = keys.mina.publicKey;
     } else {
-      throw new MillStartError(
+      throw new SwapNodeStartError(
         'UNSUPPORTED_CHAIN_FAMILY',
         `Unknown chain family in pair.to.chain=${chain}`
       );
@@ -463,7 +463,7 @@ export function buildSignerAddresses(
   return result;
 }
 
-function noopLogger(): MillLogger {
+function noopLogger(): SwapNodeLogger {
   return {
     debug: () => undefined,
     info: () => undefined,
@@ -486,7 +486,7 @@ function errSummary(err: unknown): { name: string; message: string } {
   return { name: 'NonError', message: String(err) };
 }
 
-function chainFamily(chain: string): MillChainKind | null {
+function chainFamily(chain: string): SwapNodeChainKind | null {
   if (chain.startsWith('evm:')) return 'evm';
   if (chain.startsWith('solana:')) return 'solana';
   if (chain.startsWith('mina:')) return 'mina';
@@ -494,59 +494,59 @@ function chainFamily(chain: string): MillChainKind | null {
 }
 
 /**
- * Validate a {@link MillConfig} and throw {@link MillStartError} with code
+ * Validate a {@link SwapNodeConfig} and throw {@link SwapNodeStartError} with code
  * `INVALID_CONFIG` on the first violation. Pure and synchronous — it allocates
  * no resources and boots nothing, so it is safe to call directly in tests
  * (notably without triggering the embedded connector's Mina zkApp pre-compile).
- * `startMill` calls this first, before any resource allocation.
+ * `startSwapNode` calls this first, before any resource allocation.
  *
  * @internal Exported for unit testing of the config-validation surface; not
  * part of the supported package API.
  */
-export function validateConfig(config: MillConfig): void {
+export function validateConfig(config: SwapNodeConfig): void {
   const hasMnemonic = config.mnemonic !== undefined;
   const hasSecretKey = config.secretKey !== undefined;
 
   if (hasMnemonic && hasSecretKey) {
-    throw new MillStartError(
+    throw new SwapNodeStartError(
       'INVALID_CONFIG',
-      'MillConfig: provide either mnemonic or secretKey, not both'
+      'SwapNodeConfig: provide either mnemonic or secretKey, not both'
     );
   }
   if (!hasMnemonic && !hasSecretKey) {
-    throw new MillStartError(
+    throw new SwapNodeStartError(
       'INVALID_CONFIG',
-      'MillConfig: one of mnemonic or secretKey is required'
+      'SwapNodeConfig: one of mnemonic or secretKey is required'
     );
   }
   if (hasSecretKey) {
     const sk = config.secretKey as Uint8Array;
     if (!(sk instanceof Uint8Array) || sk.length !== 32) {
-      throw new MillStartError(
+      throw new SwapNodeStartError(
         'INVALID_CONFIG',
-        `MillConfig.secretKey must be a 32-byte Uint8Array (got ${sk instanceof Uint8Array ? `${sk.length} bytes` : typeof sk})`
+        `SwapNodeConfig.secretKey must be a 32-byte Uint8Array (got ${sk instanceof Uint8Array ? `${sk.length} bytes` : typeof sk})`
       );
     }
   }
 
   if (config.connector !== undefined && config.connectorUrl !== undefined) {
-    throw new MillStartError(
+    throw new SwapNodeStartError(
       'INVALID_CONFIG',
-      'MillConfig: provide either connector or connectorUrl, not both'
+      'SwapNodeConfig: provide either connector or connectorUrl, not both'
     );
   }
 
   if (!Array.isArray(config.swapPairs) || config.swapPairs.length === 0) {
-    throw new MillStartError(
+    throw new SwapNodeStartError(
       'INVALID_CONFIG',
-      'MillConfig.swapPairs MUST be a non-empty array'
+      'SwapNodeConfig.swapPairs MUST be a non-empty array'
     );
   }
 
   if (!Array.isArray(config.relayUrls) || config.relayUrls.length === 0) {
-    throw new MillStartError(
+    throw new SwapNodeStartError(
       'INVALID_CONFIG',
-      'MillConfig.relayUrls MUST be a non-empty array'
+      'SwapNodeConfig.relayUrls MUST be a non-empty array'
     );
   }
 
@@ -554,38 +554,38 @@ export function validateConfig(config: MillConfig): void {
   for (const chain of distinctTargetChains) {
     const fam = chainFamily(chain);
     if (!fam) {
-      throw new MillStartError(
+      throw new SwapNodeStartError(
         'INVALID_CONFIG',
-        `MillConfig: unknown chain family in pair.to.chain=${chain}`
+        `SwapNodeConfig: unknown chain family in pair.to.chain=${chain}`
       );
     }
     if (!config.chains.includes(fam)) {
-      throw new MillStartError(
+      throw new SwapNodeStartError(
         'INVALID_CONFIG',
-        `MillConfig.chains missing family "${fam}" required by pair.to.chain=${chain}`
+        `SwapNodeConfig.chains missing family "${fam}" required by pair.to.chain=${chain}`
       );
     }
     const chanList = config.channels[chain];
     if (!Array.isArray(chanList) || chanList.length === 0) {
-      throw new MillStartError(
+      throw new SwapNodeStartError(
         'INVALID_CONFIG',
-        `MillConfig.channels["${chain}"] MUST be a non-empty array`
+        `SwapNodeConfig.channels["${chain}"] MUST be a non-empty array`
       );
     }
     const inv = config.inventory[chain];
     if (inv === undefined || typeof inv !== 'bigint' || inv < 0n) {
-      throw new MillStartError(
+      throw new SwapNodeStartError(
         'INVALID_CONFIG',
-        `MillConfig.inventory["${chain}"] MUST be a non-negative bigint`
+        `SwapNodeConfig.inventory["${chain}"] MUST be a non-negative bigint`
       );
     }
   }
 
   if (config.chainProviders !== undefined) {
     if (!Array.isArray(config.chainProviders)) {
-      throw new MillStartError(
+      throw new SwapNodeStartError(
         'INVALID_CONFIG',
-        'MillConfig.chainProviders MUST be an array when set'
+        'SwapNodeConfig.chainProviders MUST be an array when set'
       );
     }
     for (const [i, p] of config.chainProviders.entries()) {
@@ -598,11 +598,11 @@ export function validateConfig(config: MillConfig): void {
  * Required non-empty string fields per chain type, mirroring the connector's
  * `REQUIRED_FIELDS_BY_CHAIN_TYPE` in `@toon-protocol/connector`'s
  * `config/types.ts`. `keyId` is intentionally omitted from every list because
- * the Mill defaults it before forwarding to the connector (see
- * `MillConfig.chainProviders`).
+ * the swap node defaults it before forwarding to the connector (see
+ * `SwapNodeConfig.chainProviders`).
  */
-const MILL_REQUIRED_PROVIDER_FIELDS: Record<
-  MillChainProvider['chainType'],
+const SWAP_REQUIRED_PROVIDER_FIELDS: Record<
+  SwapNodeChainProvider['chainType'],
   readonly string[]
 > = {
   evm: ['chainId', 'rpcUrl', 'registryAddress', 'tokenAddress'],
@@ -618,76 +618,78 @@ const MILL_REQUIRED_PROVIDER_FIELDS: Record<
  */
 function validateChainProviderEntry(p: unknown, i: number): void {
   if (typeof p !== 'object' || p === null) {
-    throw new MillStartError(
+    throw new SwapNodeStartError(
       'INVALID_CONFIG',
-      `MillConfig.chainProviders[${i}] MUST be an object`
+      `SwapNodeConfig.chainProviders[${i}] MUST be an object`
     );
   }
   const rec = p as Record<string, unknown>;
   const chainType = rec['chainType'];
   if (chainType !== 'evm' && chainType !== 'solana' && chainType !== 'mina') {
-    throw new MillStartError(
+    throw new SwapNodeStartError(
       'INVALID_CONFIG',
-      `MillConfig.chainProviders[${i}].chainType MUST be one of 'evm' | 'solana' | 'mina' (got ${JSON.stringify(
+      `SwapNodeConfig.chainProviders[${i}].chainType MUST be one of 'evm' | 'solana' | 'mina' (got ${JSON.stringify(
         chainType
       )})`
     );
   }
-  const required = MILL_REQUIRED_PROVIDER_FIELDS[chainType];
+  const required = SWAP_REQUIRED_PROVIDER_FIELDS[chainType];
   for (const k of required) {
     const v = rec[k];
     if (typeof v !== 'string' || v.length === 0) {
-      throw new MillStartError(
+      throw new SwapNodeStartError(
         'INVALID_CONFIG',
-        `MillConfig.chainProviders[${i}].${k} MUST be a non-empty string for chainType '${chainType}'`
+        `SwapNodeConfig.chainProviders[${i}].${k} MUST be a non-empty string for chainType '${chainType}'`
       );
     }
   }
 }
 
 // ---------------------------------------------------------------------------
-// startMill()
+// startSwapNode()
 // ---------------------------------------------------------------------------
 
-export async function startMill(config: MillConfig): Promise<MillInstance> {
+export async function startSwapNode(
+  config: SwapNodeConfig
+): Promise<SwapNodeInstance> {
   // 1. Validate config — fail BEFORE allocating resources.
   validateConfig(config);
 
   const logger = config.logger ?? noopLogger();
   const startedAt = Date.now();
 
-  // 2/3. Mill key derivation (BIP-32) REQUIRES a mnemonic (D12-011). Check
+  // 2/3. swap node key derivation (BIP-32) REQUIRES a mnemonic (D12-011). Check
   //      this before resolving identity so callers passing only a secretKey
   //      get a domain-specific error instead of a generic `IdentityError`.
   if (!config.mnemonic) {
-    throw new MillStartError(
-      'MILL_REQUIRES_MNEMONIC',
-      'Mill key derivation (BIP-32) requires a BIP-39 mnemonic; pass config.mnemonic instead of secretKey'
+    throw new SwapNodeStartError(
+      'SWAP_REQUIRES_MNEMONIC',
+      'swap node key derivation (BIP-32) requires a BIP-39 mnemonic; pass config.mnemonic instead of secretKey'
     );
   }
 
   // Cryptographic-correctness guard: `fromMnemonic()` (SDK) does NOT accept
-  // a BIP-39 passphrase, but `deriveMillKeys()` below does. Silently splitting
+  // a BIP-39 passphrase, but `deriveSwapNodeKeys()` below does. Silently splitting
   // the derivation across two different seeds (identity without passphrase,
-  // mill keys with) would yield a non-deterministic operator key tree that
+  // swap node keys with) would yield a non-deterministic operator key tree that
   // cannot be recreated from the same mnemonic+passphrase pair. Reject at
   // boot so operators cannot misconfigure themselves into key-recovery hell.
   if (config.passphrase !== undefined && config.passphrase !== '') {
-    throw new MillStartError(
+    throw new SwapNodeStartError(
       'INVALID_CONFIG',
-      'MillConfig.passphrase is not supported: the Nostr-identity SDK derivation (fromMnemonic) does not accept a BIP-39 passphrase, so setting one would split identity and Mill-key derivation across inconsistent seeds. Use a passphrase-less mnemonic until SDK identity derivation supports passphrases.'
+      'SwapNodeConfig.passphrase is not supported: the Nostr-identity SDK derivation (fromMnemonic) does not accept a BIP-39 passphrase, so setting one would split identity and swap-node-key derivation across inconsistent seeds. Use a passphrase-less mnemonic until SDK identity derivation supports passphrases.'
     );
   }
 
-  // The mill's Nostr identity is derived from the MILL_MNEMONIC (NOT from any
+  // The swap node's Nostr identity is derived from the SWAP_MNEMONIC (NOT from any
   // NODE_NOSTR_SECRET_KEY). This SAME `identity` is the swap-handler gift-wrap
   // recipient (`recipientSecretKey: identity.secretKey`, below) and is
   // published as the kind:10032 IlpPeerInfo `pubkey` (below). streamSwap
   // callers therefore gift-wrap to `identity.pubkey` and pass it as
-  // `millPubkey`. See issues #80/#88 and docs/protocol.md ("Swap recipient
+  // `swapPubkey`. See issues #80/#88 and docs/protocol.md ("Swap recipient
   // key discovery").
   const identity: NodeIdentity = fromMnemonic(config.mnemonic);
-  const millKeys: MillKeys = await deriveMillKeys({
+  const swapNodeKeys: SwapNodeKeys = await deriveSwapNodeKeys({
     mnemonic: config.mnemonic,
     chains: config.chains,
     // NOTE: passphrase intentionally omitted — rejected above for consistency
@@ -707,8 +709,8 @@ export async function startMill(config: MillConfig): Promise<MillInstance> {
   let sharedMinaSigner: MinaPaymentChannelSigner | undefined;
   for (const chain of distinctTargetChains) {
     if (chain.startsWith('evm:')) {
-      if (!millKeys.evm) {
-        throw new MillStartError(
+      if (!swapNodeKeys.evm) {
+        throw new SwapNodeStartError(
           'MISSING_KEY',
           `Pair targets ${chain} but no EVM key was derived`
         );
@@ -716,36 +718,36 @@ export async function startMill(config: MillConfig): Promise<MillInstance> {
       // Re-use a single signer across all `evm:*` chains (AC-4 phase 4).
       sharedEvmSigner ??= new EvmPaymentChannelSigner({
         chain,
-        privateKey: millKeys.evm.privateKey,
+        privateKey: swapNodeKeys.evm.privateKey,
       });
       signers[chain] = sharedEvmSigner;
     } else if (chain.startsWith('solana:')) {
-      if (!millKeys.solana) {
-        throw new MillStartError(
+      if (!swapNodeKeys.solana) {
+        throw new SwapNodeStartError(
           'MISSING_KEY',
           `Pair targets ${chain} but no Solana key was derived`
         );
       }
       sharedSolanaSigner ??= new SolanaPaymentChannelSigner({
         chain,
-        privateKey: millKeys.solana.privateKey,
+        privateKey: swapNodeKeys.solana.privateKey,
       });
       signers[chain] = sharedSolanaSigner;
     } else if (chain.startsWith('mina:')) {
-      if (!millKeys.mina) {
-        throw new MillStartError(
+      if (!swapNodeKeys.mina) {
+        throw new SwapNodeStartError(
           'MISSING_KEY',
           `Pair targets ${chain} but no Mina key was derived`
         );
       }
       sharedMinaSigner ??= new MinaPaymentChannelSigner({
         chain,
-        privateKey: millKeys.mina.privateKey,
-        publicKey: millKeys.mina.publicKey,
+        privateKey: swapNodeKeys.mina.privateKey,
+        publicKey: swapNodeKeys.mina.publicKey,
       });
       signers[chain] = sharedMinaSigner;
     } else {
-      throw new MillStartError(
+      throw new SwapNodeStartError(
         'UNSUPPORTED_CHAIN_FAMILY',
         `Unknown chain family in pair.to.chain=${chain}`
       );
@@ -753,7 +755,7 @@ export async function startMill(config: MillConfig): Promise<MillInstance> {
   }
 
   // 5. Inventory — map operator-supplied `Record<chain, bigint>` into the
-  //    `MillInventory` per-asset/per-chain shape. We key off pair.to.assetCode
+  //    `SwapInventory` per-asset/per-chain shape. We key off pair.to.assetCode
   //    for each referenced chain.
   const inventoryInit: Record<string, { available: bigint; total: bigint }> =
     {};
@@ -763,10 +765,10 @@ export async function startMill(config: MillConfig): Promise<MillInstance> {
     const bal = config.inventory[chain] ?? 0n;
     inventoryInit[`${asset}:${chain}`] = { available: bal, total: bal };
   }
-  const inventory = new MillInventory({ balances: inventoryInit });
+  const inventory = new SwapInventory({ balances: inventoryInit });
 
   // 6. Channel state — flatten `Record<chain, ChannelEntry[]>` into the
-  //    `MillChannelState` key scheme (`assetCode:chain:senderPubkey`). For
+  //    `SwapChannelState` key scheme (`assetCode:chain:senderPubkey`). For
   //    bootstrap we only know `chain`, not a sender — so we register each
   //    channel under `*` (wildcard) sender. The Story 12.8 E2E will replace
   //    this with per-sender provisioning as real peers connect.
@@ -778,13 +780,13 @@ export async function startMill(config: MillConfig): Promise<MillInstance> {
       channelInit[key] = { ...entry };
     }
   }
-  const channelState = new MillChannelState({
+  const channelState = new SwapChannelState({
     channels: channelInit,
     logger: { warn: logger.warn },
   });
 
   // 7. signerAddresses map + claim issuer.
-  const signerAddresses = buildSignerAddresses(config.swapPairs, millKeys);
+  const signerAddresses = buildSignerAddresses(config.swapPairs, swapNodeKeys);
   const claimIssuer = new MultiChainClaimIssuer({
     inventory,
     signers,
@@ -818,7 +820,7 @@ export async function startMill(config: MillConfig): Promise<MillInstance> {
   try {
     registry.on(1059, swapHandler);
   } catch (err) {
-    throw new MillStartError(
+    throw new SwapNodeStartError(
       'HANDLER_REGISTRATION_FAILED',
       'Failed to register swap handler on kind:1059',
       { cause: err }
@@ -827,16 +829,16 @@ export async function startMill(config: MillConfig): Promise<MillInstance> {
 
   // 11. Connector ownership.
   //
-  // Three ownership modes — see MillConfig docblock:
+  // Three ownership modes — see SwapNodeConfig docblock:
   //   - `config.connector` supplied         → caller owns; never closed by stop().
   //   - `config.connectorUrl` supplied      → embedded-with-parent: auto-create
   //                                           a ConnectorNode wired to the URL as
   //                                           a parent BTP peer, plus a self-route
   //                                           so packets addressed at `ilpAddress`
-  //                                           land on the local handler. Mill owns.
-  //   - Neither supplied (+ btpServerPort)  → standalone embedded connector. Mill owns.
+  //                                           land on the local handler. swap node owns.
+  //   - Neither supplied (+ btpServerPort)  → standalone embedded connector. swap node owns.
   //
-  // The embedded-with-parent path makes the Mill a child of an apex connector:
+  // The embedded-with-parent path makes the swap node a child of an apex connector:
   // outbound packets fall through `g.*` to the parent, inbound packets matching
   // our own ilp prefix dispatch locally (PacketHandler zeros fees on local
   // delivery — see connector packet-handler.ts:1074-1077). `connectorFeePercentage:
@@ -855,7 +857,7 @@ export async function startMill(config: MillConfig): Promise<MillInstance> {
     const parentPeerId = config.parentPeerId ?? 'apex';
     const parentAuthToken = config.parentAuthToken ?? '';
     const ilpAddress =
-      config.ilpAddress ?? `g.toon.mill.${identity.pubkey.slice(0, 16)}`;
+      config.ilpAddress ?? `g.toon.swap.${identity.pubkey.slice(0, 16)}`;
     const connectorLogger = createConnectorLogger(
       nodeId,
       (process.env['TOON_CONNECTOR_LOG_LEVEL'] as
@@ -871,18 +873,18 @@ export async function startMill(config: MillConfig): Promise<MillInstance> {
     // connector's ClaimReceiver/PerPacketClaimService sign with a funded
     // EVM account (e.g. Anvil deterministic privkey) distinct from the
     // Nostr identity.
-    const millKeyHex =
+    const swapNodeKeyHex =
       config.settlementPrivateKey ??
       `0x${Buffer.from(identity.secretKey).toString('hex')}`;
-    if (!/^0x[0-9a-fA-F]{64}$/.test(millKeyHex)) {
-      throw new MillStartError(
+    if (!/^0x[0-9a-fA-F]{64}$/.test(swapNodeKeyHex)) {
+      throw new SwapNodeStartError(
         'INVALID_CONFIG',
-        `MillConfig.settlementPrivateKey must be a 0x-prefixed 32-byte hex string`
+        `SwapNodeConfig.settlementPrivateKey must be a 0x-prefixed 32-byte hex string`
       );
     }
     const resolvedChainProviders = config.chainProviders?.map((p) => ({
       ...p,
-      keyId: p.keyId ?? millKeyHex,
+      keyId: p.keyId ?? swapNodeKeyHex,
     }));
     try {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -900,7 +902,7 @@ export async function startMill(config: MillConfig): Promise<MillInstance> {
             // relation-aware inbound claim validation (toon-protocol/connector#78)
             // skips the per-packet-claim requirement for PREPAREs forwarded by the
             // parent (which settles in aggregate and attaches no per-packet claim
-            // to a child). Without this the peer defaults to 'peer' and Mill
+            // to a child). Without this the peer defaults to 'peer' and swap node
             // F06-rejects any claimless parent-forwarded paid packet. NOTE:
             // `parentPeerId` MUST equal the parent connector's nodeId — the
             // connector keys peerRelations by the auth-declared peerId of the
@@ -908,7 +910,7 @@ export async function startMill(config: MillConfig): Promise<MillInstance> {
             relation: 'parent',
             // Advertise our EVM treasury to the parent so the apex's
             // PerPacketClaimService can open a settlement channel toward
-            // this Mill without needing kind:10032 discovery first.
+            // this swap node without needing kind:10032 discovery first.
             ...(config.parentEvmAddress && {
               evmAddress: config.parentEvmAddress,
             }),
@@ -928,7 +930,7 @@ export async function startMill(config: MillConfig): Promise<MillInstance> {
         localDelivery: { enabled: false },
         // Children don't expose an admin API — the apex parent is the
         // operator-facing surface. Disabling avoids a hard runtime dep on
-        // express in the mill docker bundle.
+        // express in the swap node docker bundle.
         adminApi: { enabled: false },
         // Belt-and-braces: zero fees on the child connector for any path
         // (local delivery already gets fee=0 from the connector itself).
@@ -948,7 +950,7 @@ export async function startMill(config: MillConfig): Promise<MillInstance> {
       effectiveConnector =
         autoCreatedConnector as unknown as EmbeddableConnectorLike;
       ownsConnector = true;
-      logger.debug?.('mill.connector.embedded_with_parent', {
+      logger.debug?.('swap.connector.embedded_with_parent', {
         nodeId,
         btpServerPort,
         parentPeerId,
@@ -956,7 +958,7 @@ export async function startMill(config: MillConfig): Promise<MillInstance> {
         ilpAddress,
       });
     } catch (err) {
-      logger.warn?.('mill.connector.auto_create_failed', {
+      logger.warn?.('swap.connector.auto_create_failed', {
         err: errSummary(err),
       });
     }
@@ -980,20 +982,20 @@ export async function startMill(config: MillConfig): Promise<MillInstance> {
         | undefined) ?? 'warn'
     );
     // Same chainProviders default-keyId behaviour as the embedded-with-parent
-    // branch — see comment above. Standalone mills still benefit from
+    // branch — see comment above. Standalone swap nodes still benefit from
     // per-packet claim signing/verification when an operator wants it.
-    const millKeyHex =
+    const swapNodeKeyHex =
       config.settlementPrivateKey ??
       `0x${Buffer.from(identity.secretKey).toString('hex')}`;
-    if (!/^0x[0-9a-fA-F]{64}$/.test(millKeyHex)) {
-      throw new MillStartError(
+    if (!/^0x[0-9a-fA-F]{64}$/.test(swapNodeKeyHex)) {
+      throw new SwapNodeStartError(
         'INVALID_CONFIG',
-        `MillConfig.settlementPrivateKey must be a 0x-prefixed 32-byte hex string`
+        `SwapNodeConfig.settlementPrivateKey must be a 0x-prefixed 32-byte hex string`
       );
     }
     const resolvedChainProviders = config.chainProviders?.map((p) => ({
       ...p,
-      keyId: p.keyId ?? millKeyHex,
+      keyId: p.keyId ?? swapNodeKeyHex,
     }));
     try {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -1020,9 +1022,9 @@ export async function startMill(config: MillConfig): Promise<MillInstance> {
       effectiveConnector =
         autoCreatedConnector as unknown as EmbeddableConnectorLike;
       ownsConnector = true;
-      logger.debug?.('mill.connector.auto_created', { nodeId, btpServerPort });
+      logger.debug?.('swap.connector.auto_created', { nodeId, btpServerPort });
     } catch (err) {
-      logger.warn?.('mill.connector.auto_create_failed', {
+      logger.warn?.('swap.connector.auto_create_failed', {
         err: errSummary(err),
       });
     }
@@ -1031,8 +1033,8 @@ export async function startMill(config: MillConfig): Promise<MillInstance> {
   // 11a. Wire the HandlerRegistry to the connector's local-delivery path.
   //
   // Story 50.3 (SOL settlement leg, AC#4): inbound kind:1059 (NIP-59 gift-wrap)
-  // swap-request packets destined for Mill's OWN ILP address MUST be dispatched
-  // to `swapHandler` so Mill returns a signed claim in the FULFILL `data`. Mill
+  // swap-request packets destined for swap node's OWN ILP address MUST be dispatched
+  // to `swapHandler` so swap node returns a signed claim in the FULFILL `data`. swap node
   // does NOT route through `createToonNode()` (the SDK helper that performs this
   // wiring for town nodes), so without an explicit `setPacketHandler()` call the
   // embedded ConnectorNode has no `localDeliveryHandler` set. With
@@ -1089,7 +1091,7 @@ export async function startMill(config: MillConfig): Promise<MillInstance> {
     try {
       result = (await registry.dispatch(ctx)) as HandlePacketResponse;
     } catch (err) {
-      logger.error?.('mill.packet.dispatch_failed', { err: errSummary(err) });
+      logger.error?.('swap.packet.dispatch_failed', { err: errSummary(err) });
       return { accept: false, code: 'T00', message: 'Internal error' };
     }
 
@@ -1104,7 +1106,7 @@ export async function startMill(config: MillConfig): Promise<MillInstance> {
           'base64'
         );
       } catch (err) {
-        logger.error?.('mill.packet.metadata_serialize_failed', {
+        logger.error?.('swap.packet.metadata_serialize_failed', {
           err: errSummary(err),
         });
       }
@@ -1137,9 +1139,9 @@ export async function startMill(config: MillConfig): Promise<MillInstance> {
   // connectors and test doubles may omit it).
   if (effectiveConnector?.setPacketHandler) {
     effectiveConnector.setPacketHandler(handlePacket);
-    logger.debug?.('mill.connector.packet_handler_wired', {});
+    logger.debug?.('swap.connector.packet_handler_wired', {});
   } else {
-    logger.warn?.('mill.connector.packet_handler_unavailable', {
+    logger.warn?.('swap.connector.packet_handler_unavailable', {
       reason:
         'connector exposes no setPacketHandler; inbound kind:1059 swap packets cannot be dispatched to the swap handler',
     });
@@ -1161,17 +1163,17 @@ export async function startMill(config: MillConfig): Promise<MillInstance> {
   if (ownsConnector && autoCreatedConnector) {
     try {
       await autoCreatedConnector.start();
-      logger.debug?.('mill.connector.started', {
+      logger.debug?.('swap.connector.started', {
         nodeId: config.nodeId ?? `toon-swap-${identity.pubkey.slice(0, 16)}`,
       });
     } catch (err) {
-      logger.error?.('mill.connector.start_failed', { err: errSummary(err) });
+      logger.error?.('swap.connector.start_failed', { err: errSummary(err) });
     }
   }
 
   // 12. BLS server (Hono).
-  let status: MillHealthResponse['status'] = 'starting';
-  const getHealth = (): MillHealthResponse => {
+  let status: SwapNodeHealthResponse['status'] = 'starting';
+  const getHealth = (): SwapNodeHealthResponse => {
     const snapshot = inventory.snapshot();
     const inv: Record<string, string> = {};
     const invAvailable: Record<string, string> = {};
@@ -1229,9 +1231,9 @@ export async function startMill(config: MillConfig): Promise<MillInstance> {
   // 12b. knownPeers acceptance — the config field is reserved for Story 12.8
   //      E2E, which will wire bootstrap-via-ILP publishing. For now, warn
   //      the operator so an erroneously-set knownPeers entry doesn't silently
-  //      fail to advertise the Mill.
+  //      fail to advertise the swap node.
   if (config.knownPeers && config.knownPeers.length > 0) {
-    logger.warn?.('mill.knownPeers.ignored', {
+    logger.warn?.('swap.knownPeers.ignored', {
       count: config.knownPeers.length,
       reason:
         'bootstrap-via-ILP publishing is deferred to Story 12.8 E2E; knownPeers are accepted but not currently dispatched',
@@ -1278,15 +1280,15 @@ export async function startMill(config: MillConfig): Promise<MillInstance> {
       const results = await Promise.allSettled(promises);
       const rejected = results.filter((r) => r.status === 'rejected');
       for (const r of rejected) {
-        logger.warn?.('mill.peerInfo.relay_publish_failed', {
+        logger.warn?.('swap.peerInfo.relay_publish_failed', {
           err: errSummary((r as PromiseRejectedResult).reason),
         });
       }
       // A TOON relay ACKs the WS EVENT with OK=false rather than dropping the
       // socket, so `allSettled` resolves even though nothing was stored. Surface
-      // the limitation loudly so a misconfigured (ILP-less) Mill is diagnosable
+      // the limitation loudly so a misconfigured (ILP-less) swap node is diagnosable
       // instead of silently never-advertising (Story 50.4 AC #2).
-      logger.warn?.('mill.peerInfo.ws_publish_unverified', {
+      logger.warn?.('swap.peerInfo.ws_publish_unverified', {
         relayUrls: config.relayUrls,
         reason:
           'Nostr WS publish cannot be confirmed stored; a TOON relay is pay-to-write. Set peerInfoIlpDestination to advertise via ILP.',
@@ -1321,7 +1323,7 @@ export async function startMill(config: MillConfig): Promise<MillInstance> {
                     data,
                   });
                   if (res.accepted) {
-                    logger.info?.('mill.peerInfo.published', {
+                    logger.info?.('swap.peerInfo.published', {
                       destination,
                       attempt,
                       eventId: (event as NostrEvent).id,
@@ -1332,7 +1334,7 @@ export async function startMill(config: MillConfig): Promise<MillInstance> {
                 } catch (err) {
                   lastReason = errSummary(err).message;
                 }
-                logger.debug?.('mill.peerInfo.publish_retry', {
+                logger.debug?.('swap.peerInfo.publish_retry', {
                   destination,
                   attempt,
                   maxAttempts,
@@ -1348,7 +1350,7 @@ export async function startMill(config: MillConfig): Promise<MillInstance> {
               // call site is fire-and-forget, so a throw would only become a
               // floating rejection it already logs. Logging here keeps the
               // diagnosis attached to the per-attempt context.
-              logger.error?.('mill.peerInfo.publish_failed', {
+              logger.error?.('swap.peerInfo.publish_failed', {
                 destination,
                 attempts: maxAttempts,
                 reason: lastReason,
@@ -1367,7 +1369,7 @@ export async function startMill(config: MillConfig): Promise<MillInstance> {
   // peerInfoIlpDestination" they already set. Surface the misconfiguration
   // loudly so the dead advertisement is diagnosable at boot (AC #2).
   if (config.peerInfoIlpDestination && !effectiveConnector) {
-    logger.error?.('mill.peerInfo.ilp_destination_ignored', {
+    logger.error?.('swap.peerInfo.ilp_destination_ignored', {
       destination: config.peerInfoIlpDestination,
       reason:
         'peerInfoIlpDestination is set but no connector is available (set config.connector or config.connectorUrl). kind:10032 will fall back to an unpaid Nostr WS publish that a TOON relay rejects.',
@@ -1379,12 +1381,12 @@ export async function startMill(config: MillConfig): Promise<MillInstance> {
 
   try {
     const ownIlpInfo: IlpPeerInfo = {
-      // The MILL_MNEMONIC-derived identity pubkey — the authoritative
-      // `millPubkey` streamSwap callers discover here and gift-wrap to. Signed
+      // The SWAP_MNEMONIC-derived identity pubkey — the authoritative
+      // `swapPubkey` streamSwap callers discover here and gift-wrap to. Signed
       // below with the matching `identity.secretKey`. (issues #80/#88)
       pubkey: identity.pubkey,
       ilpAddress:
-        config.ilpAddress ?? `g.toon.mill.${identity.pubkey.slice(0, 16)}`,
+        config.ilpAddress ?? `g.toon.swap.${identity.pubkey.slice(0, 16)}`,
       btpEndpoint: config.btpEndpoint ?? '',
       assetCode: config.advertisedAsset?.assetCode ?? 'USD',
       assetScale: config.advertisedAsset?.assetScale ?? 6,
@@ -1392,7 +1394,7 @@ export async function startMill(config: MillConfig): Promise<MillInstance> {
     };
     const ilpInfoEvent = buildIlpPeerInfoEvent(ownIlpInfo, identity.secretKey);
     config.__testHooks?.onPeerInfoBuilt?.(ilpInfoEvent);
-    logger.debug?.('mill.peerInfo.built', {
+    logger.debug?.('swap.peerInfo.built', {
       id: ilpInfoEvent.id,
       swapPairs: config.swapPairs.length,
       via: ilpPublisher && !config.publisher ? 'ilp' : 'ws',
@@ -1403,22 +1405,22 @@ export async function startMill(config: MillConfig): Promise<MillInstance> {
     // Fire-and-forget so boot is not blocked on relay I/O. Failures are logged
     // at error here (the publisher impls already log per-attempt detail).
     void effectivePublisher.publish(ilpInfoEvent).catch((err) => {
-      logger.error?.('mill.peerInfo.publish_failed', {
+      logger.error?.('swap.peerInfo.publish_failed', {
         err: errSummary(err),
       });
     });
   } catch (err) {
-    logger.error?.('mill.peerInfo.publish_failed', { err: errSummary(err) });
+    logger.error?.('swap.peerInfo.publish_failed', { err: errSummary(err) });
   }
 
   status = 'ok';
 
-  // 14. Build MillInstance.
+  // 14. Build SwapNodeInstance.
   let stopped = false;
-  const instance: MillInstance = {
+  const instance: SwapNodeInstance = {
     identity,
     blsPort: livePort,
-    millKeys,
+    swapNodeKeys,
     ...(effectiveConnector !== undefined && { connector: effectiveConnector }),
     _handlerRegistry: registry,
     health: getHealth,
@@ -1432,7 +1434,7 @@ export async function startMill(config: MillConfig): Promise<MillInstance> {
           blsServer.close(() => resolve());
         });
       } catch (err) {
-        logger.warn?.('mill.stop.bls_close_failed', { err: errSummary(err) });
+        logger.warn?.('swap.stop.bls_close_failed', { err: errSummary(err) });
       }
       if (ownsConnector && effectiveConnector) {
         const closable = effectiveConnector as unknown as {
@@ -1446,7 +1448,7 @@ export async function startMill(config: MillConfig): Promise<MillInstance> {
             await closable.stop();
           }
         } catch (err) {
-          logger.warn?.('mill.stop.connector_close_failed', {
+          logger.warn?.('swap.stop.connector_close_failed', {
             err: errSummary(err),
           });
         }
@@ -1454,12 +1456,12 @@ export async function startMill(config: MillConfig): Promise<MillInstance> {
       try {
         channelState.releaseAll();
       } catch (err) {
-        logger.warn?.('mill.stop.release_all_failed', {
+        logger.warn?.('swap.stop.release_all_failed', {
           err: errSummary(err),
         });
       }
       // Story 12.8 AC-13: close the auto-created SimplePool (if any) so the
-      // Mill does not leak relay sockets on shutdown. Operator-injected
+      // swap node does not leak relay sockets on shutdown. Operator-injected
       // publishers are the caller's responsibility to close.
       if (autoPool) {
         try {
@@ -1467,7 +1469,7 @@ export async function startMill(config: MillConfig): Promise<MillInstance> {
             [...config.relayUrls]
           );
         } catch (err) {
-          logger.warn?.('mill.stop.pool_close_failed', {
+          logger.warn?.('swap.stop.pool_close_failed', {
             err: errSummary(err),
           });
         }

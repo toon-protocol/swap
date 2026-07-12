@@ -1,8 +1,8 @@
 /**
- * Tests for Mill `/health` endpoint (AC-8 original + AC-1 Story 21.11 extension).
+ * Tests for swap node `/health` endpoint (AC-8 original + AC-1 Story 21.11 extension).
  *
  * Scenarios:
- *   - `/health` returns JSON body matching MillHealthResponse shape.
+ *   - `/health` returns JSON body matching SwapNodeHealthResponse shape.
  *   - status transitions: starting → ok → stopping → stopped.
  *   - bigint inventory serialized as decimal strings (MAX_SAFE_INTEGER guard).
  *   - swapPairs field matches input config (AC-1).
@@ -49,7 +49,7 @@ function validConfig() {
 
 /**
  * Config with two swap pairs both targeting different assets on the same EVM
- * chain. Produces two MillInventory entries for evm:8453 (USDC + ETH), so
+ * chain. Produces two SwapInventory entries for evm:8453 (USDC + ETH), so
  * the chain-only convenience key must NOT be emitted (would be ambiguous).
  */
 function multiAssetConfig() {
@@ -81,14 +81,14 @@ function multiAssetConfig() {
 }
 
 describe('AC-8 /health endpoint', () => {
-  it('[P1] GET /health returns status:"ok" with correct MillHealthResponse shape', async () => {
-    const { startMill } = (await import('./mill.js')) as {
-      startMill: (c: unknown) => Promise<{
+  it('[P1] GET /health returns status:"ok" with correct SwapNodeHealthResponse shape', async () => {
+    const { startSwapNode } = (await import('./swap-node.js')) as {
+      startSwapNode: (c: unknown) => Promise<{
         blsPort: number;
         stop: () => Promise<void>;
       }>;
     };
-    const instance = await startMill(validConfig());
+    const instance = await startSwapNode(validConfig());
     try {
       const res = await fetch(`http://127.0.0.1:${instance.blsPort}/health`);
       expect(res.status).toBe(200);
@@ -118,13 +118,13 @@ describe('AC-8 /health endpoint', () => {
   });
 
   it('[P1] inventory bigints are serialized as decimal strings (MAX_SAFE_INTEGER guard)', async () => {
-    const { startMill } = (await import('./mill.js')) as {
-      startMill: (c: unknown) => Promise<{
+    const { startSwapNode } = (await import('./swap-node.js')) as {
+      startSwapNode: (c: unknown) => Promise<{
         blsPort: number;
         stop: () => Promise<void>;
       }>;
     };
-    const instance = await startMill(validConfig());
+    const instance = await startSwapNode(validConfig());
     try {
       const res = await fetch(`http://127.0.0.1:${instance.blsPort}/health`);
       const body = (await res.json()) as { inventory: Record<string, string> };
@@ -137,13 +137,13 @@ describe('AC-8 /health endpoint', () => {
   });
 
   it('[P2] after stop(), health() reports status:"stopped"', async () => {
-    const { startMill } = (await import('./mill.js')) as {
-      startMill: (c: unknown) => Promise<{
+    const { startSwapNode } = (await import('./swap-node.js')) as {
+      startSwapNode: (c: unknown) => Promise<{
         stop: () => Promise<void>;
         health: () => { status: string };
       }>;
     };
-    const instance = await startMill(validConfig());
+    const instance = await startSwapNode(validConfig());
     await instance.stop();
     expect(instance.health().status).toBe('stopped');
   });
@@ -151,14 +151,14 @@ describe('AC-8 /health endpoint', () => {
 
 describe('AC-1 swapPairs field in /health', () => {
   it('[P1] swapPairs field matches input config shape', async () => {
-    const { startMill } = (await import('./mill.js')) as {
-      startMill: (c: unknown) => Promise<{
+    const { startSwapNode } = (await import('./swap-node.js')) as {
+      startSwapNode: (c: unknown) => Promise<{
         blsPort: number;
         stop: () => Promise<void>;
       }>;
     };
     const cfg = validConfig();
-    const instance = await startMill(cfg);
+    const instance = await startSwapNode(cfg);
     try {
       const res = await fetch(`http://127.0.0.1:${instance.blsPort}/health`);
       const body = (await res.json()) as {
@@ -180,13 +180,13 @@ describe('AC-1 swapPairs field in /health', () => {
 
 describe('AC-1 inventoryAvailable field in /health', () => {
   it('[P1] single-asset-per-chain: emits assetCode:chain key + chain-only key', async () => {
-    const { startMill } = (await import('./mill.js')) as {
-      startMill: (c: unknown) => Promise<{
+    const { startSwapNode } = (await import('./swap-node.js')) as {
+      startSwapNode: (c: unknown) => Promise<{
         blsPort: number;
         stop: () => Promise<void>;
       }>;
     };
-    const instance = await startMill(validConfig());
+    const instance = await startSwapNode(validConfig());
     try {
       const res = await fetch(`http://127.0.0.1:${instance.blsPort}/health`);
       const body = (await res.json()) as {
@@ -204,13 +204,13 @@ describe('AC-1 inventoryAvailable field in /health', () => {
   });
 
   it('[P1] multi-asset-per-chain: emits only assetCode:chain keys, no chain-only key', async () => {
-    const { startMill } = (await import('./mill.js')) as {
-      startMill: (c: unknown) => Promise<{
+    const { startSwapNode } = (await import('./swap-node.js')) as {
+      startSwapNode: (c: unknown) => Promise<{
         blsPort: number;
         stop: () => Promise<void>;
       }>;
     };
-    const instance = await startMill(multiAssetConfig());
+    const instance = await startSwapNode(multiAssetConfig());
     try {
       const res = await fetch(`http://127.0.0.1:${instance.blsPort}/health`);
       const body = (await res.json()) as {

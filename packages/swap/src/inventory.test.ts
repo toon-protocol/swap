@@ -5,15 +5,15 @@
  */
 import { describe, it, expect } from 'vitest';
 
-import { MillInventory } from './inventory.js';
-import { MillInventoryError } from './errors.js';
+import { SwapInventory } from './inventory.js';
+import { SwapInventoryError } from './errors.js';
 
 const USDC_EVM_BASE = { asset: 'USDC', chain: 'evm:base:8453' };
 
-describe('MillInventory — in-memory per-pair reserves (Story 12.4 AC-4)', () => {
+describe('SwapInventory — in-memory per-pair reserves (Story 12.4 AC-4)', () => {
   it('[P0] (T-033) debit decreases available; total is preserved', () => {
     // Arrange
-    const inv = new MillInventory({
+    const inv = new SwapInventory({
       balances: {
         [`${USDC_EVM_BASE.asset}:${USDC_EVM_BASE.chain}`]: {
           available: 100n,
@@ -32,8 +32,8 @@ describe('MillInventory — in-memory per-pair reserves (Story 12.4 AC-4)', () =
     expect(bal!.total).toBe(100n);
   });
 
-  it("[P0] (T-034) insufficient inventory throws MillInventoryError('INSUFFICIENT_INVENTORY'); state unchanged (transactional)", () => {
-    const inv = new MillInventory({
+  it("[P0] (T-034) insufficient inventory throws SwapInventoryError('INSUFFICIENT_INVENTORY'); state unchanged (transactional)", () => {
+    const inv = new SwapInventory({
       balances: {
         [`${USDC_EVM_BASE.asset}:${USDC_EVM_BASE.chain}`]: {
           available: 50n,
@@ -44,7 +44,7 @@ describe('MillInventory — in-memory per-pair reserves (Story 12.4 AC-4)', () =
 
     expect(() =>
       inv.debit(USDC_EVM_BASE.asset, USDC_EVM_BASE.chain, 100n)
-    ).toThrow(MillInventoryError);
+    ).toThrow(SwapInventoryError);
 
     try {
       inv.debit(USDC_EVM_BASE.asset, USDC_EVM_BASE.chain, 100n);
@@ -58,7 +58,7 @@ describe('MillInventory — in-memory per-pair reserves (Story 12.4 AC-4)', () =
   });
 
   it('[P0] (T-037) credit increases available and total', () => {
-    const inv = new MillInventory({
+    const inv = new SwapInventory({
       balances: {
         [`${USDC_EVM_BASE.asset}:${USDC_EVM_BASE.chain}`]: {
           available: 70n,
@@ -74,19 +74,19 @@ describe('MillInventory — in-memory per-pair reserves (Story 12.4 AC-4)', () =
     expect(bal!.total).toBe(140n);
   });
 
-  it("[P1] debit on uninitialized pair throws MillInventoryError('INVENTORY_NOT_INITIALIZED')", () => {
-    const inv = new MillInventory({ balances: {} });
+  it("[P1] debit on uninitialized pair throws SwapInventoryError('INVENTORY_NOT_INITIALIZED')", () => {
+    const inv = new SwapInventory({ balances: {} });
     try {
       inv.debit('USDC', 'solana:mainnet', 10n);
       throw new Error('expected throw');
     } catch (err) {
-      expect(err).toBeInstanceOf(MillInventoryError);
+      expect(err).toBeInstanceOf(SwapInventoryError);
       expect((err as { code?: string }).code).toBe('INVENTORY_NOT_INITIALIZED');
     }
   });
 
   it('[P0] (T-inv-1) concurrent debit race: Promise.all([debit(60), debit(60)]) with 100n → one throws, other succeeds, final available=40n', async () => {
-    const inv = new MillInventory({
+    const inv = new SwapInventory({
       balances: {
         [`${USDC_EVM_BASE.asset}:${USDC_EVM_BASE.chain}`]: {
           available: 100n,
@@ -116,8 +116,8 @@ describe('MillInventory — in-memory per-pair reserves (Story 12.4 AC-4)', () =
     );
   });
 
-  it("[P1] debit with non-positive amount throws MillInventoryError('INSUFFICIENT_INVENTORY')", () => {
-    const inv = new MillInventory({
+  it("[P1] debit with non-positive amount throws SwapInventoryError('INSUFFICIENT_INVENTORY')", () => {
+    const inv = new SwapInventory({
       balances: {
         [`${USDC_EVM_BASE.asset}:${USDC_EVM_BASE.chain}`]: {
           available: 100n,
@@ -128,14 +128,14 @@ describe('MillInventory — in-memory per-pair reserves (Story 12.4 AC-4)', () =
 
     expect(() =>
       inv.debit(USDC_EVM_BASE.asset, USDC_EVM_BASE.chain, -5n)
-    ).toThrow(MillInventoryError);
+    ).toThrow(SwapInventoryError);
     expect(() =>
       inv.debit(USDC_EVM_BASE.asset, USDC_EVM_BASE.chain, 0n)
-    ).toThrow(MillInventoryError);
+    ).toThrow(SwapInventoryError);
   });
 
   it('[P2] snapshot returns deep-copied entries; mutating the snapshot does not mutate inventory', () => {
-    const inv = new MillInventory({
+    const inv = new SwapInventory({
       balances: {
         [`${USDC_EVM_BASE.asset}:${USDC_EVM_BASE.chain}`]: {
           available: 100n,
@@ -156,7 +156,7 @@ describe('MillInventory — in-memory per-pair reserves (Story 12.4 AC-4)', () =
   // -------------------------------------------------------------------------
 
   it('[P1] credit on a missing pair CREATES the entry (AC-4 contract: "Creates the entry if missing")', () => {
-    const inv = new MillInventory({ balances: {} });
+    const inv = new SwapInventory({ balances: {} });
     expect(inv.get('SOL', 'solana:mainnet')).toBeNull();
 
     inv.credit('SOL', 'solana:mainnet', 25n);
@@ -167,8 +167,8 @@ describe('MillInventory — in-memory per-pair reserves (Story 12.4 AC-4)', () =
     expect(bal!.total).toBe(25n);
   });
 
-  it("[P1] credit with non-positive amount throws MillInventoryError('UNKNOWN_PAIR') — NOT 'INSUFFICIENT_INVENTORY' (invalid input is not a reserves shortage; must not map to ILP T04)", () => {
-    const inv = new MillInventory({
+  it("[P1] credit with non-positive amount throws SwapInventoryError('UNKNOWN_PAIR') — NOT 'INSUFFICIENT_INVENTORY' (invalid input is not a reserves shortage; must not map to ILP T04)", () => {
+    const inv = new SwapInventory({
       balances: {
         [`${USDC_EVM_BASE.asset}:${USDC_EVM_BASE.chain}`]: {
           available: 100n,
@@ -178,15 +178,15 @@ describe('MillInventory — in-memory per-pair reserves (Story 12.4 AC-4)', () =
     });
     expect(() =>
       inv.credit(USDC_EVM_BASE.asset, USDC_EVM_BASE.chain, 0n)
-    ).toThrow(MillInventoryError);
+    ).toThrow(SwapInventoryError);
     try {
       inv.credit(USDC_EVM_BASE.asset, USDC_EVM_BASE.chain, -10n);
       throw new Error('expected throw');
     } catch (err) {
-      expect(err).toBeInstanceOf(MillInventoryError);
+      expect(err).toBeInstanceOf(SwapInventoryError);
       // Invalid-input on credit is NOT a reserves shortage — handler must
       // NOT map this to ILP T04 Insufficient liquidity.
-      expect((err as MillInventoryError).code).toBe('UNKNOWN_PAIR');
+      expect((err as SwapInventoryError).code).toBe('UNKNOWN_PAIR');
     }
     // state unchanged
     expect(inv.get(USDC_EVM_BASE.asset, USDC_EVM_BASE.chain)!.available).toBe(
@@ -195,13 +195,13 @@ describe('MillInventory — in-memory per-pair reserves (Story 12.4 AC-4)', () =
   });
 
   it('[P1] get() returns null for uninitialized pair', () => {
-    const inv = new MillInventory({ balances: {} });
+    const inv = new SwapInventory({ balances: {} });
     expect(inv.get('USDC', 'evm:arbitrum:42161')).toBeNull();
   });
 
   it('[P2] custom clock is used for updatedAt on both init and mutations', () => {
     let now = 1_000;
-    const inv = new MillInventory({
+    const inv = new SwapInventory({
       balances: {
         [`${USDC_EVM_BASE.asset}:${USDC_EVM_BASE.chain}`]: {
           available: 100n,
@@ -229,7 +229,7 @@ describe('MillInventory — in-memory per-pair reserves (Story 12.4 AC-4)', () =
   });
 
   it('[P2] snapshot round-trips asset/chain parsing even when chain contains colons (e.g. evm:base:8453)', () => {
-    const inv = new MillInventory({
+    const inv = new SwapInventory({
       balances: {
         'USDC:evm:base:8453': { available: 1n, total: 1n },
         'SOL:solana:mainnet': { available: 2n, total: 2n },

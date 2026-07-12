@@ -5,8 +5,8 @@
  */
 import { describe, it, expect } from 'vitest';
 
-import { deriveMillKeys } from './wallet.js';
-import { MillWalletError } from './errors.js';
+import { deriveSwapNodeKeys } from './wallet.js';
+import { SwapWalletError } from './errors.js';
 
 // Universally known zero-entropy BIP-39 vector (Trezor/Ledger test suites).
 // Pinning derived addresses/pubkeys here is load-bearing per Dev Notes
@@ -14,7 +14,7 @@ import { MillWalletError } from './errors.js';
 const ZERO_MNEMONIC =
   'abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about';
 
-describe('deriveMillKeys — BIP-44 multi-chain derivation (Story 12.4 AC-3)', () => {
+describe('deriveSwapNodeKeys — BIP-44 multi-chain derivation (Story 12.4 AC-3)', () => {
   describe('EVM (secp256k1, coin type 60)', () => {
     it("[P0] (T-029) account index 2 yields a different address than account index 1 (m/44'/60'/N'/0/0)", async () => {
       // Arrange
@@ -30,8 +30,8 @@ describe('deriveMillKeys — BIP-44 multi-chain derivation (Story 12.4 AC-3)', (
       };
 
       // Act
-      const keys1 = await deriveMillKeys(input1);
-      const keys2 = await deriveMillKeys(input2);
+      const keys1 = await deriveSwapNodeKeys(input1);
+      const keys2 = await deriveSwapNodeKeys(input2);
 
       // Assert — account isolation (D12-010)
       expect(keys1.evm?.address).toBeDefined();
@@ -42,7 +42,7 @@ describe('deriveMillKeys — BIP-44 multi-chain derivation (Story 12.4 AC-3)', (
     });
 
     it('[P0] default accountIndex is 2 (D12-011) when not supplied', async () => {
-      const keys = await deriveMillKeys({
+      const keys = await deriveSwapNodeKeys({
         mnemonic: ZERO_MNEMONIC,
         chains: ['evm'],
       });
@@ -50,7 +50,7 @@ describe('deriveMillKeys — BIP-44 multi-chain derivation (Story 12.4 AC-3)', (
     });
 
     it('[P0] derived address is a 0x-prefixed 20-byte hex string (EIP-55 case)', async () => {
-      const keys = await deriveMillKeys({
+      const keys = await deriveSwapNodeKeys({
         mnemonic: ZERO_MNEMONIC,
         chains: ['evm'],
       });
@@ -63,12 +63,12 @@ describe('deriveMillKeys — BIP-44 multi-chain derivation (Story 12.4 AC-3)', (
 
   describe('Mina (Pallas curve, coin type 12586)', () => {
     it("[P0] (T-030) account index 2 yields a different pubkey than account index 1 (m/44'/12586'/N'/0/0)", async () => {
-      const keys1 = await deriveMillKeys({
+      const keys1 = await deriveSwapNodeKeys({
         mnemonic: ZERO_MNEMONIC,
         chains: ['mina'],
         accountIndex: 1,
       });
-      const keys2 = await deriveMillKeys({
+      const keys2 = await deriveSwapNodeKeys({
         mnemonic: ZERO_MNEMONIC,
         chains: ['mina'],
         accountIndex: 2,
@@ -84,12 +84,12 @@ describe('deriveMillKeys — BIP-44 multi-chain derivation (Story 12.4 AC-3)', (
 
   describe('Solana (Ed25519, coin type 501, SLIP-0010 all-hardened)', () => {
     it("[P0] (T-031) account index 2 yields a different pubkey than account index 1 (m/44'/501'/N'/0'/0')", async () => {
-      const keys1 = await deriveMillKeys({
+      const keys1 = await deriveSwapNodeKeys({
         mnemonic: ZERO_MNEMONIC,
         chains: ['solana'],
         accountIndex: 1,
       });
-      const keys2 = await deriveMillKeys({
+      const keys2 = await deriveSwapNodeKeys({
         mnemonic: ZERO_MNEMONIC,
         chains: ['solana'],
         accountIndex: 2,
@@ -118,9 +118,9 @@ describe('deriveMillKeys — BIP-44 multi-chain derivation (Story 12.4 AC-3)', (
         accountIndex: 2,
       };
 
-      const a = await deriveMillKeys(input);
-      const b = await deriveMillKeys(input);
-      const c = await deriveMillKeys(input);
+      const a = await deriveSwapNodeKeys(input);
+      const b = await deriveSwapNodeKeys(input);
+      const c = await deriveSwapNodeKeys(input);
 
       expect(a.evm!.address).toBe(b.evm!.address);
       expect(b.evm!.address).toBe(c.evm!.address);
@@ -134,20 +134,20 @@ describe('deriveMillKeys — BIP-44 multi-chain derivation (Story 12.4 AC-3)', (
       );
     });
 
-    it("[P1] invalid mnemonic throws MillWalletError('INVALID_MNEMONIC')", async () => {
+    it("[P1] invalid mnemonic throws SwapWalletError('INVALID_MNEMONIC')", async () => {
       await expect(
-        deriveMillKeys({
+        deriveSwapNodeKeys({
           mnemonic: 'not a real bip39 phrase',
           chains: ['evm'],
         })
       ).rejects.toMatchObject({
-        name: 'MillWalletError',
+        name: 'SwapWalletError',
         code: 'INVALID_MNEMONIC',
       });
     });
 
-    it('[P2] empty chains array returns empty MillKeys object (no-op derivation)', async () => {
-      const keys = await deriveMillKeys({
+    it('[P2] empty chains array returns empty SwapNodeKeys object (no-op derivation)', async () => {
+      const keys = await deriveSwapNodeKeys({
         mnemonic: ZERO_MNEMONIC,
         chains: [],
       });
@@ -157,11 +157,11 @@ describe('deriveMillKeys — BIP-44 multi-chain derivation (Story 12.4 AC-3)', (
     });
 
     it('[P1] non-empty passphrase yields different EVM keys than empty passphrase (BIP-39 passphrase support)', async () => {
-      const k0 = await deriveMillKeys({
+      const k0 = await deriveSwapNodeKeys({
         mnemonic: ZERO_MNEMONIC,
         chains: ['evm'],
       });
-      const k1 = await deriveMillKeys({
+      const k1 = await deriveSwapNodeKeys({
         mnemonic: ZERO_MNEMONIC,
         chains: ['evm'],
         passphrase: 'some-passphrase',
@@ -170,7 +170,7 @@ describe('deriveMillKeys — BIP-44 multi-chain derivation (Story 12.4 AC-3)', (
     });
 
     it('[P1] chains: [evm, mina, solana] returns all three key entries in one call', async () => {
-      const keys = await deriveMillKeys({
+      const keys = await deriveSwapNodeKeys({
         mnemonic: ZERO_MNEMONIC,
         chains: ['evm', 'mina', 'solana'],
       });
@@ -182,13 +182,13 @@ describe('deriveMillKeys — BIP-44 multi-chain derivation (Story 12.4 AC-3)', (
 
   describe('addressIndex override (AC-3 contract)', () => {
     it('[P1] different addressIndex values produce distinct EVM keys at the same accountIndex', async () => {
-      const a = await deriveMillKeys({
+      const a = await deriveSwapNodeKeys({
         mnemonic: ZERO_MNEMONIC,
         chains: ['evm'],
         accountIndex: 2,
         addressIndex: 0,
       });
-      const b = await deriveMillKeys({
+      const b = await deriveSwapNodeKeys({
         mnemonic: ZERO_MNEMONIC,
         chains: ['evm'],
         accountIndex: 2,
@@ -200,13 +200,13 @@ describe('deriveMillKeys — BIP-44 multi-chain derivation (Story 12.4 AC-3)', (
     });
 
     it('[P1] different addressIndex values produce distinct Mina keys at the same accountIndex', async () => {
-      const a = await deriveMillKeys({
+      const a = await deriveSwapNodeKeys({
         mnemonic: ZERO_MNEMONIC,
         chains: ['mina'],
         accountIndex: 2,
         addressIndex: 0,
       });
-      const b = await deriveMillKeys({
+      const b = await deriveSwapNodeKeys({
         mnemonic: ZERO_MNEMONIC,
         chains: ['mina'],
         accountIndex: 2,
@@ -220,7 +220,7 @@ describe('deriveMillKeys — BIP-44 multi-chain derivation (Story 12.4 AC-3)', (
 
   describe('returned key shapes (AC-3 contract)', () => {
     it('[P1] Mina entry includes string privateKey and publicKey plus BIP-44 coin-type-12586 path', async () => {
-      const keys = await deriveMillKeys({
+      const keys = await deriveSwapNodeKeys({
         mnemonic: ZERO_MNEMONIC,
         chains: ['mina'],
         accountIndex: 2,
@@ -233,16 +233,16 @@ describe('deriveMillKeys — BIP-44 multi-chain derivation (Story 12.4 AC-3)', (
     });
   });
 
-  describe('MillWalletError contract', () => {
-    it('[P2] MillWalletError exposes readonly code and cause option (ES2022)', () => {
+  describe('SwapWalletError contract', () => {
+    it('[P2] SwapWalletError exposes readonly code and cause option (ES2022)', () => {
       const cause = new Error('root-cause');
-      const err = new MillWalletError(
+      const err = new SwapWalletError(
         'DERIVATION_FAILED',
         'derivation failed',
         { cause }
       );
       expect(err).toBeInstanceOf(Error);
-      expect(err.name).toBe('MillWalletError');
+      expect(err.name).toBe('SwapWalletError');
       expect(err.code).toBe('DERIVATION_FAILED');
       expect((err as { cause?: unknown }).cause).toBe(cause);
     });

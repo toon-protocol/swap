@@ -13,12 +13,12 @@ import {
   hexToMinaBase58PrivateKey,
 } from './payment-channel-signer.js';
 
-import { deriveMillKeys } from './wallet.js';
+import { deriveSwapNodeKeys } from './wallet.js';
 
 import { verifyMinaSignature } from '@toon-protocol/sdk';
 import type { AccumulatedClaim } from '@toon-protocol/sdk';
 
-import { MillWalletError } from './errors.js';
+import { SwapWalletError } from './errors.js';
 
 const ZERO_MNEMONIC =
   'abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about';
@@ -40,7 +40,7 @@ describe('EvmPaymentChannelSigner — round-trip derive → sign → verify (Sto
     const { keccak_256 } = await import('@noble/hashes/sha3.js');
 
     // Arrange
-    const keys = await deriveMillKeys({
+    const keys = await deriveSwapNodeKeys({
       mnemonic: ZERO_MNEMONIC,
       chains: ['evm'],
     });
@@ -123,8 +123,8 @@ describe('EvmPaymentChannelSigner — round-trip derive → sign → verify (Sto
     );
   });
 
-  it("[P1] EVM signer with malformed recipient throws MillWalletError('SIGNING_FAILED')", async () => {
-    const keys = await deriveMillKeys({
+  it("[P1] EVM signer with malformed recipient throws SwapWalletError('SIGNING_FAILED')", async () => {
+    const keys = await deriveSwapNodeKeys({
       mnemonic: ZERO_MNEMONIC,
       chains: ['evm'],
     });
@@ -141,11 +141,11 @@ describe('EvmPaymentChannelSigner — round-trip derive → sign → verify (Sto
         recipient: 'not-a-hex-address',
       })
     ).rejects.toMatchObject({
-      name: 'MillWalletError',
+      name: 'SwapWalletError',
       code: 'SIGNING_FAILED',
     });
-    // Silence unused import when this particular test is the only one checking MillWalletError symbol identity.
-    expect(MillWalletError.name).toBe('MillWalletError');
+    // Silence unused import when this particular test is the only one checking SwapWalletError symbol identity.
+    expect(SwapWalletError.name).toBe('SwapWalletError');
   });
 });
 
@@ -153,7 +153,7 @@ describe.skipIf(!hasMinaSigner)(
   'MinaPaymentChannelSigner — round-trip (Story 12.4 AC-5)',
   () => {
     it('[P1] Mina signer produces a signature that verifies via mina-signer.verifyFields', async () => {
-      const keys = await deriveMillKeys({
+      const keys = await deriveSwapNodeKeys({
         mnemonic: ZERO_MNEMONIC,
         chains: ['mina'],
       });
@@ -175,17 +175,17 @@ describe.skipIf(!hasMinaSigner)(
       expect(signer.chainKind).toBe('mina');
     });
 
-    it('[P0] Mill signature round-trips through the SDK verifier (Story 12.8)', async () => {
-      // End-to-end Mill↔sender contract: the Mill signs a balance proof, and
-      // the SDK's `verifyMinaSignature` accepts it against the Mill's REAL
+    it('[P0] swap node signature round-trips through the SDK verifier (Story 12.8)', async () => {
+      // End-to-end swap-node↔sender contract: the swap node signs a balance proof, and
+      // the SDK's `verifyMinaSignature` accepts it against the swap node's REAL
       // Mina public key (derived from the converted private key, not the
-      // keccak placeholder `deriveMillKeys` stores).
+      // keccak placeholder `deriveSwapNodeKeys` stores).
       const minaSigner = await import('mina-signer');
       const Client = (minaSigner.default ?? minaSigner) as new (cfg: {
         network: 'mainnet' | 'testnet';
       }) => { derivePublicKey: (sk: string) => string };
 
-      const keys = await deriveMillKeys({
+      const keys = await deriveSwapNodeKeys({
         mnemonic: ZERO_MNEMONIC,
         chains: ['mina'],
       });
@@ -217,7 +217,7 @@ describe.skipIf(!hasMinaSigner)(
         sourceAmount: 1n,
         targetAmount: 1n,
         claimBytes: sig,
-        millEphemeralPubkey: '0'.repeat(64),
+        swapEphemeralPubkey: '0'.repeat(64),
         pair: {
           from: { assetCode: 'USDC', assetScale: 6, chain: 'evm:base:8453' },
           to: { assetCode: 'MINA', assetScale: 9, chain: 'mina:mainnet' },
@@ -228,7 +228,7 @@ describe.skipIf(!hasMinaSigner)(
         nonce: nonce.toString(),
         cumulativeAmount: cumulativeAmount.toString(),
         recipient,
-        millSignerAddress: realPubKey,
+        swapSignerAddress: realPubKey,
       } as unknown as AccumulatedClaim;
 
       const verifyClient = new Client({
@@ -247,7 +247,7 @@ describe.skipIf(!hasMinaSigner)(
 
 describe('SolanaPaymentChannelSigner — round-trip (Story 12.4 AC-5)', () => {
   it('[P0] Solana signer produces a 64-byte Ed25519 signature that verifies via @noble/curves/ed25519', async () => {
-    const keys = await deriveMillKeys({
+    const keys = await deriveSwapNodeKeys({
       mnemonic: ZERO_MNEMONIC,
       chains: ['solana'],
     });
@@ -272,7 +272,7 @@ describe('SolanaPaymentChannelSigner — round-trip (Story 12.4 AC-5)', () => {
     const { sha256 } = await import('@noble/hashes/sha2.js');
     const { ed25519 } = await import('@noble/curves/ed25519.js');
 
-    const keys = await deriveMillKeys({
+    const keys = await deriveSwapNodeKeys({
       mnemonic: ZERO_MNEMONIC,
       chains: ['solana'],
     });
@@ -336,7 +336,7 @@ describe('SolanaPaymentChannelSigner — round-trip (Story 12.4 AC-5)', () => {
   });
 
   it('[P2] chain and chainKind getters are correctly exposed', async () => {
-    const keys = await deriveMillKeys({
+    const keys = await deriveSwapNodeKeys({
       mnemonic: ZERO_MNEMONIC,
       chains: ['solana'],
     });
@@ -350,14 +350,14 @@ describe('SolanaPaymentChannelSigner — round-trip (Story 12.4 AC-5)', () => {
 });
 
 describe('Signer construction — defensive key-length checks (code-review hardening)', () => {
-  it("[P1] EvmPaymentChannelSigner rejects non-32-byte privateKey with MillWalletError('SIGNING_FAILED')", () => {
+  it("[P1] EvmPaymentChannelSigner rejects non-32-byte privateKey with SwapWalletError('SIGNING_FAILED')", () => {
     expect(
       () =>
         new EvmPaymentChannelSigner({
           chain: 'evm:base:8453',
           privateKey: new Uint8Array(16),
         })
-    ).toThrow(MillWalletError);
+    ).toThrow(SwapWalletError);
     expect(
       () =>
         new EvmPaymentChannelSigner({
@@ -367,14 +367,14 @@ describe('Signer construction — defensive key-length checks (code-review harde
     ).toThrow(/32-byte/);
   });
 
-  it("[P1] SolanaPaymentChannelSigner rejects non-32-byte privateKey with MillWalletError('SIGNING_FAILED')", () => {
+  it("[P1] SolanaPaymentChannelSigner rejects non-32-byte privateKey with SwapWalletError('SIGNING_FAILED')", () => {
     expect(
       () =>
         new SolanaPaymentChannelSigner({
           chain: 'solana:mainnet',
           privateKey: new Uint8Array(64), // Ed25519 expanded form, not accepted here
         })
-    ).toThrow(MillWalletError);
+    ).toThrow(SwapWalletError);
     try {
       new SolanaPaymentChannelSigner({
         chain: 'solana:mainnet',
@@ -389,7 +389,7 @@ describe('Signer construction — defensive key-length checks (code-review harde
 
 describe('MinaPaymentChannelSigner — construction (Story 12.4 AC-5)', () => {
   it('[P2] chain and chainKind getters are correctly exposed (no peer dep required)', async () => {
-    const keys = await deriveMillKeys({
+    const keys = await deriveSwapNodeKeys({
       mnemonic: ZERO_MNEMONIC,
       chains: ['mina'],
     });

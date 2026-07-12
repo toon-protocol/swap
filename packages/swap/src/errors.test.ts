@@ -1,5 +1,5 @@
 /**
- * Unit tests for `MillInventoryError` / `MillWalletError` (Story 12.4 AC-2).
+ * Unit tests for `SwapInventoryError` / `SwapWalletError` (Story 12.4 AC-2).
  *
  * AC-2 declares specific code literal unions + ES2022 `cause` + `name`
  * preservation. Story 12.3's handler detects `INSUFFICIENT_INVENTORY`
@@ -12,21 +12,21 @@
  */
 import { describe, it, expect } from 'vitest';
 import {
-  MillInventoryError,
-  MillWalletError,
-  MillStartError,
+  SwapInventoryError,
+  SwapWalletError,
+  SwapNodeStartError,
 } from './errors.js';
 
-describe('MillInventoryError contract (Story 12.4 AC-2)', () => {
-  it('[P0] is an Error subclass with name="MillInventoryError"', () => {
-    const err = new MillInventoryError('INSUFFICIENT_INVENTORY', 'low');
+describe('SwapInventoryError contract (Story 12.4 AC-2)', () => {
+  it('[P0] is an Error subclass with name="SwapInventoryError"', () => {
+    const err = new SwapInventoryError('INSUFFICIENT_INVENTORY', 'low');
     expect(err).toBeInstanceOf(Error);
-    expect(err).toBeInstanceOf(MillInventoryError);
-    expect(err.name).toBe('MillInventoryError');
+    expect(err).toBeInstanceOf(SwapInventoryError);
+    expect(err.name).toBe('SwapInventoryError');
   });
 
   it('[P0] exposes readonly code literal "INSUFFICIENT_INVENTORY" (load-bearing for Story 12.3 handler)', () => {
-    const err = new MillInventoryError(
+    const err = new SwapInventoryError(
       'INSUFFICIENT_INVENTORY',
       'Insufficient inventory for USDC:evm:base:8453'
     );
@@ -35,12 +35,12 @@ describe('MillInventoryError contract (Story 12.4 AC-2)', () => {
   });
 
   it('[P1] accepts "UNKNOWN_PAIR" code literal', () => {
-    const err = new MillInventoryError('UNKNOWN_PAIR', 'Pair not advertised');
+    const err = new SwapInventoryError('UNKNOWN_PAIR', 'Pair not advertised');
     expect(err.code).toBe('UNKNOWN_PAIR');
   });
 
   it('[P1] accepts "INVENTORY_NOT_INITIALIZED" code literal', () => {
-    const err = new MillInventoryError(
+    const err = new SwapInventoryError(
       'INVENTORY_NOT_INITIALIZED',
       'no balance'
     );
@@ -49,19 +49,19 @@ describe('MillInventoryError contract (Story 12.4 AC-2)', () => {
 
   it('[P2] preserves ES2022 `cause` option', () => {
     const root = new Error('root');
-    const err = new MillInventoryError('INSUFFICIENT_INVENTORY', 'wrapped', {
+    const err = new SwapInventoryError('INSUFFICIENT_INVENTORY', 'wrapped', {
       cause: root,
     });
     expect((err as { cause?: unknown }).cause).toBe(root);
   });
 });
 
-describe('MillWalletError contract (Story 12.4 AC-2)', () => {
-  it('[P0] is an Error subclass with name="MillWalletError"', () => {
-    const err = new MillWalletError('SIGNING_FAILED', 'sig');
+describe('SwapWalletError contract (Story 12.4 AC-2)', () => {
+  it('[P0] is an Error subclass with name="SwapWalletError"', () => {
+    const err = new SwapWalletError('SIGNING_FAILED', 'sig');
     expect(err).toBeInstanceOf(Error);
-    expect(err).toBeInstanceOf(MillWalletError);
-    expect(err.name).toBe('MillWalletError');
+    expect(err).toBeInstanceOf(SwapWalletError);
+    expect(err.name).toBe('SwapWalletError');
   });
 
   it('[P1] accepts all five code literals', () => {
@@ -72,39 +72,39 @@ describe('MillWalletError contract (Story 12.4 AC-2)', () => {
       'SIGNING_FAILED',
       'INVALID_CONFIG',
     ] as const) {
-      const err = new MillWalletError(code, 'msg');
+      const err = new SwapWalletError(code, 'msg');
       expect(err.code).toBe(code);
-      expect(err.name).toBe('MillWalletError');
+      expect(err.name).toBe('SwapWalletError');
     }
   });
 
   it('[P2] preserves ES2022 `cause` option', () => {
     const root = new Error('root');
-    const err = new MillWalletError('DERIVATION_FAILED', 'wrapped', {
+    const err = new SwapWalletError('DERIVATION_FAILED', 'wrapped', {
       cause: root,
     });
     expect((err as { cause?: unknown }).cause).toBe(root);
   });
 });
 
-describe('MillStartError contract (Story 12.7 AC-11)', () => {
-  it('[P0] is an Error subclass with name="MillStartError"', () => {
-    const err = new MillStartError('INVALID_CONFIG', 'bad');
+describe('SwapNodeStartError contract (Story 12.7 AC-11)', () => {
+  it('[P0] is an Error subclass with name="SwapNodeStartError"', () => {
+    const err = new SwapNodeStartError('INVALID_CONFIG', 'bad');
     expect(err).toBeInstanceOf(Error);
-    expect(err).toBeInstanceOf(MillStartError);
-    expect(err.name).toBe('MillStartError');
+    expect(err).toBeInstanceOf(SwapNodeStartError);
+    expect(err.name).toBe('SwapNodeStartError');
   });
 
-  it('[P1] accepts every MillStartErrorCode literal', () => {
+  it('[P1] accepts every SwapNodeStartErrorCode literal', () => {
     for (const code of [
       'INVALID_CONFIG',
-      'MILL_REQUIRES_MNEMONIC',
+      'SWAP_REQUIRES_MNEMONIC',
       'MISSING_KEY',
       'UNSUPPORTED_CHAIN_FAMILY',
       'CONNECTOR_INIT_FAILED',
       'HANDLER_REGISTRATION_FAILED',
     ] as const) {
-      const err = new MillStartError(code, 'msg');
+      const err = new SwapNodeStartError(code, 'msg');
       expect(err.code).toBe(code);
       expect(err.message).toContain(code);
     }
@@ -112,9 +112,13 @@ describe('MillStartError contract (Story 12.7 AC-11)', () => {
 
   it('[P2] preserves ES2022 `cause` option', () => {
     const root = new Error('root');
-    const err = new MillStartError('HANDLER_REGISTRATION_FAILED', 'wrapped', {
-      cause: root,
-    });
+    const err = new SwapNodeStartError(
+      'HANDLER_REGISTRATION_FAILED',
+      'wrapped',
+      {
+        cause: root,
+      }
+    );
     expect((err as { cause?: unknown }).cause).toBe(root);
   });
 });

@@ -11,9 +11,9 @@ import type { SwapPair } from '@toon-protocol/core';
 import type { ClaimIssuer } from '@toon-protocol/sdk';
 
 import { MultiChainClaimIssuer } from './claim-issuer.js';
-import { MillInventory } from './inventory.js';
-import { MillChannelState } from './channel-state.js';
-import { MillInventoryError, MillWalletError } from './errors.js';
+import { SwapInventory } from './inventory.js';
+import { SwapChannelState } from './channel-state.js';
+import { SwapInventoryError, SwapWalletError } from './errors.js';
 
 // ---------------------------------------------------------------------------
 // Fixtures (shared across cases in this file)
@@ -59,10 +59,10 @@ function makeRumor() {
 
 describe('MultiChainClaimIssuer (Story 12.4 AC-6, AC-8, AC-10)', () => {
   it('[P0] happy path: debit → sign → return { claim, claimId }', async () => {
-    const inventory = new MillInventory({
+    const inventory = new SwapInventory({
       balances: { 'ETH:evm:base:8453': { available: 1_000n, total: 1_000n } },
     });
-    const channelState = new MillChannelState({
+    const channelState = new SwapChannelState({
       channels: {
         [`ETH:evm:base:8453:${SENDER_PUBKEY}`]: {
           channelId: '0xchan',
@@ -96,10 +96,10 @@ describe('MultiChainClaimIssuer (Story 12.4 AC-6, AC-8, AC-10)', () => {
   });
 
   it('[P0] debit happens BEFORE the first await (microtask atomicity, AC-8)', async () => {
-    const inventory = new MillInventory({
+    const inventory = new SwapInventory({
       balances: { 'ETH:evm:base:8453': { available: 1_000n, total: 1_000n } },
     });
-    const channelState = new MillChannelState({
+    const channelState = new SwapChannelState({
       channels: {
         [`ETH:evm:base:8453:${SENDER_PUBKEY}`]: {
           channelId: '0xchan',
@@ -139,11 +139,11 @@ describe('MultiChainClaimIssuer (Story 12.4 AC-6, AC-8, AC-10)', () => {
     expect(debitOrder!).toBeLessThan(signOrder!);
   });
 
-  it('[P0] insufficient inventory throws MillInventoryError(INSUFFICIENT_INVENTORY); signer NOT called', async () => {
-    const inventory = new MillInventory({
+  it('[P0] insufficient inventory throws SwapInventoryError(INSUFFICIENT_INVENTORY); signer NOT called', async () => {
+    const inventory = new SwapInventory({
       balances: { 'ETH:evm:base:8453': { available: 10n, total: 10n } },
     });
-    const channelState = new MillChannelState({
+    const channelState = new SwapChannelState({
       channels: {
         [`ETH:evm:base:8453:${SENDER_PUBKEY}`]: {
           channelId: '0xchan',
@@ -170,19 +170,19 @@ describe('MultiChainClaimIssuer (Story 12.4 AC-6, AC-8, AC-10)', () => {
         rumor: makeRumor(),
       })
     ).rejects.toMatchObject({
-      name: 'MillInventoryError',
+      name: 'SwapInventoryError',
       code: 'INSUFFICIENT_INVENTORY',
     });
     expect(signer.signBalanceProof).not.toHaveBeenCalled();
     // Silence unused-import.
-    expect(MillInventoryError.name).toBe('MillInventoryError');
+    expect(SwapInventoryError.name).toBe('SwapInventoryError');
   });
 
-  it('[P0] unsupported target chain throws MillWalletError(UNSUPPORTED_CHAIN); inventory NOT debited', async () => {
-    const inventory = new MillInventory({
+  it('[P0] unsupported target chain throws SwapWalletError(UNSUPPORTED_CHAIN); inventory NOT debited', async () => {
+    const inventory = new SwapInventory({
       balances: { 'ETH:evm:base:8453': { available: 1_000n, total: 1_000n } },
     });
-    const channelState = new MillChannelState({ channels: {} });
+    const channelState = new SwapChannelState({ channels: {} });
     // No signer registered for 'evm:base:8453'
     const issuer = new MultiChainClaimIssuer({
       inventory,
@@ -200,18 +200,18 @@ describe('MultiChainClaimIssuer (Story 12.4 AC-6, AC-8, AC-10)', () => {
         rumor: makeRumor(),
       })
     ).rejects.toMatchObject({
-      name: 'MillWalletError',
+      name: 'SwapWalletError',
       code: 'UNSUPPORTED_CHAIN',
     });
     expect(inventory.get('ETH', 'evm:base:8453')!.available).toBe(1_000n);
-    expect(MillWalletError.name).toBe('MillWalletError');
+    expect(SwapWalletError.name).toBe('SwapWalletError');
   });
 
   it('[P1] signer throws → issuer reverses debit via inventory.credit; final throw code = SIGNING_FAILED', async () => {
-    const inventory = new MillInventory({
+    const inventory = new SwapInventory({
       balances: { 'ETH:evm:base:8453': { available: 1_000n, total: 1_000n } },
     });
-    const channelState = new MillChannelState({
+    const channelState = new SwapChannelState({
       channels: {
         [`ETH:evm:base:8453:${SENDER_PUBKEY}`]: {
           channelId: '0xchan',
@@ -244,7 +244,7 @@ describe('MultiChainClaimIssuer (Story 12.4 AC-6, AC-8, AC-10)', () => {
         rumor: makeRumor(),
       })
     ).rejects.toMatchObject({
-      name: 'MillWalletError',
+      name: 'SwapWalletError',
       code: 'SIGNING_FAILED',
     });
 
@@ -252,12 +252,12 @@ describe('MultiChainClaimIssuer (Story 12.4 AC-6, AC-8, AC-10)', () => {
   });
 
   it('[P0] (T-026) 10 concurrent issueClaim calls produce 10 distinct claimIds and monotonic nonces; cumulativeAmount = sum(targetAmount)', async () => {
-    const inventory = new MillInventory({
+    const inventory = new SwapInventory({
       balances: {
         'ETH:evm:base:8453': { available: 10_000n, total: 10_000n },
       },
     });
-    const channelState = new MillChannelState({
+    const channelState = new SwapChannelState({
       channels: {
         [`ETH:evm:base:8453:${SENDER_PUBKEY}`]: {
           channelId: '0xchan',
@@ -308,10 +308,10 @@ describe('MultiChainClaimIssuer (Story 12.4 AC-6, AC-8, AC-10)', () => {
   });
 
   it('[P0] (AC-10) MultiChainClaimIssuer is structurally assignable to ClaimIssuer from @toon-protocol/sdk', async () => {
-    const inventory = new MillInventory({
+    const inventory = new SwapInventory({
       balances: { 'ETH:evm:base:8453': { available: 1n, total: 1n } },
     });
-    const channelState = new MillChannelState({ channels: {} });
+    const channelState = new SwapChannelState({ channels: {} });
     const issuer: ClaimIssuer = new MultiChainClaimIssuer({
       inventory,
       signers: {},
@@ -321,10 +321,10 @@ describe('MultiChainClaimIssuer (Story 12.4 AC-6, AC-8, AC-10)', () => {
   });
 
   it('[P1] custom newClaimId generator is honored (AC-6 contract)', async () => {
-    const inventory = new MillInventory({
+    const inventory = new SwapInventory({
       balances: { 'ETH:evm:base:8453': { available: 1_000n, total: 1_000n } },
     });
-    const channelState = new MillChannelState({
+    const channelState = new SwapChannelState({
       channels: {
         [`ETH:evm:base:8453:${SENDER_PUBKEY}`]: {
           channelId: '0xchan',
@@ -367,10 +367,10 @@ describe('MultiChainClaimIssuer (Story 12.4 AC-6, AC-8, AC-10)', () => {
   });
 
   it('[P1] signer failure also rolls back the channel-state reservation (nonce + cumulativeAmount restored)', async () => {
-    const inventory = new MillInventory({
+    const inventory = new SwapInventory({
       balances: { 'ETH:evm:base:8453': { available: 1_000n, total: 1_000n } },
     });
-    const channelState = new MillChannelState({
+    const channelState = new SwapChannelState({
       channels: {
         [`ETH:evm:base:8453:${SENDER_PUBKEY}`]: {
           channelId: '0xchan',
@@ -403,7 +403,7 @@ describe('MultiChainClaimIssuer (Story 12.4 AC-6, AC-8, AC-10)', () => {
         rumor: makeRumor(),
       })
     ).rejects.toMatchObject({
-      name: 'MillWalletError',
+      name: 'SwapWalletError',
       code: 'SIGNING_FAILED',
     });
 
@@ -418,10 +418,10 @@ describe('MultiChainClaimIssuer (Story 12.4 AC-6, AC-8, AC-10)', () => {
   });
 
   it('[P1] returned result includes a non-empty string claimId (default UUID path)', async () => {
-    const inventory = new MillInventory({
+    const inventory = new SwapInventory({
       balances: { 'ETH:evm:base:8453': { available: 1_000n, total: 1_000n } },
     });
-    const channelState = new MillChannelState({
+    const channelState = new SwapChannelState({
       channels: {
         [`ETH:evm:base:8453:${SENDER_PUBKEY}`]: {
           channelId: '0xchan',
@@ -458,10 +458,10 @@ describe('MultiChainClaimIssuer (Story 12.4 AC-6, AC-8, AC-10)', () => {
     // validated by Story 12.8 E2E tests (Docker SDK E2E infra).
     const { createSwapHandler } = await import('@toon-protocol/sdk');
 
-    const inventory = new MillInventory({
+    const inventory = new SwapInventory({
       balances: { 'ETH:evm:base:8453': { available: 1_000n, total: 1_000n } },
     });
-    const channelState = new MillChannelState({
+    const channelState = new SwapChannelState({
       channels: {
         [`ETH:evm:base:8453:${SENDER_PUBKEY}`]: {
           channelId: '0xchan',
@@ -517,7 +517,7 @@ describe('MultiChainClaimIssuer (Story 12.4 AC-6, AC-8, AC-10)', () => {
 //
 // When the issuer is constructed with a `signerAddresses` map, every
 // `issueClaim()` result MUST expose channelId/nonce/cumulativeAmount/
-// recipient/millSignerAddress so the Mill's swap handler can emit them in
+// recipient/swapSignerAddress so the swap node's swap handler can emit them in
 // FULFILL metadata (the load-bearing contract for `buildSettlementTx()`).
 //
 // When `signerAddresses` is omitted (legacy caller), the result MUST stay in
@@ -526,14 +526,14 @@ describe('MultiChainClaimIssuer (Story 12.4 AC-6, AC-8, AC-10)', () => {
 // ---------------------------------------------------------------------------
 
 describe('Story 12.6 AC-3 — IssueClaimResult settlement-context fields', () => {
-  const EVM_MILL_SIGNER = '0x' + 'c'.repeat(40);
+  const EVM_SWAP_SIGNER = '0x' + 'c'.repeat(40);
   const CHAIN = 'evm:base:8453';
 
-  it('[P0] surfaces channelId/nonce/cumulativeAmount/recipient/millSignerAddress when signerAddresses configured', async () => {
-    const inventory = new MillInventory({
+  it('[P0] surfaces channelId/nonce/cumulativeAmount/recipient/swapSignerAddress when signerAddresses configured', async () => {
+    const inventory = new SwapInventory({
       balances: { 'ETH:evm:base:8453': { available: 1_000n, total: 1_000n } },
     });
-    const channelState = new MillChannelState({
+    const channelState = new SwapChannelState({
       channels: {
         [`ETH:evm:base:8453:${SENDER_PUBKEY}`]: {
           channelId: '0xdeadbeef',
@@ -548,7 +548,7 @@ describe('Story 12.6 AC-3 — IssueClaimResult settlement-context fields', () =>
       inventory,
       signers: { [CHAIN]: signer },
       channelState,
-      signerAddresses: { [CHAIN]: EVM_MILL_SIGNER },
+      signerAddresses: { [CHAIN]: EVM_SWAP_SIGNER },
     });
 
     const result = await issuer.issueClaim({
@@ -572,15 +572,15 @@ describe('Story 12.6 AC-3 — IssueClaimResult settlement-context fields', () =>
     // incorrectly expected SENDER_PUBKEY, which was the defect that blocked
     // Story 12.8 session 3.
     expect(result.recipient).toBe(FIXTURE_EVM_RECIPIENT);
-    // Mill signer address threaded through from config.
-    expect(result.millSignerAddress).toBe(EVM_MILL_SIGNER);
+    // swap node signer address threaded through from config.
+    expect(result.swapSignerAddress).toBe(EVM_SWAP_SIGNER);
   });
 
   it('[P0] monotonically increments nonce + cumulativeAmount across two sequential claims', async () => {
-    const inventory = new MillInventory({
+    const inventory = new SwapInventory({
       balances: { 'ETH:evm:base:8453': { available: 1_000n, total: 1_000n } },
     });
-    const channelState = new MillChannelState({
+    const channelState = new SwapChannelState({
       channels: {
         [`ETH:evm:base:8453:${SENDER_PUBKEY}`]: {
           channelId: '0xchan2',
@@ -594,7 +594,7 @@ describe('Story 12.6 AC-3 — IssueClaimResult settlement-context fields', () =>
       inventory,
       signers: { [CHAIN]: makeMockSigner('evm') },
       channelState,
-      signerAddresses: { [CHAIN]: EVM_MILL_SIGNER },
+      signerAddresses: { [CHAIN]: EVM_SWAP_SIGNER },
     });
 
     const r1 = await issuer.issueClaim({
@@ -619,17 +619,17 @@ describe('Story 12.6 AC-3 — IssueClaimResult settlement-context fields', () =>
     expect(r2.nonce).toBe(2n);
     // Balance proofs are CUMULATIVE — total running balance, not per-packet.
     expect(r2.cumulativeAmount).toBe(50n);
-    // channelId + recipient + millSignerAddress stable across claims.
+    // channelId + recipient + swapSignerAddress stable across claims.
     expect(r2.channelId).toBe(r1.channelId);
     expect(r2.recipient).toBe(r1.recipient);
-    expect(r2.millSignerAddress).toBe(r1.millSignerAddress);
+    expect(r2.swapSignerAddress).toBe(r1.swapSignerAddress);
   });
 
   it('[P0] omits all settlement fields when signerAddresses NOT configured (legacy shape)', async () => {
-    const inventory = new MillInventory({
+    const inventory = new SwapInventory({
       balances: { 'ETH:evm:base:8453': { available: 1_000n, total: 1_000n } },
     });
-    const channelState = new MillChannelState({
+    const channelState = new SwapChannelState({
       channels: {
         [`ETH:evm:base:8453:${SENDER_PUBKEY}`]: {
           channelId: '0xchan3',
@@ -660,17 +660,17 @@ describe('Story 12.6 AC-3 — IssueClaimResult settlement-context fields', () =>
     expect(result.nonce).toBeUndefined();
     expect(result.cumulativeAmount).toBeUndefined();
     expect(result.recipient).toBeUndefined();
-    expect(result.millSignerAddress).toBeUndefined();
+    expect(result.swapSignerAddress).toBeUndefined();
     // But the base fields still work.
     expect(result.claim).toBeInstanceOf(Uint8Array);
     expect(typeof result.claimId).toBe('string');
   });
 
   it('[P1] omits settlement fields for a chain that has no entry in signerAddresses', async () => {
-    const inventory = new MillInventory({
+    const inventory = new SwapInventory({
       balances: { 'ETH:evm:base:8453': { available: 1_000n, total: 1_000n } },
     });
-    const channelState = new MillChannelState({
+    const channelState = new SwapChannelState({
       channels: {
         [`ETH:evm:base:8453:${SENDER_PUBKEY}`]: {
           channelId: '0xchan4',
@@ -698,7 +698,7 @@ describe('Story 12.6 AC-3 — IssueClaimResult settlement-context fields', () =>
     });
 
     // Chain-specific miss -> legacy shape for this claim.
-    expect(result.millSignerAddress).toBeUndefined();
+    expect(result.swapSignerAddress).toBeUndefined();
     expect(result.channelId).toBeUndefined();
     expect(result.nonce).toBeUndefined();
     expect(result.cumulativeAmount).toBeUndefined();
@@ -715,7 +715,7 @@ describe('Story 12.6 AC-3 — IssueClaimResult settlement-context fields', () =>
 // ---------------------------------------------------------------------------
 
 describe('Story 12.9 — chain-recipient threading to signBalanceProof', () => {
-  const EVM_MILL_SIGNER_FOR_SETTLEMENT = '0x' + 'c'.repeat(40);
+  const EVM_SWAP_SIGNER_FOR_SETTLEMENT = '0x' + 'c'.repeat(40);
   const CHAIN = 'evm:base:8453';
 
   function buildIssuer(opts?: {
@@ -726,13 +726,13 @@ describe('Story 12.9 — chain-recipient threading to signBalanceProof', () => {
     signer: {
       signBalanceProof: Mock<[arg: unknown], Promise<Uint8Array>>;
     };
-    inventory: MillInventory;
-    channelState: MillChannelState;
+    inventory: SwapInventory;
+    channelState: SwapChannelState;
   } {
-    const inventory = new MillInventory({
+    const inventory = new SwapInventory({
       balances: { 'ETH:evm:base:8453': { available: 1_000n, total: 1_000n } },
     });
-    const channelState = new MillChannelState({
+    const channelState = new SwapChannelState({
       channels: {
         [`ETH:evm:base:8453:${SENDER_PUBKEY}`]: {
           channelId: '0xchan12_9',
@@ -756,7 +756,7 @@ describe('Story 12.9 — chain-recipient threading to signBalanceProof', () => {
       channelState,
       ...(opts?.withSettlementAddresses === true
         ? {
-            signerAddresses: { [CHAIN]: EVM_MILL_SIGNER_FOR_SETTLEMENT },
+            signerAddresses: { [CHAIN]: EVM_SWAP_SIGNER_FOR_SETTLEMENT },
           }
         : {}),
     });
@@ -814,7 +814,7 @@ describe('Story 12.9 — chain-recipient threading to signBalanceProof', () => {
         rumor: makeRumor(),
       })
     ).rejects.toMatchObject({
-      name: 'MillWalletError',
+      name: 'SwapWalletError',
       code: 'SIGNING_FAILED',
     });
     // Inventory re-credited.
@@ -858,7 +858,7 @@ describe('Story 12.9 — chain-recipient threading to signBalanceProof', () => {
     // regime (sender / handler / claim-issuer). This test guards the third
     // tier: a malformed `chainRecipient` reaching the claim-issuer (e.g., a
     // direct caller that bypassed the swap-handler) MUST be rejected with
-    // MillWalletError('SIGNING_FAILED') BEFORE any inventory debit or
+    // SwapWalletError('SIGNING_FAILED') BEFORE any inventory debit or
     // channel reservation occurs (no rollback needed because no state
     // change yet).
     const { issuer, signer, inventory, channelState } = buildIssuer();
@@ -882,7 +882,7 @@ describe('Story 12.9 — chain-recipient threading to signBalanceProof', () => {
     expect(signer.signBalanceProof).not.toHaveBeenCalled();
     expect(debitSpy).not.toHaveBeenCalled();
     expect(reserveSpy).not.toHaveBeenCalled();
-    // And the error class is the MillWalletError('SIGNING_FAILED') family so
+    // And the error class is the SwapWalletError('SIGNING_FAILED') family so
     // the Story 12.3 swap-handler can map it to ILP T00.
     await expect(
       issuer.issueClaim({
@@ -893,6 +893,6 @@ describe('Story 12.9 — chain-recipient threading to signBalanceProof', () => {
         chainRecipient: SENDER_PUBKEY,
         rumor: makeRumor(),
       })
-    ).rejects.toBeInstanceOf(MillWalletError);
+    ).rejects.toBeInstanceOf(SwapWalletError);
   });
 });

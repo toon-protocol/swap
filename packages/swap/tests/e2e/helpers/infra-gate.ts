@@ -1,7 +1,7 @@
 /**
- * Story 12.10 — Docker infra gate for Mill E2E tests.
+ * Story 12.10 — Docker infra gate for swap-node E2E tests.
  *
- * Re-exports the SDK's `docker-e2e-setup.ts` helpers so Mill E2E tests
+ * Re-exports the SDK's `docker-e2e-setup.ts` helpers so swap-node E2E tests
  * have a single import target (Task 1.3). We use a relative path into the
  * SDK's `tests/e2e/helpers/` directory because the helpers are TEST-ONLY
  * code (not part of the SDK's public surface) and there is no reason to
@@ -11,7 +11,7 @@
  *
  * The SDK E2E suite claims Anvil accounts **#3–#9** (plus 1 non-standard
  * key outside the default Anvil set; see `docker-e2e-setup.ts`
- * TEST_PRIVATE_KEY and friends). Mill E2E must pick disjoint accounts to
+ * TEST_PRIVATE_KEY and friends). swap-node E2E must pick disjoint accounts to
  * avoid nonce contention if both suites ever run in parallel on shared infra.
  *
  * **Critical allocation constraints (from Story 12.10 v0.3 review):**
@@ -21,12 +21,12 @@
  *   assertion failures.
  * - Accounts **#3–#9** are claimed by SDK E2E tests.
  *
- * Mill E2E uses:
- * - Anvil account **#1** — `MILL_E2E_EVM_SENDER_PRIVATE_KEY` (the ONLY
+ * swap-node E2E uses:
+ * - Anvil account **#1** — `SWAP_E2E_EVM_SENDER_PRIVATE_KEY` (the ONLY
  *   unclaimed standard Anvil account). Sufficient if tests run serially
  *   (enforced by `singleFork: true` in vitest config).
  *
- * If the Mill E2E suite ever needs >1 concurrent EVM signer, derive fresh
+ * If the swap-node E2E suite ever needs >1 concurrent EVM signer, derive fresh
  * keys from a test-local mnemonic and fund them with a one-time `cast send`
  * at the top of the suite rather than grabbing claimed accounts.
  */
@@ -87,25 +87,25 @@ export {
 } from '../../../../sdk/tests/e2e/helpers/docker-e2e-setup.js';
 
 // ---------------------------------------------------------------------------
-// Mill-E2E-specific Anvil keys (disjoint from SDK E2E accounts #3–#9)
+// swap-node-E2E-specific Anvil keys (disjoint from SDK E2E accounts #3–#9)
 // ---------------------------------------------------------------------------
 
 /**
  * Anvil account #1 — the ONLY unclaimed standard Anvil account available
- * for Mill E2E tests. Account #0 is peer1's settlement key, account #2 is
+ * for swap-node E2E tests. Account #0 is peer1's settlement key, account #2 is
  * peer2's settlement key, and accounts #3-#9 are claimed by SDK E2E tests.
  */
 // Public mode overrides this with a mnemonic-derived, treasury-funded key
-// (idx11) the harness writes to .env.sdk-e2e (EVM_MILL_CLIENT_PRIVATE_KEY) —
+// (idx11) the harness writes to .env.sdk-e2e (EVM_SWAP_CLIENT_PRIVATE_KEY) —
 // the hardcoded Anvil account #1 has no funds on Base Sepolia.
-export const MILL_E2E_EVM_SENDER_PRIVATE_KEY = (process.env[
-  'EVM_MILL_CLIENT_PRIVATE_KEY'
+export const SWAP_E2E_EVM_SENDER_PRIVATE_KEY = (process.env[
+  'EVM_SWAP_CLIENT_PRIVATE_KEY'
 ] ||
   '0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d') as `0x${string}`;
 
-/** Sender address — public: EVM_MILL_CLIENT_ADDRESS; local: Anvil account #1. */
-export const MILL_E2E_EVM_SENDER_ADDRESS = (process.env[
-  'EVM_MILL_CLIENT_ADDRESS'
+/** Sender address — public: EVM_SWAP_CLIENT_ADDRESS; local: Anvil account #1. */
+export const SWAP_E2E_EVM_SENDER_ADDRESS = (process.env[
+  'EVM_SWAP_CLIENT_ADDRESS'
 ] || '0x70997970C51812dc3A010C7d01b50e0d17dc79C8') as `0x${string}`;
 
 // ---------------------------------------------------------------------------

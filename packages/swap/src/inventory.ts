@@ -1,14 +1,14 @@
 /**
- * `MillInventory` — in-memory per-pair reserves (Story 12.4 AC-4).
+ * `SwapInventory` — in-memory per-pair reserves (Story 12.4 AC-4).
  *
  * Single-threaded microtask atomicity: `debit` / `credit` are synchronous and
  * therefore atomic w.r.t. concurrent `issueClaim` callers under `Promise.all`.
  * See Dev Notes "Microtask atomicity argument" in the story doc.
  */
 
-import { MillInventoryError } from './errors.js';
+import { SwapInventoryError } from './errors.js';
 
-export interface MillInventoryBalance {
+export interface SwapInventoryBalance {
   assetCode: string;
   chain: string;
   available: bigint;
@@ -16,7 +16,7 @@ export interface MillInventoryBalance {
   updatedAt: number;
 }
 
-export interface MillInventoryInit {
+export interface SwapInventoryInit {
   balances: Record<string, { available: bigint; total: bigint }>;
   clock?: () => number;
 }
@@ -40,11 +40,11 @@ function parseKey(k: string): { assetCode: string; chain: string } {
   return { assetCode: k.slice(0, i), chain: k.slice(i + 1) };
 }
 
-export class MillInventory {
+export class SwapInventory {
   private readonly entries = new Map<string, InternalEntry>();
   private readonly clock: () => number;
 
-  constructor(init: MillInventoryInit) {
+  constructor(init: SwapInventoryInit) {
     this.clock = init.clock ?? Date.now;
     const now = this.clock();
     for (const [k, v] of Object.entries(init.balances)) {
@@ -56,7 +56,7 @@ export class MillInventory {
     }
   }
 
-  get(assetCode: string, chain: string): MillInventoryBalance | null {
+  get(assetCode: string, chain: string): SwapInventoryBalance | null {
     const e = this.entries.get(key(assetCode, chain));
     if (!e) return null;
     return {
@@ -74,7 +74,7 @@ export class MillInventory {
    */
   debit(assetCode: string, chain: string, amount: bigint): void {
     if (amount <= 0n) {
-      throw new MillInventoryError(
+      throw new SwapInventoryError(
         'INSUFFICIENT_INVENTORY',
         'Debit amount must be positive'
       );
@@ -82,13 +82,13 @@ export class MillInventory {
     const k = key(assetCode, chain);
     const entry = this.entries.get(k);
     if (!entry) {
-      throw new MillInventoryError(
+      throw new SwapInventoryError(
         'INVENTORY_NOT_INITIALIZED',
         `Inventory not initialized for ${k}`
       );
     }
     if (entry.available < amount) {
-      throw new MillInventoryError(
+      throw new SwapInventoryError(
         'INSUFFICIENT_INVENTORY',
         `Insufficient inventory for ${k}: have ${entry.available}, need ${amount}`
       );
@@ -104,11 +104,11 @@ export class MillInventory {
   credit(assetCode: string, chain: string, amount: bigint): void {
     if (amount <= 0n) {
       // Invalid-input guard for credit. Uses UNKNOWN_PAIR (the non-
-      // "insufficient" code in MillInventoryErrorCode) so the handler's
+      // "insufficient" code in SwapInventoryErrorCode) so the handler's
       // /insufficient/i.test(err.message) and `err.code === 'INSUFFICIENT_INVENTORY'`
       // branches do NOT fire — a negative-credit is an operator bug, not a
       // reserves shortage, and should NOT be mapped to ILP T04.
-      throw new MillInventoryError(
+      throw new SwapInventoryError(
         'UNKNOWN_PAIR',
         'Credit amount must be positive'
       );
@@ -129,8 +129,8 @@ export class MillInventory {
     entry.updatedAt = now;
   }
 
-  snapshot(): readonly MillInventoryBalance[] {
-    const out: MillInventoryBalance[] = [];
+  snapshot(): readonly SwapInventoryBalance[] {
+    const out: SwapInventoryBalance[] = [];
     for (const [k, e] of this.entries.entries()) {
       const { assetCode, chain } = parseKey(k);
       out.push({
