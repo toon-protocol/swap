@@ -3,8 +3,16 @@
  *
  * Implements the `ClaimIssuer` interface from `@toon-protocol/sdk` (type-only
  * import — no runtime cycle). Flow: debit inventory → reserve channel state
- * → await signer.signBalanceProof → return { claim, claimId }. On signer
- * failure, both inventory and channel state are reversed.
+ * → write-ahead persist (issue #46) → await signer.signBalanceProof →
+ * return { claim, claimId }. On signer failure, both inventory and channel
+ * state are reversed (and the reversal re-persisted, best-effort).
+ *
+ * Issue #46 crash-consistency: when `persistState` is configured, the
+ * post-reserve watermark hits durable storage BEFORE the balance proof is
+ * signed — so no claim a counterparty can ever hold is AHEAD of the stored
+ * watermark. If the write-ahead persist throws, the debit + reservation are
+ * rolled back and the claim is refused (`PERSISTENCE_FAILED` → ILP T00).
+ * See `state-store.ts` for the full recovery rules.
  */
 
 import type {
@@ -85,6 +93,15 @@ export interface MultiChainClaimIssuerConfig {
    * Until then, callers must supply the map explicitly.
    */
   signerAddresses?: Record<string, string>;
+  /**
+   * Issue #46 — synchronous write-ahead persistence hook, wired by
+   * `startSwapNode()` to `SwapStatePersister.persist`. Called (a) after
+   * debit+reserve and BEFORE signing, so the stored watermark is always >=
+   * any handed-out claim, and (b) best-effort after a signer-failure
+   * rollback. When omitted, the issuer behaves exactly as before
+   * (in-memory only).
+   */
+  persistState?: () => void;
 }
 
 export class MultiChainClaimIssuer implements ClaimIssuer {
@@ -94,6 +111,7 @@ export class MultiChainClaimIssuer implements ClaimIssuer {
   private readonly logger?: SwapClaimIssuerLogger;
   private readonly newClaimId: () => string;
   private readonly signerAddresses: Record<string, string>;
+  private readonly persistState?: () => void;
 
   constructor(config: MultiChainClaimIssuerConfig) {
     // Constructor-time config validation uses INVALID_CONFIG so it does not
@@ -123,6 +141,7 @@ export class MultiChainClaimIssuer implements ClaimIssuer {
     this.channelState = config.channelState;
     this.logger = config.logger;
     this.signerAddresses = config.signerAddresses ?? {};
+    if (config.persistState) this.persistState = config.persistState;
     this.newClaimId =
       config.newClaimId ??
       (() => {
@@ -188,6 +207,37 @@ export class MultiChainClaimIssuer implements ClaimIssuer {
       throw err;
     }
 
+    // 3b. Issue #46 — WRITE-AHEAD persist. The reservation (nonce +
+    //     cumulative watermark + inventory debit) MUST be durable before the
+    //     signed claim can leave the process. Synchronous, so no other
+    //     issueClaim can interleave between reserve and persist. On failure:
+    //     roll back debit + reservation and refuse the claim — handing out a
+    //     claim ahead of the stored watermark is the exact desync this
+    //     hook exists to prevent.
+    if (this.persistState) {
+      try {
+        this.persistState();
+      } catch (err) {
+        this.inventory.credit(targetAsset, targetChain, targetAmount);
+        this.channelState.release({
+          assetCode: targetAsset,
+          chain: targetChain,
+          senderPubkey,
+          cumulativeDelta: targetAmount,
+        });
+        this.logger?.error?.('swap.issueClaim.persist_failed', {
+          err,
+          chain: targetChain,
+          asset: targetAsset,
+        });
+        throw new SwapWalletError(
+          'PERSISTENCE_FAILED',
+          'Write-ahead persist of channel watermark failed; claim not issued',
+          { cause: err }
+        );
+      }
+    }
+
     // 4. Sign the balance proof. On throw, reverse inventory + channel state.
     let claim: Uint8Array;
     try {
@@ -211,6 +261,22 @@ export class MultiChainClaimIssuer implements ClaimIssuer {
         senderPubkey,
         cumulativeDelta: targetAmount,
       });
+      // Issue #46 — re-persist the rolled-back state, best-effort. If THIS
+      // persist fails (or the process crashes before it runs), disk keeps
+      // the pre-rollback snapshot: an over-reservation, which is safe — the
+      // next boot's watermark is ahead of (never behind) any handed-out
+      // claim. See state-store.ts crash rule 3.
+      if (this.persistState) {
+        try {
+          this.persistState();
+        } catch (persistErr) {
+          this.logger?.error?.('swap.issueClaim.rollback_persist_failed', {
+            err: persistErr,
+            chain: targetChain,
+            asset: targetAsset,
+          });
+        }
+      }
       this.logger?.error?.('swap.issueClaim.signing_failed', {
         err,
         chain: targetChain,

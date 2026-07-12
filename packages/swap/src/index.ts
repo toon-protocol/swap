@@ -45,6 +45,23 @@ export type {
   SwapClaimIssuerLogger,
 } from './claim-issuer.js';
 
+// State persistence (issue #46 — rolling-swap prerequisite P2)
+export {
+  JsonFileSwapStateStore,
+  SwapStatePersister,
+  PersistentSeenPacketIds,
+  SwapStateStoreError,
+  DEFAULT_PERSISTED_SEEN_IDS_CAP,
+} from './state-store.js';
+export type {
+  SwapStateStore,
+  SwapStateStoreErrorCode,
+  SwapStatePersisterInit,
+  PersistedSwapState,
+  PersistedInventoryEntry,
+  PersistedChannelEntry,
+} from './state-store.js';
+
 // Errors (Story 12.4)
 export { SwapInventoryError, SwapWalletError } from './errors.js';
 export type { SwapInventoryErrorCode, SwapWalletErrorCode } from './errors.js';

@@ -335,3 +335,36 @@ describe('Pass-3 CLI security: strict hex validation on config.secretKey', () =>
     );
   });
 });
+
+// ---------------------------------------------------------------------------
+// Issue #46 — SWAP_STATE_PATH env overlay (state persistence plumbing).
+// ---------------------------------------------------------------------------
+
+describe('issue #46 — SWAP_STATE_PATH env overlay', () => {
+  const fixturePath = resolve(__dirname, '..', 'fixtures', 'swap.config.json');
+
+  it('[P1] SWAP_STATE_PATH activates persistence: boot writes the snapshot file', async () => {
+    const { mkdtempSync, rmSync } = await import('node:fs');
+    const { tmpdir } = await import('node:os');
+    const { join } = await import('node:path');
+    const mod = (await import('./cli.js')) as {
+      main: (argv: string[]) => Promise<{ stop: () => Promise<void> }>;
+    };
+    const dir = mkdtempSync(join(tmpdir(), 'swap node-cli-state-'));
+    const statePath = join(dir, 'state.json');
+    const prev = process.env['SWAP_STATE_PATH'];
+    process.env['SWAP_STATE_PATH'] = statePath;
+    try {
+      const instance = await mod.main(['--config', fixturePath]);
+      try {
+        expect(existsSync(statePath)).toBe(true);
+      } finally {
+        await instance.stop();
+      }
+    } finally {
+      if (prev === undefined) delete process.env['SWAP_STATE_PATH'];
+      else process.env['SWAP_STATE_PATH'] = prev;
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
