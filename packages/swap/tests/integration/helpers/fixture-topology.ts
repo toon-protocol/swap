@@ -151,8 +151,10 @@ export interface BuildFixtureSwapNodeOptions {
   readonly swapPairs?: readonly SwapPair[];
   /** Inject a capturing publisher (AC-2). */
   readonly publisher?: Publisher;
-  /** Override swap-node-side rate provider (AC-4.3). */
+  /** Override swap-node-side rate provider (AC-4.3; timestamped for swap#48). */
   readonly rateProvider?: SwapNodeConfig['rateProvider'];
+  /** Maker staleness bound(s) — swap#48 staleness-reject tests. */
+  readonly maxRateAge?: SwapNodeConfig['maxRateAge'];
   /** Provide multiple channels for AC-7 two-sender tests. */
   readonly channelCount?: number;
 }
@@ -191,6 +193,7 @@ export async function buildFixtureSwapNode(
     btpEndpoint: 'ws://localhost:0/fixture',
     ...(options.publisher && { publisher: options.publisher }),
     ...(options.rateProvider && { rateProvider: options.rateProvider }),
+    ...(options.maxRateAge && { maxRateAge: options.maxRateAge }),
   };
 
   return startSwapNode(config);
@@ -289,11 +292,15 @@ export async function buildFixtureSender(
       const dataB64 = Buffer.from(JSON.stringify(metadata)).toString('base64');
       shimmed = { accepted: true, data: dataB64 };
     } else {
-      const rej = response as HandlePacketRejectResponse;
+      const rej = response as HandlePacketRejectResponse & { data?: string };
       shimmed = {
         accepted: false,
         code: rej.code,
         message: rej.message,
+        // Pass structured reject payloads (e.g. the swap#48 stale_rate
+        // base64-JSON) through, mirroring the connector adapter's reject
+        // path (`response.data` → ILP reject data).
+        ...(rej.data !== undefined && { data: rej.data }),
       };
     }
 

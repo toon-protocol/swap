@@ -76,6 +76,13 @@ import {
   PersistentSeenPacketIds,
 } from './state-store.js';
 import type { SwapStateStore, PersistedSwapState } from './state-store.js';
+import {
+  RateFreshnessGuard,
+  normalizeRateProvider,
+  validateMaxRateAgeConfig,
+  withMaxRateAge,
+} from './rate-staleness.js';
+import type { MaxRateAgeConfig, SwapRateProvider } from './rate-staleness.js';
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -233,7 +240,30 @@ export interface SwapNodeConfig {
   channels: Record<string, readonly ChannelEntry[]>;
   inventory: Record<string, bigint>;
 
-  rateProvider?: CreateSwapHandlerConfig['rateProvider'];
+  /**
+   * Optional live-rate hook, widened from the SDK's string-only shape:
+   * return `{ rate, at }` ({@link SwapRateProvider} / `TimestampedRate`)
+   * so quote age is measurable — REQUIRED for `maxRateAge` to bite. Bare
+   * string returns remain valid (and are what the SDK handler ultimately
+   * consumes; the swap node normalizes).
+   */
+  rateProvider?: SwapRateProvider;
+  /**
+   * Maker staleness bound(s) — toon-protocol/swap#48, rolling-swap §4.
+   *
+   * When set, any kind:1059 fill packet whose pair's rate feed has not
+   * ticked within the resolved bound is rejected BENIGNLY before pricing
+   * and claim issuance (handler-level code `T99`, `message: 'stale_rate'`,
+   * base64-JSON `data` — see `rate-staleness.ts` for the full reject
+   * contract). Maker-owned, per-chain/per-pair — NOT a protocol constant;
+   * see `RECOMMENDED_MAX_RATE_AGE_MS` for calibrated per-chain-class
+   * starting points.
+   *
+   * Requires {@link rateProvider} (the bound is on the maker's own feed
+   * ticks; a static `pair.rate` gives it nothing to measure) — enforced at
+   * boot with `INVALID_CONFIG`.
+   */
+  maxRateAge?: MaxRateAgeConfig;
   /**
    * Optional operator-supplied replay-protection set for the swap handler.
    *
@@ -622,6 +652,23 @@ export function validateConfig(config: SwapNodeConfig): void {
     }
   }
 
+  if (config.maxRateAge !== undefined) {
+    try {
+      validateMaxRateAgeConfig(config.maxRateAge);
+    } catch (err) {
+      throw new SwapNodeStartError(
+        'INVALID_CONFIG',
+        `SwapNodeConfig.maxRateAge invalid: ${err instanceof Error ? err.message : String(err)}`
+      );
+    }
+    if (typeof config.rateProvider !== 'function') {
+      throw new SwapNodeStartError(
+        'INVALID_CONFIG',
+        "SwapNodeConfig.maxRateAge requires a rateProvider: the staleness bound applies to the age of the maker's own rate-feed ticks, so a static pair.rate gives the guard nothing to measure. Supply a rateProvider that returns { rate, at } timestamped quotes."
+      );
+    }
+  }
+
   if (config.chainProviders !== undefined) {
     if (!Array.isArray(config.chainProviders)) {
       throw new SwapNodeStartError(
@@ -956,12 +1003,32 @@ export async function startSwapNode(
     },
   });
 
-  // 8. Swap handler.
+  // 8. Swap handler (+ optional maxRateAge staleness guard — swap#48).
+  //
+  // The guard owns the timestamped-quote normalization: the SDK handler only
+  // accepts `(pair) => string` providers, so the swap node's widened
+  // SwapRateProvider (`{ rate, at }` returns) is adapted here. With
+  // `maxRateAge` set, the SDK-facing provider also re-checks freshness at
+  // pricing time (race backstop behind the gate below).
+  const stalenessGuard = config.maxRateAge
+    ? new RateFreshnessGuard({
+        maxRateAge: config.maxRateAge,
+        // validateConfig() guarantees rateProvider is present with maxRateAge.
+        rateProvider: config.rateProvider as SwapRateProvider,
+        logger: { warn: logger.warn, info: logger.info },
+      })
+    : undefined;
+  const sdkRateProvider = stalenessGuard
+    ? stalenessGuard.toSdkRateProvider()
+    : config.rateProvider
+      ? normalizeRateProvider(config.rateProvider)
+      : undefined;
+
   const swapHandler = createSwapHandler({
     recipientSecretKey: identity.secretKey,
     swapPairs: [...config.swapPairs],
     claimIssuer,
-    ...(config.rateProvider && { rateProvider: config.rateProvider }),
+    ...(sdkRateProvider && { rateProvider: sdkRateProvider }),
     // Issue #46 — prefer the operator's set (verbatim, SDK contract), else
     // the swap-node-owned persistent replay set when persistence is enabled,
     // else the SDK's default in-memory LRU.
@@ -978,10 +1045,24 @@ export async function startSwapNode(
     },
   });
 
+  // Staleness gate (rolling-swap §4): reject `stale_rate` BEFORE the inner
+  // handler takes its replay reservation, prices the packet, or issues a
+  // leg-B claim. Decorating the handler (rather than gating only in
+  // handlePacket below) puts the guard on EVERY dispatch path into the
+  // registry. No maxRateAge → the handler is registered untouched.
+  const gatedSwapHandler = stalenessGuard
+    ? withMaxRateAge(swapHandler, {
+        guard: stalenessGuard,
+        recipientSecretKey: identity.secretKey,
+        swapPairs: config.swapPairs,
+        logger: { info: logger.info, warn: logger.warn },
+      })
+    : swapHandler;
+
   // 9/10. HandlerRegistry — register on kind:1059 (NIP-59 gift-wrap).
   const registry = new HandlerRegistry();
   try {
-    registry.on(1059, swapHandler);
+    registry.on(1059, gatedSwapHandler);
   } catch (err) {
     throw new SwapNodeStartError(
       'HANDLER_REGISTRATION_FAILED',
