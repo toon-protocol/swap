@@ -896,3 +896,251 @@ describe('Story 12.9 — chain-recipient threading to signBalanceProof', () => {
     ).rejects.toBeInstanceOf(SwapWalletError);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Issue #49 — rolling path: in-flight window reservation lifecycle
+// ---------------------------------------------------------------------------
+
+describe('MultiChainClaimIssuer — issueRollingClaim / commit / rollback (issue #49)', () => {
+  const CHAIN49 = 'evm:base:8453';
+  const KEY49 = `ETH:${CHAIN49}`;
+
+  function buildRollingIssuer(opts?: {
+    signBalanceProof?: (arg: unknown) => Promise<Uint8Array>;
+    persistState?: () => void;
+    windowBudget?: bigint;
+    now?: () => number;
+  }) {
+    const inventory = new SwapInventory({
+      balances: {
+        [KEY49]: {
+          available: 1_000n,
+          total: 1_000n,
+          ...(opts?.windowBudget !== undefined && {
+            windowBudget: opts.windowBudget,
+          }),
+        },
+      },
+      ...(opts?.now && { clock: opts.now }),
+    });
+    const channelState = new SwapChannelState({
+      channels: {
+        [`ETH:${CHAIN49}:0xchan49`]: {
+          channelId: '0xchan49',
+          cumulativeAmount: 0n,
+          nonce: 0n,
+          updatedAt: 0,
+        },
+      },
+    });
+    const signBalanceProof = vi.fn(
+      opts?.signBalanceProof ?? (async () => new Uint8Array([0x49]))
+    );
+    const issuer = new MultiChainClaimIssuer({
+      inventory,
+      signers: {
+        [CHAIN49]: {
+          chain: CHAIN49,
+          chainKind: 'evm' as const,
+          signBalanceProof,
+        },
+      },
+      channelState,
+      ...(opts?.persistState && { persistState: opts.persistState }),
+    });
+    return { issuer, inventory, channelState, signBalanceProof };
+  }
+
+  function rollingParams(targetAmount = 50n) {
+    return {
+      sourceAmount: 100_000n,
+      targetAmount,
+      pair: PAIR_USDC_TO_ETH,
+      senderPubkey: SENDER_PUBKEY,
+      chainRecipient: FIXTURE_EVM_RECIPIENT,
+      rumor: makeRumor(),
+    };
+  }
+
+  function window49(inventory: SwapInventory) {
+    return inventory
+      .windowSnapshot()
+      .find((w) => w.assetCode === 'ETH' && w.chain === CHAIN49)!;
+  }
+
+  it('[P0] reserves the window (no permanent debit), returns a reservationId, honors reservationTtlMs', async () => {
+    let now = 10_000;
+    const { issuer, inventory } = buildRollingIssuer({ now: () => now });
+    const result = await issuer.issueRollingClaim({
+      ...rollingParams(),
+      reservationTtlMs: 1_234,
+    });
+    expect(result.claim).toBeInstanceOf(Uint8Array);
+    expect(result.reservationId.length).toBeGreaterThan(0);
+    // available untouched; the amount is IN FLIGHT.
+    expect(inventory.get('ETH', CHAIN49)!.available).toBe(1_000n);
+    const w = window49(inventory);
+    expect(w.inFlight).toBe(50n);
+    expect(w.free).toBe(950n);
+    const reservations = inventory.reservationsSnapshot();
+    expect(reservations[result.reservationId]).toEqual({
+      key: KEY49,
+      amount: 50n,
+      expiresAt: 10_000 + 1_234,
+    });
+    // TTL expiry frees the slot (crashed/stalled packet).
+    now = 10_000 + 1_235;
+    expect(window49(inventory).inFlight).toBe(0n);
+    expect(window49(inventory).free).toBe(1_000n);
+  });
+
+  it('[P0] write-ahead: the reservation is durable BEFORE the claim is signed', async () => {
+    const order: string[] = [];
+    let reservationsAtPersist = -1;
+    const stack = buildRollingIssuer({
+      persistState: () => {
+        order.push('persist');
+        reservationsAtPersist = Object.keys(
+          stack.inventory.reservationsSnapshot()
+        ).length;
+      },
+      signBalanceProof: async () => {
+        order.push('sign');
+        return new Uint8Array([0x49]);
+      },
+    });
+    await stack.issuer.issueRollingClaim(rollingParams());
+    expect(order).toEqual(['persist', 'sign']);
+    expect(reservationsAtPersist).toBe(1);
+  });
+
+  it('[P0] write-ahead persist failure → reservation + watermark rolled back, claim refused', async () => {
+    let fail = true;
+    const { issuer, inventory, channelState, signBalanceProof } =
+      buildRollingIssuer({
+        persistState: () => {
+          if (fail) throw new Error('disk full');
+        },
+      });
+    await expect(issuer.issueRollingClaim(rollingParams())).rejects.toThrow(
+      /persist/i
+    );
+    expect(signBalanceProof).not.toHaveBeenCalled();
+    expect(window49(inventory).inFlight).toBe(0n);
+    const entry = channelState.get({
+      assetCode: 'ETH',
+      chain: CHAIN49,
+      senderPubkey: SENDER_PUBKEY,
+    })!;
+    expect(entry.nonce).toBe(0n);
+    fail = false;
+    await expect(
+      issuer.issueRollingClaim(rollingParams())
+    ).resolves.toBeDefined();
+  });
+
+  it('[P0] signer failure → reservation released + watermark reversed (nothing leaks)', async () => {
+    const { issuer, inventory, channelState } = buildRollingIssuer({
+      signBalanceProof: async () => {
+        throw new Error('signer exploded');
+      },
+    });
+    await expect(issuer.issueRollingClaim(rollingParams())).rejects.toThrow(
+      /signing failed/i
+    );
+    expect(window49(inventory).inFlight).toBe(0n);
+    expect(window49(inventory).free).toBe(1_000n);
+    expect(
+      channelState.get({
+        assetCode: 'ETH',
+        chain: CHAIN49,
+        senderPubkey: SENDER_PUBKEY,
+      })!.nonce
+    ).toBe(0n);
+  });
+
+  it('[P0] capacity refusal: windowBudget − inFlight − unsettled gates the reserve with INSUFFICIENT_INVENTORY (T04 vocabulary)', async () => {
+    const { issuer, inventory } = buildRollingIssuer({ windowBudget: 70n });
+    const first = await issuer.issueRollingClaim(rollingParams(50n));
+    // 70 budget − 50 in flight = 20 free < 50.
+    await expect(issuer.issueRollingClaim(rollingParams(50n))).rejects.toThrow(
+      SwapInventoryError
+    );
+    await expect(
+      issuer.issueRollingClaim(rollingParams(50n))
+    ).rejects.toMatchObject({ code: 'INSUFFICIENT_INVENTORY' });
+    // Commit converts to unsettled — STILL occupies the window.
+    issuer.commitRollingClaim({
+      reservationId: first.reservationId,
+      pair: PAIR_USDC_TO_ETH,
+      targetAmount: 50n,
+    });
+    expect(window49(inventory).unsettled).toBe(50n);
+    await expect(issuer.issueRollingClaim(rollingParams(50n))).rejects.toThrow(
+      /window capacity/
+    );
+    // Settlement confirmation frees it.
+    inventory.recordSettlement({
+      assetCode: 'ETH',
+      chain: CHAIN49,
+      channelId: '0xchan49',
+      cumulativeAmount: 50n,
+    });
+    await expect(
+      issuer.issueRollingClaim(rollingParams(50n))
+    ).resolves.toBeDefined();
+  });
+
+  it('[P0] rollbackRollingClaim releases exactly once (double unwind cannot double-decrement the watermark)', async () => {
+    const persist = vi.fn();
+    const { issuer, inventory, channelState } = buildRollingIssuer({
+      persistState: persist,
+    });
+    const issued = await issuer.issueRollingClaim(rollingParams(50n));
+    const persistsAfterIssue = persist.mock.calls.length;
+    const rollback = () =>
+      issuer.rollbackRollingClaim({
+        reservationId: issued.reservationId,
+        pair: PAIR_USDC_TO_ETH,
+        senderPubkey: SENDER_PUBKEY,
+        targetAmount: 50n,
+      });
+    rollback();
+    const entry = () =>
+      channelState.get({
+        assetCode: 'ETH',
+        chain: CHAIN49,
+        senderPubkey: SENDER_PUBKEY,
+      })!;
+    expect(entry().nonce).toBe(0n);
+    expect(entry().cumulativeAmount).toBe(0n);
+    expect(window49(inventory).free).toBe(1_000n);
+    expect(persist.mock.calls.length).toBe(persistsAfterIssue + 1);
+    // Second unwind: logged no-op — watermark NOT decremented again, no persist.
+    rollback();
+    expect(entry().nonce).toBe(0n);
+    expect(entry().cumulativeAmount).toBe(0n);
+    expect(window49(inventory).free).toBe(1_000n);
+    expect(persist.mock.calls.length).toBe(persistsAfterIssue + 1);
+  });
+
+  it('[P1] late commit (reservation TTL-expired mid-flight) still records the liability', async () => {
+    let now = 0;
+    const { issuer, inventory } = buildRollingIssuer({ now: () => now });
+    const issued = await issuer.issueRollingClaim({
+      ...rollingParams(50n),
+      reservationTtlMs: 100,
+    });
+    now = 200; // reservation expired while leg B was in flight
+    issuer.commitRollingClaim({
+      reservationId: issued.reservationId,
+      pair: PAIR_USDC_TO_ETH,
+      targetAmount: 50n,
+    });
+    const w = window49(inventory);
+    expect(w.inFlight).toBe(0n);
+    // The revealed claim is redeemable regardless of the clock: liability
+    // is recorded anyway.
+    expect(w.unsettled).toBe(50n);
+  });
+});

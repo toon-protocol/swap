@@ -309,8 +309,17 @@ describe('swap#47 — rolling coupled-leg engine (integration)', () => {
         expect(advance.channelId).toBe(CHANNEL_ID);
       }
 
-      // Maker inventory reflects exactly the delivered total.
-      expect(instance.health().inventoryAvailable[INVENTORY_KEY]).toBe(
+      // Issue #49: the delivered total is UNSETTLED LIABILITY in the
+      // window view — no permanent debit on the rolling flow.
+      const health = instance.health();
+      expect(health.inventoryAvailable[INVENTORY_KEY]).toBe(
+        INITIAL_INVENTORY.toString()
+      );
+      expect(health.inventoryWindow[INVENTORY_KEY]!.unsettled).toBe(
+        (DELTA_WEI * BigInt(packets)).toString()
+      );
+      expect(health.inventoryWindow[INVENTORY_KEY]!.inFlight).toBe('0');
+      expect(health.inventoryWindow[INVENTORY_KEY]!.free).toBe(
         (INITIAL_INVENTORY - DELTA_WEI * BigInt(packets)).toString()
       );
     } finally {
@@ -335,10 +344,15 @@ describe('swap#47 — rolling coupled-leg engine (integration)', () => {
       const stalled = await driveFill(handler, daemon, 3, DELTA);
       expect(stalled.wire).toBe('REJECT');
 
-      // Nothing stayed debited for the failed packet (full unwind).
+      // Nothing stayed reserved for the failed packet (full unwind —
+      // issue #49: the window releases; unsettled stays at the 2 fills).
       expect(instance.health().inventoryAvailable[INVENTORY_KEY]).toBe(
         availableAfter2
       );
+      expect(instance.health().inventoryWindow[INVENTORY_KEY]!).toMatchObject({
+        inFlight: '0',
+        unsettled: (DELTA_WEI * 2n).toString(),
+      });
 
       // Recovery: sender resumes with a NEW seq (spec: seq never reused).
       // The maker re-issues from the unwound watermark — nonce 3 again —
@@ -349,8 +363,12 @@ describe('swap#47 — rolling coupled-leg engine (integration)', () => {
       const last = daemon.advances[daemon.advances.length - 1]!;
       expect(BigInt(last.nonce!)).toBe(3n);
       expect(BigInt(last.cumulativeAmount!)).toBe(DELTA_WEI * 3n);
+      expect(instance.health().inventoryWindow[INVENTORY_KEY]!).toMatchObject({
+        inFlight: '0',
+        unsettled: (DELTA_WEI * 3n).toString(),
+      });
       expect(instance.health().inventoryAvailable[INVENTORY_KEY]).toBe(
-        (INITIAL_INVENTORY - DELTA_WEI * 3n).toString()
+        INITIAL_INVENTORY.toString()
       );
     } finally {
       await instance.stop();

@@ -18,6 +18,12 @@ import { describe, it, expect, afterEach } from 'vitest';
 import { startSwapNode, validateConfig } from './swap-node.js';
 import type { SwapNodeConfig } from './swap-node.js';
 import { JsonFileSwapStateStore } from './state-store.js';
+import type { PersistedSwapState } from './state-store.js';
+
+/** Write a pre-#49 (v1) snapshot — boot-path compat for the schema upgrade. */
+function saveV1Snapshot(path: string, state: unknown): void {
+  new JsonFileSwapStateStore(path).save(state as PersistedSwapState);
+}
 import { SwapNodeStartError } from './errors.js';
 
 const VALID_MNEMONIC =
@@ -87,7 +93,7 @@ describe('issue #46 — startSwapNode state persistence', () => {
     // Simulate a previous run that spent inventory and advanced watermarks
     // (including a channel that was provisioned dynamically, absent from
     // config) before crashing.
-    new JsonFileSwapStateStore(statePath).save({
+    saveV1Snapshot(statePath, {
       version: 1,
       inventory: {
         'USDC:evm:8453': {
@@ -143,7 +149,7 @@ describe('issue #46 — startSwapNode state persistence', () => {
 
   it('[P0] stop() does not clobber persisted watermarks (no persist of releaseAll zeros)', async () => {
     const statePath = join(makeTmpDir(), 'swap-state.json');
-    new JsonFileSwapStateStore(statePath).save({
+    saveV1Snapshot(statePath, {
       version: 1,
       inventory: {},
       channels: {
@@ -198,6 +204,131 @@ describe('issue #46 — startSwapNode state persistence', () => {
     const instance = await startSwapNode(cfg);
     try {
       expect(existsSync(join(dir, 'unused.json'))).toBe(false);
+    } finally {
+      await instance.stop();
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Issue #49 — window rehydration + node-level settlement intake
+// ---------------------------------------------------------------------------
+
+describe('issue #49 — startSwapNode window state', () => {
+  it('[P0] rehydrates unsettled + reservations from a v2 snapshot; windowBudget comes from config (config wins)', async () => {
+    const statePath = join(makeTmpDir(), 'swap-state.json');
+    const farFuture = Date.now() + 3_600_000;
+    new JsonFileSwapStateStore(statePath).save({
+      version: 2,
+      inventory: {
+        'USDC:evm:8453': {
+          available: '1000000',
+          total: '1000000',
+          unsettled: '300',
+          windowBudget: '999999', // stale operator config — must be ignored
+          updatedAt: 1,
+        },
+      },
+      channels: {
+        'USDC:evm:8453:c-1': {
+          channelId: 'c-1',
+          cumulativeAmount: '500',
+          nonce: '5',
+          updatedAt: 1,
+        },
+      },
+      bindings: {},
+      seenPacketIds: [],
+      reservations: {
+        'rsv-live': {
+          key: 'USDC:evm:8453',
+          amount: '100',
+          expiresAt: farFuture,
+        },
+        'rsv-stale': { key: 'USDC:evm:8453', amount: '50', expiresAt: 1 },
+      },
+      settledWatermarks: { 'USDC:evm:8453:c-1': '200' },
+    });
+
+    const cfg = validConfig(statePath);
+    cfg.windowBudget = { 'evm:8453': 1_000n };
+    const instance = await startSwapNode(cfg);
+    try {
+      const res = await fetch(`http://127.0.0.1:${instance.blsPort}/health`);
+      const body = (await res.json()) as {
+        inventoryWindow: Record<
+          string,
+          { budget: string; inFlight: string; unsettled: string; free: string }
+        >;
+      };
+      // Config budget (1000) wins over the persisted 999999; the expired
+      // reservation is released (expire-and-release recovery, crash rule 6)
+      // while the live one still occupies the window until its TTL.
+      expect(body.inventoryWindow['USDC:evm:8453']).toEqual({
+        budget: '1000',
+        inFlight: '100',
+        unsettled: '300',
+        free: '600',
+      });
+    } finally {
+      await instance.stop();
+    }
+  });
+
+  it('[P0] recordSettlement resolves the pool by channelId, shrinks liability monotonically, and persists', async () => {
+    const statePath = join(makeTmpDir(), 'swap-state.json');
+    new JsonFileSwapStateStore(statePath).save({
+      version: 2,
+      inventory: {
+        'USDC:evm:8453': {
+          available: '1000000',
+          total: '1000000',
+          unsettled: '400',
+          updatedAt: 1,
+        },
+      },
+      channels: {
+        'USDC:evm:8453:c-1': {
+          channelId: 'c-1',
+          cumulativeAmount: '400',
+          nonce: '4',
+          updatedAt: 1,
+        },
+      },
+      bindings: {},
+      seenPacketIds: [],
+      reservations: {},
+      settledWatermarks: {},
+    });
+    const instance = await startSwapNode(validConfig(statePath));
+    try {
+      const event = {
+        txHash: `0x${'ab'.repeat(32)}`,
+        chain: 'evm' as const,
+        channelId: 'c-1',
+        cumulativeAmount: '250',
+        nonce: '3',
+        recipient: `0x${'11'.repeat(20)}`,
+        settledAt: Date.now(),
+      };
+      expect(instance.recordSettlement(event)).toBe(250n);
+      // Replayed confirmation → monotone no-op.
+      expect(instance.recordSettlement(event)).toBe(0n);
+      // Unknown channel → 0n, no throw.
+      expect(instance.recordSettlement({ ...event, channelId: 'nope' })).toBe(
+        0n
+      );
+
+      const res = await fetch(`http://127.0.0.1:${instance.blsPort}/health`);
+      const body = (await res.json()) as {
+        inventoryWindow: Record<string, { unsettled: string }>;
+      };
+      expect(body.inventoryWindow['USDC:evm:8453']!.unsettled).toBe('150');
+
+      // Persisted: the settled watermark + reduced liability survive.
+      const snap = new JsonFileSwapStateStore(statePath).load()!;
+      expect(snap.settledWatermarks['USDC:evm:8453:c-1']).toBe('250');
+      expect(snap.inventory['USDC:evm:8453']!.unsettled).toBe('150');
     } finally {
       await instance.stop();
     }

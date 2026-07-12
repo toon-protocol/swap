@@ -63,11 +63,13 @@ afterEach(() => {
 
 function sampleState(): PersistedSwapState {
   return {
-    version: 1,
+    version: 2,
     inventory: {
       'ETH:evm:base:8453': {
         available: '9007199254740993', // > MAX_SAFE_INTEGER (precision guard)
         total: '9007199254740995',
+        unsettled: '18000000000000001',
+        windowBudget: '20000000000000000',
         updatedAt: 123,
       },
     },
@@ -83,7 +85,33 @@ function sampleState(): PersistedSwapState {
       [`ETH:evm:base:8453:${SENDER_PUBKEY}`]: 'ETH:evm:base:8453:0xchan',
     },
     seenPacketIds: ['pkt-1', 'pkt-2'],
+    // Issue #49 — in-flight window reservations + settled watermarks.
+    reservations: {
+      'rsv-1': {
+        key: 'ETH:evm:base:8453',
+        amount: '400000000000001',
+        expiresAt: 1_800_000_000_000,
+      },
+    },
+    settledWatermarks: {
+      'ETH:evm:base:8453:0xchan': '9000000000000000',
+    },
   };
+}
+
+/** A pre-#49 (v1) snapshot — must remain loadable with defaults. */
+function sampleV1State(): Record<string, unknown> {
+  const { reservations, settledWatermarks, ...rest } = sampleState();
+  void reservations;
+  void settledWatermarks;
+  const inventory = {
+    'ETH:evm:base:8453': {
+      available: '9007199254740993',
+      total: '9007199254740995',
+      updatedAt: 123,
+    },
+  };
+  return { ...rest, inventory, version: 1 };
 }
 
 /** Fresh live state + persister wired to a store, for crash-recovery tests. */
@@ -209,11 +237,51 @@ describe('JsonFileSwapStateStore', () => {
     const path = join(makeTmpDir(), 'state.json');
     writeFileSync(
       path,
-      JSON.stringify({ ...sampleState(), version: 2 }),
+      JSON.stringify({ ...sampleState(), version: 99 }),
       'utf-8'
     );
     const store = new JsonFileSwapStateStore(path);
     expect(() => store.load()).toThrowError(/version/);
+  });
+
+  it('[P0] (#49) v1 snapshots load with window fields defaulted (reservations/watermarks empty, unsettled absent)', () => {
+    const path = join(makeTmpDir(), 'state.json');
+    writeFileSync(path, JSON.stringify(sampleV1State()), 'utf-8');
+    const store = new JsonFileSwapStateStore(path);
+    const loaded = store.load()!;
+    expect(loaded.version).toBe(2);
+    expect(loaded.reservations).toEqual({});
+    expect(loaded.settledWatermarks).toEqual({});
+    expect(loaded.inventory['ETH:evm:base:8453']!.available).toBe(
+      '9007199254740993'
+    );
+    expect(loaded.inventory['ETH:evm:base:8453']!.unsettled).toBeUndefined();
+  });
+
+  it('[P1] (#49) malformed reservations / settledWatermarks fail load()', () => {
+    const path = join(makeTmpDir(), 'state.json');
+    const badAmount = sampleState();
+    badAmount.reservations['rsv-1']!.amount = 'not-a-bigint';
+    writeFileSync(path, JSON.stringify(badAmount), 'utf-8');
+    expect(() => new JsonFileSwapStateStore(path).load()).toThrowError(
+      SwapStateStoreError
+    );
+
+    const badWm = sampleState();
+    (badWm.settledWatermarks as Record<string, unknown>)['k'] = 12;
+    writeFileSync(path, JSON.stringify(badWm), 'utf-8');
+    expect(() => new JsonFileSwapStateStore(path).load()).toThrowError(
+      SwapStateStoreError
+    );
+
+    const badExpiry = sampleState();
+    (badExpiry.reservations['rsv-1'] as unknown as Record<string, unknown>)[
+      'expiresAt'
+    ] = 'soon';
+    writeFileSync(path, JSON.stringify(badExpiry), 'utf-8');
+    expect(() => new JsonFileSwapStateStore(path).load()).toThrowError(
+      /expiresAt/
+    );
   });
 
   it('[P1] malformed bigint strings fail load()', () => {
@@ -329,6 +397,52 @@ describe('SwapStatePersister', () => {
     );
     expect(loaded.seenPacketIds).toEqual(['pkt-9']);
     expect(persister).toBeDefined();
+  });
+
+  it('[P0] (#49) persists in-flight reservations, unsettled liability, and settled watermarks', () => {
+    const path = join(makeTmpDir(), 'state.json');
+    const store = new JsonFileSwapStateStore(path);
+    const { inventory, channelState, persister } = makeLiveSwapNode(store);
+    void channelState;
+
+    const a = inventory.reserve({
+      assetCode: 'ETH',
+      chain: 'evm:base:8453',
+      amount: 5n,
+      id: 'rsv-a',
+    });
+    inventory.reserve({
+      assetCode: 'ETH',
+      chain: 'evm:base:8453',
+      amount: 3n,
+      id: 'rsv-b',
+    });
+    inventory.commitReservation({
+      reservationId: 'rsv-b',
+      assetCode: 'ETH',
+      chain: 'evm:base:8453',
+      amount: 3n,
+    });
+    inventory.recordSettlement({
+      assetCode: 'ETH',
+      chain: 'evm:base:8453',
+      channelId: 'chan-a',
+      cumulativeAmount: 1n,
+    });
+    persister.persist();
+
+    const loaded = store.load()!;
+    expect(loaded.inventory['ETH:evm:base:8453']!.unsettled).toBe('2');
+    expect(loaded.reservations).toEqual({
+      'rsv-a': {
+        key: 'ETH:evm:base:8453',
+        amount: '5',
+        expiresAt: a.expiresAt,
+      },
+    });
+    expect(loaded.settledWatermarks).toEqual({
+      'ETH:evm:base:8453:chan-a': '1',
+    });
   });
 });
 

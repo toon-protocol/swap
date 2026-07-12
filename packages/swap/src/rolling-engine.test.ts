@@ -15,7 +15,7 @@
  *     safe state (state-store crash rules 2/4)
  */
 
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { sha256 } from '@noble/hashes/sha2.js';
 import type { SwapPair } from '@toon-protocol/core';
 
@@ -151,6 +151,9 @@ function buildStack(options?: {
   minLegBTimeMs?: number;
   legBExpiryMarginMs?: number;
   legBBudgetMs?: number;
+  reservationGraceMs?: number;
+  /** Issue #49 — in-flight window ceiling for the fixture pool. */
+  windowBudget?: bigint;
 }): Stack {
   const persisted = options?.rehydrateFrom ?? null;
 
@@ -159,15 +162,42 @@ function buildStack(options?: {
       ? Object.fromEntries(
           Object.entries(persisted.inventory).map(([k, v]) => [
             k,
-            { available: BigInt(v.available), total: BigInt(v.total) },
+            {
+              available: BigInt(v.available),
+              total: BigInt(v.total),
+              unsettled: BigInt(v.unsettled ?? '0'),
+              ...(options?.windowBudget !== undefined && {
+                windowBudget: options.windowBudget,
+              }),
+            },
           ])
         )
       : {
           [INVENTORY_KEY]: {
             available: INITIAL_INVENTORY,
             total: INITIAL_INVENTORY,
+            ...(options?.windowBudget !== undefined && {
+              windowBudget: options.windowBudget,
+            }),
           },
         },
+    // Issue #49 — rehydrate in-flight reservations + settled watermarks
+    // exactly as startSwapNode does (expire-and-release recovery).
+    ...(persisted && {
+      reservations: Object.fromEntries(
+        Object.entries(persisted.reservations).map(([id, r]) => [
+          id,
+          { key: r.key, amount: BigInt(r.amount), expiresAt: r.expiresAt },
+        ])
+      ),
+      settledWatermarks: Object.fromEntries(
+        Object.entries(persisted.settledWatermarks).map(([k, v]) => [
+          k,
+          BigInt(v),
+        ])
+      ),
+    }),
+    ...(options?.now && { clock: options.now }),
   });
   const channelState = new SwapChannelState({
     channels: persisted
@@ -263,6 +293,9 @@ function buildStack(options?: {
     ...(options?.legBBudgetMs !== undefined && {
       legBBudgetMs: options.legBBudgetMs,
     }),
+    ...(options?.reservationGraceMs !== undefined && {
+      reservationGraceMs: options.reservationGraceMs,
+    }),
   });
 
   return {
@@ -274,6 +307,14 @@ function buildStack(options?: {
     saved: () => savedState,
     legB,
   };
+}
+
+function windowOf(stack: Stack) {
+  const w = stack.inventory
+    .windowSnapshot()
+    .find((e) => e.assetCode === ASSET && e.chain === CHAIN);
+  expect(w).toBeDefined();
+  return w!;
 }
 
 function stackPreimages(stack: Stack): Map<string, Uint8Array> {
@@ -401,10 +442,15 @@ describe('rolling engine — coupled happy path', () => {
       expect(JSON.stringify(record)).not.toContain(advance.claim);
     }
 
-    // State: debit + watermark advance stand.
+    // State (issue #49): NO permanent debit — the fulfilled fill's amount
+    // moved reservation → unsettled liability; available is untouched.
     expect(stack.inventory.get(ASSET, CHAIN)!.available).toBe(
-      INITIAL_INVENTORY - TARGET_PER_DELTA
+      INITIAL_INVENTORY
     );
+    const w = windowOf(stack);
+    expect(w.inFlight).toBe(0n);
+    expect(w.unsettled).toBe(TARGET_PER_DELTA);
+    expect(w.free).toBe(INITIAL_INVENTORY - TARGET_PER_DELTA);
     const entry = stack.channelState.get({
       assetCode: ASSET,
       chain: CHAIN,
@@ -465,10 +511,15 @@ describe('rolling engine — maker cannot collect leg A while withholding leg B'
     // Contract: the connector records nothing for a reject.
     expect(connectorEnforce(response, condition).delivered).toBe(false);
 
-    // AC-4: the failed packet fully unwound inventory + channel reservation.
+    // AC-4: the failed packet fully unwound the window reservation +
+    // channel reservation — released, not converted (issue #49).
     expect(stack.inventory.get(ASSET, CHAIN)!.available).toBe(
       INITIAL_INVENTORY
     );
+    const wUnwound = windowOf(stack);
+    expect(wUnwound.inFlight).toBe(0n);
+    expect(wUnwound.unsettled).toBe(0n);
+    expect(wUnwound.free).toBe(INITIAL_INVENTORY);
     const entry = stack.channelState.get({
       assetCode: ASSET,
       chain: CHAIN,
@@ -495,6 +546,7 @@ describe('rolling engine — maker cannot collect leg A while withholding leg B'
     expect(stack.inventory.get(ASSET, CHAIN)!.available).toBe(
       INITIAL_INVENTORY
     );
+    expect(windowOf(stack).free).toBe(INITIAL_INVENTORY);
 
     // Byzantine-maker simulation: even if a maker implementation tried to
     // accept anyway (with the wrong preimage, or none), the connector's
@@ -681,9 +733,10 @@ describe('rolling engine — guards', () => {
     );
   });
 
-  it('insufficient inventory → T04 insufficient_funds, replay seq burned', async () => {
+  it('insufficient window capacity → T04 insufficient_funds, replay seq burned', async () => {
     const stack = buildStack();
-    // 1 ETH inventory; ask for a fill needing 4000 ETH (10^7 USDC * 0.0004).
+    // 1 ETH window (no explicit budget → ceiling degrades to available);
+    // ask for a fill needing 4000 ETH (10^7 USDC * 0.0004).
     const { response } = await sendFill(stack, 1, {
       amount: (10n ** 13n).toString(),
     });
@@ -704,14 +757,16 @@ describe('rolling engine — guards', () => {
 // Crash consistency (state-store rules 1/2/4)
 // ---------------------------------------------------------------------------
 
-describe('rolling engine — crash between debit and fulfill', () => {
-  it('persisted snapshot at leg-B time is the safe state; restart continues monotonically and rejects the replay', async () => {
-    const stack = buildStack();
+describe('rolling engine — crash between reservation and fulfill', () => {
+  it('persisted snapshot at leg-B time is the safe state; recovery expires-and-releases the reservation with no leaked capacity and no double-spend', async () => {
+    let now = 1_700_000_000_000;
+    const stack = buildStack({ now: () => now });
     let crashSnapshot: PersistedSwapState | null = null;
     stack.legB.respond = () => {
       // The instant leg B is in flight IS the crash window: the write-ahead
-      // persist has already happened (crash rule 1). Capture disk state,
-      // then die before any response/unwind.
+      // persist has already happened (crash rule 1 — the reservation is
+      // durable BEFORE the leg-B advance is externalized). Capture disk
+      // state, then die before any response/unwind.
       crashSnapshot = structuredClone(stack.saved());
       throw new Error('simulated crash');
     };
@@ -719,24 +774,44 @@ describe('rolling engine — crash between debit and fulfill', () => {
 
     expect(crashSnapshot).not.toBeNull();
     const snap = crashSnapshot! as PersistedSwapState;
-    // Watermark advanced + inventory debited + replay seq reserved — all
-    // BEFORE the claim could have left the process.
+    // Watermark advanced + window RESERVED (not debited — issue #49) +
+    // replay seq reserved — all BEFORE the claim could have left the process.
     expect(snap.channels[CHANNEL_KEY]!.nonce).toBe('1');
     expect(snap.channels[CHANNEL_KEY]!.cumulativeAmount).toBe(
       TARGET_PER_DELTA.toString()
     );
     expect(BigInt(snap.inventory[INVENTORY_KEY]!.available)).toBe(
-      INITIAL_INVENTORY - TARGET_PER_DELTA
+      INITIAL_INVENTORY
     );
+    expect(snap.inventory[INVENTORY_KEY]!.unsettled).toBe('0');
+    const persistedReservations = Object.values(snap.reservations);
+    expect(persistedReservations).toHaveLength(1);
+    expect(persistedReservations[0]!.key).toBe(INVENTORY_KEY);
+    expect(persistedReservations[0]!.amount).toBe(TARGET_PER_DELTA.toString());
     expect(snap.seenPacketIds).toContain(`rolling:${STREAM_NONCE}:1`);
 
     // "Reboot" from the crash snapshot.
-    const rebooted = buildStack({ rehydrateFrom: snap });
+    const rebooted = buildStack({ rehydrateFrom: snap, now: () => now });
 
-    // Replay of the aborted fill → F04 (crash rule 4, fail-closed).
+    // Until its TTL, the rehydrated reservation still occupies the window
+    // (conservative: the crashed packet is treated as possibly live).
+    const before = windowOf(rebooted);
+    expect(before.inFlight).toBe(TARGET_PER_DELTA);
+    expect(before.free).toBe(INITIAL_INVENTORY - TARGET_PER_DELTA);
+
+    // Replay of the aborted fill → F04 (crash rule 4, fail-closed) — the
+    // no-double-spend half of recovery.
     const replay = await sendFill(rebooted, 1);
     expect(replay.response.accept).toBe(false);
     if (!replay.response.accept) expect(replay.response.code).toBe('F04');
+
+    // Past the persisted expiry, the reservation expires-and-releases
+    // (crash rule 6) — the no-leaked-capacity half of recovery.
+    now = persistedReservations[0]!.expiresAt + 1;
+    const after = windowOf(rebooted);
+    expect(after.inFlight).toBe(0n);
+    expect(after.unsettled).toBe(0n);
+    expect(after.free).toBe(INITIAL_INVENTORY);
 
     // The next fill continues ABOVE the aborted reservation (crash rule 2):
     // nonce 2, cumulative stacked on the aborted watermark — never behind
@@ -746,6 +821,168 @@ describe('rolling engine — crash between debit and fulfill', () => {
     const advance = decodeAdvance(rebooted.legB.received[0]!);
     expect(advance.nonce).toBe('2');
     expect(advance.cumulativeAmount).toBe((TARGET_PER_DELTA * 2n).toString());
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Issue #49 — in-flight window: capacity, TTL alignment, settle-and-recycle
+// ---------------------------------------------------------------------------
+
+describe('rolling engine — in-flight window (issue #49)', () => {
+  it('window budget exhausted by in-flight packets → benign T04 insufficient_liquidity; releases restore capacity', async () => {
+    // Budget = exactly 2 packets. Hold two fills in flight (leg B pending).
+    const stack = buildStack({
+      windowBudget: TARGET_PER_DELTA * 2n,
+      rateProvider: () => ({ rate: '0.0004', at: Date.now() }),
+    });
+    const preimages = stackPreimages(stack);
+    const resolvers: (() => void)[] = [];
+    stack.legB.respond = (prepare) =>
+      new Promise<LegBResult>((resolve) => {
+        resolvers.push(() => {
+          const key = Buffer.from(prepare.executionCondition).toString(
+            'base64'
+          );
+          resolve({ type: 'fulfill', fulfillment: preimages.get(key)! });
+        });
+      });
+
+    const fill1 = sendFill(stack, 1);
+    const fill2 = sendFill(stack, 2);
+    // Let both fills reach the leg-B await (claim signing is async).
+    await vi.waitFor(() =>
+      expect(windowOf(stack).inFlight).toBe(TARGET_PER_DELTA * 2n)
+    );
+    expect(windowOf(stack).free).toBe(0n);
+
+    // Third fill exceeds the window → benign capacity refusal (same T04
+    // vocabulary as a reserves shortage), nothing new in flight.
+    stack.legB.respond = () => {
+      throw new Error('leg B must not be attempted for a refused fill');
+    };
+    const refused = await sendFill(stack, 3);
+    expect(refused.response.accept).toBe(false);
+    if (!refused.response.accept) {
+      expect(refused.response.code).toBe('T04');
+      expect(refused.response.rejectReason.code).toBe('insufficient_funds');
+      expect(decodeRejectData(refused.response.data)['reason']).toBe(
+        ROLLING_REJECT_REASONS.INSUFFICIENT_LIQUIDITY
+      );
+    }
+    expect(windowOf(stack).inFlight).toBe(TARGET_PER_DELTA * 2n);
+
+    // Resolve the held packets → reservations convert to unsettled.
+    for (const r of resolvers) r();
+    const [r1, r2] = await Promise.all([fill1, fill2]);
+    expect(r1.response.accept).toBe(true);
+    expect(r2.response.accept).toBe(true);
+    const w = windowOf(stack);
+    expect(w.inFlight).toBe(0n);
+    expect(w.unsettled).toBe(TARGET_PER_DELTA * 2n);
+    expect(w.free).toBe(0n);
+
+    // Settlement confirmation recycles the capacity (settle-and-recycle).
+    const reduced = stack.inventory.recordSettlement({
+      assetCode: ASSET,
+      chain: CHAIN,
+      channelId: CHANNEL_ID,
+      cumulativeAmount: TARGET_PER_DELTA * 2n,
+    });
+    expect(reduced).toBe(TARGET_PER_DELTA * 2n);
+    const settled = windowOf(stack);
+    expect(settled.unsettled).toBe(0n);
+    expect(settled.free).toBe(TARGET_PER_DELTA * 2n);
+    stack.legB.respond = (prepare) => {
+      const key = Buffer.from(prepare.executionCondition).toString('base64');
+      return { type: 'fulfill', fulfillment: preimages.get(key)! };
+    };
+    const retry = await sendFill(stack, 4);
+    expect(retry.response.accept).toBe(true);
+  });
+
+  it('reservation TTL is aligned with the leg-B expiry budget + grace (spec R7)', async () => {
+    const now = 1_700_000_000_000;
+    const stack = buildStack({
+      now: () => now,
+      legBBudgetMs: 10_000,
+      reservationGraceMs: 2_000,
+    });
+    let observedExpiry: number | undefined;
+    stack.legB.respond = (prepare) => {
+      const reservations = Object.values(
+        stack.inventory.reservationsSnapshot()
+      );
+      expect(reservations).toHaveLength(1);
+      observedExpiry = reservations[0]!.expiresAt;
+      const key = Buffer.from(prepare.executionCondition).toString('base64');
+      return {
+        type: 'fulfill',
+        fulfillment: stackPreimages(stack).get(key)!,
+      };
+    };
+    const { response } = await sendFill(stack, 1);
+    expect(response.accept).toBe(true);
+    // legBExpiry = now + budget (no leg-A expiry cap here); TTL adds grace.
+    expect(observedExpiry).toBe(now + 10_000 + 2_000);
+  });
+
+  it('AC-1: a long stream settles through a window budget ≪ notional volume; no permanent debit anywhere', async () => {
+    const FILLS = 60;
+    const BUDGET = TARGET_PER_DELTA * 5n; // 5-packet window
+    const SETTLE_EVERY = 4;
+    const stack = buildStack({
+      windowBudget: BUDGET,
+      rateProvider: () => ({ rate: '0.0004', at: Date.now() }),
+    });
+
+    let maxExposure = 0n;
+    let settledCumulative = 0n;
+    for (let seq = 1; seq <= FILLS; seq++) {
+      const { response } = await sendFill(stack, seq);
+      expect(response.accept).toBe(true);
+      const w = windowOf(stack);
+      const exposure = w.inFlight + w.unsettled;
+      if (exposure > maxExposure) maxExposure = exposure;
+      // Steady-state float: exposure never exceeds the window budget.
+      expect(exposure <= BUDGET).toBe(true);
+      if (seq % SETTLE_EVERY === 0) {
+        // Batched on-chain settlement confirms the latest cumulative
+        // watermark → liability shrinks, capacity recycles.
+        settledCumulative = TARGET_PER_DELTA * BigInt(seq);
+        stack.inventory.recordSettlement({
+          assetCode: ASSET,
+          chain: CHAIN,
+          channelId: CHANNEL_ID,
+          cumulativeAmount: settledCumulative,
+        });
+      }
+    }
+
+    const notionalDelivered = TARGET_PER_DELTA * BigInt(FILLS);
+    // The whole stream flowed through a float 12× smaller than notional.
+    expect(notionalDelivered).toBe(BUDGET * 12n);
+    expect(maxExposure <= BUDGET).toBe(true);
+    // AC-4: no permanent-debit path — available never moved.
+    expect(stack.inventory.get(ASSET, CHAIN)!.available).toBe(
+      INITIAL_INVENTORY
+    );
+    // Watermark integrity across the stream.
+    const entry = stack.channelState.get({
+      assetCode: ASSET,
+      chain: CHAIN,
+      senderPubkey: SENDER_PUBKEY,
+    })!;
+    expect(entry.nonce).toBe(BigInt(FILLS));
+    expect(entry.cumulativeAmount).toBe(notionalDelivered);
+    // Stale/replayed settlement confirmations are no-ops (monotone).
+    expect(
+      stack.inventory.recordSettlement({
+        assetCode: ASSET,
+        chain: CHAIN,
+        channelId: CHANNEL_ID,
+        cumulativeAmount: settledCumulative,
+      })
+    ).toBe(0n);
   });
 });
 

@@ -242,3 +242,265 @@ describe('SwapInventory — in-memory per-pair reserves (Story 12.4 AC-4)', () =
     expect(sol?.chain).toBe('solana:mainnet');
   });
 });
+
+// ---------------------------------------------------------------------------
+// Issue #49 — in-flight window reservation lifecycle
+// ---------------------------------------------------------------------------
+
+describe('SwapInventory — in-flight window (issue #49)', () => {
+  const ASSET = 'ETH';
+  const CHAIN = 'evm:base:8453';
+  const KEY = `${ASSET}:${CHAIN}`;
+
+  function build(opts?: {
+    windowBudget?: bigint;
+    available?: bigint;
+    now?: () => number;
+    defaultReservationTtlMs?: number;
+  }) {
+    return new SwapInventory({
+      balances: {
+        [KEY]: {
+          available: opts?.available ?? 1_000n,
+          total: opts?.available ?? 1_000n,
+          ...(opts?.windowBudget !== undefined && {
+            windowBudget: opts.windowBudget,
+          }),
+        },
+      },
+      ...(opts?.now && { clock: opts.now }),
+      ...(opts?.defaultReservationTtlMs !== undefined && {
+        defaultReservationTtlMs: opts.defaultReservationTtlMs,
+      }),
+    });
+  }
+
+  function windowOf(inv: SwapInventory) {
+    return inv
+      .windowSnapshot()
+      .find((w) => w.assetCode === ASSET && w.chain === CHAIN)!;
+  }
+
+  it('[P0] reserve → commit lifecycle: capacity formula budget − inFlight − unsettled', () => {
+    const inv = build({ windowBudget: 100n });
+    const w0 = windowOf(inv);
+    expect(w0).toMatchObject({
+      budget: 100n,
+      inFlight: 0n,
+      unsettled: 0n,
+      free: 100n,
+    });
+
+    const { reservationId } = inv.reserve({
+      assetCode: ASSET,
+      chain: CHAIN,
+      amount: 60n,
+    });
+    expect(windowOf(inv)).toMatchObject({ inFlight: 60n, free: 40n });
+    // available untouched — reservations are not debits.
+    expect(inv.get(ASSET, CHAIN)!.available).toBe(1_000n);
+
+    expect(
+      inv.commitReservation({
+        reservationId,
+        assetCode: ASSET,
+        chain: CHAIN,
+        amount: 60n,
+      })
+    ).toBe('committed');
+    expect(windowOf(inv)).toMatchObject({
+      inFlight: 0n,
+      unsettled: 60n,
+      free: 40n,
+    });
+  });
+
+  it('[P0] capacity refusal: INSUFFICIENT_INVENTORY when the window cannot fit the amount', () => {
+    const inv = build({ windowBudget: 100n });
+    inv.reserve({ assetCode: ASSET, chain: CHAIN, amount: 80n });
+    expect(() =>
+      inv.reserve({ assetCode: ASSET, chain: CHAIN, amount: 30n })
+    ).toThrowError(SwapInventoryError);
+    try {
+      inv.reserve({ assetCode: ASSET, chain: CHAIN, amount: 30n });
+    } catch (err) {
+      expect((err as SwapInventoryError).code).toBe('INSUFFICIENT_INVENTORY');
+      expect((err as Error).message).toMatch(/window capacity/);
+    }
+    // Non-positive amounts and unknown pools are rejected.
+    expect(() =>
+      inv.reserve({ assetCode: ASSET, chain: CHAIN, amount: 0n })
+    ).toThrowError(/positive/);
+    expect(() =>
+      inv.reserve({ assetCode: 'BTC', chain: CHAIN, amount: 1n })
+    ).toThrowError(/not initialized/);
+  });
+
+  it('[P0] the effective budget is clamped to available (a budget cannot advertise capital the maker lacks; legacy debits shrink it)', () => {
+    const inv = build({ windowBudget: 5_000n, available: 1_000n });
+    expect(windowOf(inv).budget).toBe(1_000n);
+    // A legacy permanent debit shrinks the rolling ceiling too.
+    inv.debit(ASSET, CHAIN, 400n);
+    expect(windowOf(inv).budget).toBe(600n);
+    expect(() =>
+      inv.reserve({ assetCode: ASSET, chain: CHAIN, amount: 601n })
+    ).toThrowError(/window capacity/);
+    // Absent windowBudget → ceiling degrades to available.
+    const noBudget = build();
+    expect(windowOf(noBudget).budget).toBe(1_000n);
+  });
+
+  it('[P0] TTL expiry frees a stalled reservation slot', () => {
+    let now = 0;
+    const inv = build({ windowBudget: 100n, now: () => now });
+    inv.reserve({
+      assetCode: ASSET,
+      chain: CHAIN,
+      amount: 100n,
+      ttlMs: 500,
+      id: 'stalled',
+    });
+    expect(() =>
+      inv.reserve({ assetCode: ASSET, chain: CHAIN, amount: 1n })
+    ).toThrowError(/window capacity/);
+    now = 501;
+    expect(windowOf(inv).inFlight).toBe(0n);
+    expect(
+      inv.reserve({ assetCode: ASSET, chain: CHAIN, amount: 100n })
+        .reservationId
+    ).toBeTruthy();
+    // The expired reservation is gone: releasing it reports false.
+    expect(inv.releaseReservation('stalled')).toBe(false);
+  });
+
+  it('[P0] releaseReservation is exactly-once', () => {
+    const inv = build();
+    const { reservationId } = inv.reserve({
+      assetCode: ASSET,
+      chain: CHAIN,
+      amount: 10n,
+    });
+    expect(inv.releaseReservation(reservationId)).toBe(true);
+    expect(inv.releaseReservation(reservationId)).toBe(false);
+    expect(windowOf(inv).inFlight).toBe(0n);
+  });
+
+  it('[P1] recordSettlement: monotone per channel, clamps to unsettled, recycles capacity', () => {
+    const inv = build({ windowBudget: 100n });
+    const { reservationId } = inv.reserve({
+      assetCode: ASSET,
+      chain: CHAIN,
+      amount: 100n,
+    });
+    inv.commitReservation({
+      reservationId,
+      assetCode: ASSET,
+      chain: CHAIN,
+      amount: 100n,
+    });
+    expect(windowOf(inv).free).toBe(0n);
+
+    // Partial settlement (cumulative watermark 40).
+    expect(
+      inv.recordSettlement({
+        assetCode: ASSET,
+        chain: CHAIN,
+        channelId: 'chan-1',
+        cumulativeAmount: 40n,
+      })
+    ).toBe(40n);
+    expect(windowOf(inv)).toMatchObject({ unsettled: 60n, free: 40n });
+
+    // Replay / stale confirmation → 0n no-op.
+    expect(
+      inv.recordSettlement({
+        assetCode: ASSET,
+        chain: CHAIN,
+        channelId: 'chan-1',
+        cumulativeAmount: 40n,
+      })
+    ).toBe(0n);
+    expect(
+      inv.recordSettlement({
+        assetCode: ASSET,
+        chain: CHAIN,
+        channelId: 'chan-1',
+        cumulativeAmount: 30n,
+      })
+    ).toBe(0n);
+    expect(windowOf(inv).unsettled).toBe(60n);
+
+    // Over-settlement (delta beyond liability) clamps at zero.
+    expect(
+      inv.recordSettlement({
+        assetCode: ASSET,
+        chain: CHAIN,
+        channelId: 'chan-1',
+        cumulativeAmount: 500n,
+      })
+    ).toBe(60n);
+    expect(windowOf(inv)).toMatchObject({ unsettled: 0n, free: 100n });
+  });
+
+  it('[P1] reservations + watermarks + unsettled round-trip through snapshots (rehydration)', () => {
+    let now = 1_000;
+    const inv = build({ windowBudget: 100n, now: () => now });
+    inv.reserve({
+      assetCode: ASSET,
+      chain: CHAIN,
+      amount: 25n,
+      ttlMs: 60_000,
+      id: 'live-1',
+    });
+    const c = inv.reserve({
+      assetCode: ASSET,
+      chain: CHAIN,
+      amount: 30n,
+    });
+    inv.commitReservation({
+      reservationId: c.reservationId,
+      assetCode: ASSET,
+      chain: CHAIN,
+      amount: 30n,
+    });
+    inv.recordSettlement({
+      assetCode: ASSET,
+      chain: CHAIN,
+      channelId: 'chan-9',
+      cumulativeAmount: 10n,
+    });
+
+    const rehydrated = new SwapInventory({
+      balances: Object.fromEntries(
+        inv.snapshot().map((b) => [
+          `${b.assetCode}:${b.chain}`,
+          {
+            available: b.available,
+            total: b.total,
+            unsettled: b.unsettled,
+            ...(b.windowBudget !== undefined && {
+              windowBudget: b.windowBudget,
+            }),
+            updatedAt: b.updatedAt,
+          },
+        ])
+      ),
+      reservations: inv.reservationsSnapshot(),
+      settledWatermarks: inv.settledWatermarksSnapshot(),
+      clock: () => now,
+    });
+    expect(windowOf(rehydrated)).toEqual(windowOf(inv));
+    // Watermark monotonicity survives: the replayed confirmation stays a no-op.
+    expect(
+      rehydrated.recordSettlement({
+        assetCode: ASSET,
+        chain: CHAIN,
+        channelId: 'chan-9',
+        cumulativeAmount: 10n,
+      })
+    ).toBe(0n);
+    // Expire-and-release applies to rehydrated reservations too.
+    now = 1_000 + 60_001;
+    expect(windowOf(rehydrated).inFlight).toBe(0n);
+  });
+});

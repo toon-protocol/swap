@@ -70,6 +70,11 @@ interface CliRawConfig {
     }[]
   >;
   inventory?: Record<string, string | number>;
+  /**
+   * Issue #49 — per-chain in-flight window ceiling for the rolling path
+   * (rolling-swap §8). Same keying as `inventory`.
+   */
+  windowBudget?: Record<string, string | number>;
   relayUrls?: string[];
   blsPort?: number;
   btpServerPort?: number;
@@ -159,6 +164,16 @@ function parseRawConfig(raw: CliRawConfig): SwapNodeConfig {
     }
   }
 
+  // Normalize windowBudget (issue #49) — same shape/guards as inventory.
+  let windowBudget: Record<string, bigint> | undefined;
+  if (raw.windowBudget) {
+    windowBudget = Object.create(null) as Record<string, bigint>;
+    for (const [chain, amt] of Object.entries(raw.windowBudget)) {
+      assertSafeKey(chain, 'windowBudget');
+      windowBudget[chain] = toBigInt(amt);
+    }
+  }
+
   const cfg: SwapNodeConfig = {
     swapPairs: (raw.swapPairs as SwapNodeConfig['swapPairs']) ?? [],
     chains: (raw.chains as SwapNodeConfig['chains']) ?? [],
@@ -166,6 +181,7 @@ function parseRawConfig(raw: CliRawConfig): SwapNodeConfig {
     inventory,
     relayUrls: raw.relayUrls ?? [],
   };
+  if (windowBudget) cfg.windowBudget = windowBudget;
   if (raw.mnemonic) cfg.mnemonic = raw.mnemonic;
   if (raw.secretKey) {
     // Strict 64-char hex validation — `Buffer.from(str, 'hex')` silently
