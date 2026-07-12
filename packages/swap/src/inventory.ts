@@ -17,7 +17,11 @@ export interface SwapInventoryBalance {
 }
 
 export interface SwapInventoryInit {
-  balances: Record<string, { available: bigint; total: bigint }>;
+  balances: Record<
+    string,
+    /** `updatedAt` — issue #46: preserved on rehydration from a persisted snapshot; defaults to `clock()` when omitted. */
+    { available: bigint; total: bigint; updatedAt?: number }
+  >;
   clock?: () => number;
 }
 
@@ -51,7 +55,7 @@ export class SwapInventory {
       this.entries.set(k, {
         available: v.available,
         total: v.total,
-        updatedAt: now,
+        updatedAt: v.updatedAt ?? now,
       });
     }
   }

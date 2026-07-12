@@ -22,7 +22,14 @@ export type SwapWalletErrorCode =
   | 'UNSUPPORTED_CHAIN'
   | 'DERIVATION_FAILED'
   | 'SIGNING_FAILED'
-  | 'INVALID_CONFIG';
+  | 'INVALID_CONFIG'
+  /**
+   * Issue #46 — the write-ahead persist of the channel watermark failed, so
+   * the claim was NOT issued (debit + reservation rolled back). Flows
+   * through the swap handler as ILP `T00 Internal error` like every other
+   * non-inventory swap node failure.
+   */
+  | 'PERSISTENCE_FAILED';
 
 export class SwapInventoryError extends Error {
   public readonly code: SwapInventoryErrorCode;
@@ -68,6 +75,14 @@ export class SwapWalletError extends Error {
  *                            connector.
  * `HANDLER_REGISTRATION_FAILED` — registering the kind:1059 swap handler
  *                                  on the registry failed.
+ * `STATE_LOAD_FAILED`      — issue #46: a persisted swap-state snapshot
+ *                            exists but could not be read/validated. Boot
+ *                            fails LOUDLY instead of silently resetting
+ *                            channel watermarks (delete the state file to
+ *                            intentionally reset).
+ * `STATE_PERSIST_FAILED`   — issue #46: the initial boot-time snapshot
+ *                            write failed; persistence was requested but is
+ *                            non-functional, so the swap node refuses to start.
  */
 export type SwapNodeStartErrorCode =
   | 'INVALID_CONFIG'
@@ -75,7 +90,9 @@ export type SwapNodeStartErrorCode =
   | 'MISSING_KEY'
   | 'UNSUPPORTED_CHAIN_FAMILY'
   | 'CONNECTOR_INIT_FAILED'
-  | 'HANDLER_REGISTRATION_FAILED';
+  | 'HANDLER_REGISTRATION_FAILED'
+  | 'STATE_LOAD_FAILED'
+  | 'STATE_PERSIST_FAILED';
 
 export class SwapNodeStartError extends Error {
   public readonly code: SwapNodeStartErrorCode;

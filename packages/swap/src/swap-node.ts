@@ -70,6 +70,12 @@ import {
 import type { PaymentChannelSigner } from './payment-channel-signer.js';
 import { MultiChainClaimIssuer } from './claim-issuer.js';
 import { SwapNodeStartError } from './errors.js';
+import {
+  JsonFileSwapStateStore,
+  SwapStatePersister,
+  PersistentSeenPacketIds,
+} from './state-store.js';
+import type { SwapStateStore, PersistedSwapState } from './state-store.js';
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -240,6 +246,25 @@ export interface SwapNodeConfig {
    * is forwarded verbatim; `startSwapNode()` does NOT size-cap it.
    */
   seenPacketIds?: Set<string>;
+
+  // --- State persistence (issue #46; at most one of statePath/stateStore) ---
+  /**
+   * Path to the swap node's durable state snapshot (JSON). When set, `startSwapNode`
+   * creates a {@link JsonFileSwapStateStore} at this path, rehydrates
+   * inventory / channel watermarks / sticky bindings / replay reservations
+   * from it, and persists (write-ahead) on every claim issuance. Persisted
+   * values WIN over config-supplied initial values for keys present in the
+   * snapshot — delete the file to intentionally reset. When neither this
+   * nor `stateStore` is set, the swap node runs in-memory as before (state is
+   * lost on restart).
+   */
+  statePath?: string;
+  /**
+   * Operator-supplied {@link SwapStateStore} implementation (e.g. a test
+   * double or a future sqlite backend). Mutually exclusive with
+   * `statePath`.
+   */
+  stateStore?: SwapStateStore;
 
   // --- Shared infra ---
   relayUrls: readonly string[];
@@ -536,6 +561,22 @@ export function validateConfig(config: SwapNodeConfig): void {
     );
   }
 
+  if (config.statePath !== undefined && config.stateStore !== undefined) {
+    throw new SwapNodeStartError(
+      'INVALID_CONFIG',
+      'SwapNodeConfig: provide either statePath or stateStore, not both'
+    );
+  }
+  if (
+    config.statePath !== undefined &&
+    (typeof config.statePath !== 'string' || config.statePath.length === 0)
+  ) {
+    throw new SwapNodeStartError(
+      'INVALID_CONFIG',
+      'SwapNodeConfig.statePath MUST be a non-empty string when set'
+    );
+  }
+
   if (!Array.isArray(config.swapPairs) || config.swapPairs.length === 0) {
     throw new SwapNodeStartError(
       'INVALID_CONFIG',
@@ -754,16 +795,64 @@ export async function startSwapNode(
     }
   }
 
+  // 4b. Issue #46 — durable state store + rehydration.
+  //
+  // A snapshot that exists but cannot be loaded FAILS boot loudly
+  // (STATE_LOAD_FAILED): silently booting from config would reset channel
+  // watermarks below claims already handed out — the exact desync this
+  // feature prevents. Delete the state file to intentionally reset.
+  const stateStore: SwapStateStore | undefined =
+    config.stateStore ??
+    (config.statePath !== undefined
+      ? new JsonFileSwapStateStore(config.statePath)
+      : undefined);
+  let persistedState: PersistedSwapState | null = null;
+  if (stateStore) {
+    try {
+      persistedState = stateStore.load();
+    } catch (err) {
+      throw new SwapNodeStartError(
+        'STATE_LOAD_FAILED',
+        `Failed to load persisted swap-node state${config.statePath ? ` from ${config.statePath}` : ''}: ${errSummary(err).message}`,
+        { cause: err }
+      );
+    }
+    if (persistedState) {
+      logger.info?.('swap.state.rehydrated', {
+        inventoryKeys: Object.keys(persistedState.inventory).length,
+        channelKeys: Object.keys(persistedState.channels).length,
+        bindings: Object.keys(persistedState.bindings).length,
+        seenPacketIds: persistedState.seenPacketIds.length,
+      });
+    }
+  }
+
   // 5. Inventory — map operator-supplied `Record<chain, bigint>` into the
   //    `SwapInventory` per-asset/per-chain shape. We key off pair.to.assetCode
   //    for each referenced chain.
-  const inventoryInit: Record<string, { available: bigint; total: bigint }> =
-    {};
+  //
+  //    Issue #46 — persisted entries then OVERLAY the config-derived values
+  //    (persisted wins): a restart must not reset spent inventory back to
+  //    the notional boot value. Config seeds only keys the snapshot has
+  //    never recorded.
+  const inventoryInit: Record<
+    string,
+    { available: bigint; total: bigint; updatedAt?: number }
+  > = {};
   for (const pair of config.swapPairs) {
     const chain = pair.to.chain;
     const asset = pair.to.assetCode;
     const bal = config.inventory[chain] ?? 0n;
     inventoryInit[`${asset}:${chain}`] = { available: bal, total: bal };
+  }
+  if (persistedState) {
+    for (const [k, v] of Object.entries(persistedState.inventory)) {
+      inventoryInit[k] = {
+        available: BigInt(v.available),
+        total: BigInt(v.total),
+        updatedAt: v.updatedAt,
+      };
+    }
   }
   const inventory = new SwapInventory({ balances: inventoryInit });
 
@@ -772,6 +861,13 @@ export async function startSwapNode(
   //    bootstrap we only know `chain`, not a sender — so we register each
   //    channel under `*` (wildcard) sender. The Story 12.8 E2E will replace
   //    this with per-sender provisioning as real peers connect.
+  //
+  //    Issue #46 — persisted watermarks OVERLAY config entries (persisted
+  //    wins; nonce/cumulative never regress across a restart). Persisted
+  //    keys ABSENT from config are restored too: channels provisioned
+  //    dynamically at runtime (`provisionChannel`) must keep their
+  //    watermarks — `provisionChannel` is a no-op for keys that already
+  //    exist, which protects the restored entries from being re-zeroed.
   const channelInit: Record<string, ChannelEntry> = {};
   for (const pair of config.swapPairs) {
     const entries = config.channels[pair.to.chain] ?? [];
@@ -780,10 +876,68 @@ export async function startSwapNode(
       channelInit[key] = { ...entry };
     }
   }
+  if (persistedState) {
+    for (const [k, v] of Object.entries(persistedState.channels)) {
+      channelInit[k] = {
+        channelId: v.channelId,
+        cumulativeAmount: BigInt(v.cumulativeAmount),
+        nonce: BigInt(v.nonce),
+        updatedAt: v.updatedAt,
+      };
+    }
+  }
   const channelState = new SwapChannelState({
     channels: channelInit,
     logger: { warn: logger.warn },
+    // Restored sticky bindings keep each sender pinned to the channel its
+    // existing balance proofs were issued against (dangling ones dropped).
+    ...(persistedState && { bindings: persistedState.bindings }),
   });
+
+  // 6b. Issue #46 — persister + persistent replay set.
+  //
+  // The replay set is swap-node-owned ONLY when the operator did not inject
+  // `config.seenPacketIds`. An operator-supplied set is forwarded verbatim
+  // (SDK contract) and NOT persisted — on restart the accepted replay
+  // window is that set's own bound; we surface this at `warn`.
+  let persistentSeen: PersistentSeenPacketIds | undefined;
+  if (stateStore && config.seenPacketIds === undefined) {
+    persistentSeen = new PersistentSeenPacketIds(
+      persistedState?.seenPacketIds ?? []
+    );
+  } else if (stateStore && config.seenPacketIds !== undefined) {
+    logger.warn?.('swap.state.seen_packet_ids_not_persisted', {
+      reason:
+        'operator-supplied seenPacketIds is used verbatim and is not included in the persisted snapshot; replay reservations reset on restart',
+    });
+  }
+  const persister = stateStore
+    ? new SwapStatePersister({
+        store: stateStore,
+        inventory,
+        channelState,
+        ...(persistentSeen && { seenPacketIds: persistentSeen }),
+      })
+    : undefined;
+  if (persister && persistentSeen) {
+    // Every replay reservation (added by the SDK handler BEFORE a claim is
+    // issued) hits disk synchronously — crash rule 4 in state-store.ts.
+    persistentSeen.setOnMutate(() => persister.persist());
+  }
+  if (persister) {
+    // Boot-time snapshot: verifies writability up front (fail fast instead
+    // of on the first claim) and materializes the merged config+persisted
+    // state so a crash before the first claim still restores correctly.
+    try {
+      persister.persist();
+    } catch (err) {
+      throw new SwapNodeStartError(
+        'STATE_PERSIST_FAILED',
+        `Failed to write initial swap-node state snapshot${config.statePath ? ` to ${config.statePath}` : ''}: ${errSummary(err).message}`,
+        { cause: err }
+      );
+    }
+  }
 
   // 7. signerAddresses map + claim issuer.
   const signerAddresses = buildSignerAddresses(config.swapPairs, swapNodeKeys);
@@ -792,6 +946,8 @@ export async function startSwapNode(
     signers,
     channelState,
     signerAddresses,
+    // Issue #46 — write-ahead persist before any claim leaves the process.
+    ...(persister && { persistState: () => persister.persist() }),
     logger: {
       debug: logger.debug,
       info: logger.info,
@@ -806,7 +962,14 @@ export async function startSwapNode(
     swapPairs: [...config.swapPairs],
     claimIssuer,
     ...(config.rateProvider && { rateProvider: config.rateProvider }),
-    ...(config.seenPacketIds && { seenPacketIds: config.seenPacketIds }),
+    // Issue #46 — prefer the operator's set (verbatim, SDK contract), else
+    // the swap-node-owned persistent replay set when persistence is enabled,
+    // else the SDK's default in-memory LRU.
+    ...((config.seenPacketIds ?? persistentSeen) && {
+      seenPacketIds: (config.seenPacketIds ?? persistentSeen) as NonNullable<
+        CreateSwapHandlerConfig['seenPacketIds']
+      >,
+    }),
     logger: {
       debug: logger.debug,
       info: logger.info,
@@ -1453,6 +1616,11 @@ export async function startSwapNode(
           });
         }
       }
+      // Issue #46 — deliberately NO persist here: `releaseAll()` zeroes the
+      // in-memory reservation bookkeeping for GC, but the on-disk snapshot
+      // must keep the last handed-out watermarks (they are what the next
+      // boot rehydrates). Persisting the zeroed state would be the
+      // watermark reset this feature exists to prevent.
       try {
         channelState.releaseAll();
       } catch (err) {

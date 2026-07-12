@@ -14,6 +14,10 @@
  *   SWAP_SECRET_KEY_HEX    — 64-char hex-encoded 32-byte secret key
  *   SWAP_BLS_PORT          — numeric port for /health server
  *   SWAP_RELAYS            — comma-separated relay WebSocket URLs
+ *   SWAP_STATE_PATH        — durable state snapshot path (issue #46);
+ *                            enables persistence of inventory, channel
+ *                            watermarks, sticky bindings + replay
+ *                            reservations across restarts
  *   TOON_CONNECTOR_URL     — parent BTP URL; activates embedded-with-parent mode
  *   TOON_PARENT_PEER_ID    — peer id for the parent (default: "apex")
  *   TOON_PARENT_AUTH_TOKEN — BTP auth token for the parent peer (default: "")
@@ -47,6 +51,8 @@ interface CliRawConfig {
   relayUrls?: string[];
   blsPort?: number;
   btpServerPort?: number;
+  /** Durable swap-state snapshot path (issue #46). */
+  statePath?: string;
   passphrase?: string;
   knownPeers?: { ilpAddress: string; btpUrl?: string }[];
   // Story 12.7 Review Pass #1 additions — operator-surfaced kind:10032 fields.
@@ -147,6 +153,7 @@ function parseRawConfig(raw: CliRawConfig): SwapNodeConfig {
   }
   if (raw.blsPort !== undefined) cfg.blsPort = raw.blsPort;
   if (raw.btpServerPort !== undefined) cfg.btpServerPort = raw.btpServerPort;
+  if (raw.statePath) cfg.statePath = raw.statePath;
   if (raw.passphrase) cfg.passphrase = raw.passphrase;
   if (raw.knownPeers) cfg.knownPeers = raw.knownPeers;
   if (raw.ilpAddress) cfg.ilpAddress = raw.ilpAddress;
@@ -199,6 +206,7 @@ function applyEnvOverlay(cfg: SwapNodeConfig): SwapNodeConfig {
       .map((s) => s.trim())
       .filter(Boolean);
   }
+  if (env['SWAP_STATE_PATH']) out.statePath = env['SWAP_STATE_PATH'];
   // Embedded-with-parent connector wiring (TOON_* env vars). Setting
   // TOON_CONNECTOR_URL activates the embedded-with-parent path; the
   // remaining TOON_* vars are optional refinements.
