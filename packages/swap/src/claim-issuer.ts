@@ -20,6 +20,7 @@ import type {
   IssueClaimParams,
   IssueClaimResult,
 } from '@toon-protocol/sdk';
+import type { SwapPair } from '@toon-protocol/core';
 
 import type { SwapInventory } from './inventory.js';
 import type { SwapChannelState, Reservation } from './channel-state.js';
@@ -313,5 +314,53 @@ export class MultiChainClaimIssuer implements ClaimIssuer {
       result.swapSignerAddress = swapSignerAddress;
     }
     return result;
+  }
+
+  /**
+   * Rolling-engine unwind (swap#47 AC-4): fully reverse a previously issued
+   * claim's inventory debit and channel reservation after the coupled leg-B
+   * PREPARE failed (reject / timeout / withheld preimage). Mirrors the
+   * signer-failure rollback in {@link issueClaim} step 4 byte-for-byte:
+   * credit + release + best-effort re-persist.
+   *
+   * Safety: per rolling-swap §3 R8, a channel claim attached to a PREPARE
+   * that terminates in a REJECT MUST NOT advance the redeemable watermark on
+   * the receiving side — so reusing the released nonce is protocol-correct.
+   * The residual exposure to a Byzantine counterparty that banks the voided
+   * claim anyway is the spec's designed per-window bound (§3.1), not a gap
+   * introduced here. If the re-persist fails (or the process crashes before
+   * it), disk keeps the pre-rollback snapshot — a safe over-reservation
+   * (state-store crash rule 3).
+   */
+  rollbackClaim(params: {
+    pair: SwapPair;
+    senderPubkey: string;
+    targetAmount: bigint;
+  }): void {
+    const targetChain = params.pair.to.chain;
+    const targetAsset = params.pair.to.assetCode;
+    this.inventory.credit(targetAsset, targetChain, params.targetAmount);
+    this.channelState.release({
+      assetCode: targetAsset,
+      chain: targetChain,
+      senderPubkey: params.senderPubkey,
+      cumulativeDelta: params.targetAmount,
+    });
+    if (this.persistState) {
+      try {
+        this.persistState();
+      } catch (persistErr) {
+        this.logger?.error?.('swap.rollbackClaim.persist_failed', {
+          err: persistErr,
+          chain: targetChain,
+          asset: targetAsset,
+        });
+      }
+    }
+    this.logger?.info?.('swap.rollbackClaim.ok', {
+      chain: targetChain,
+      asset: targetAsset,
+      targetAmount: params.targetAmount.toString(),
+    });
   }
 }

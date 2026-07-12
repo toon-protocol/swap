@@ -108,6 +108,46 @@ export type {
   RateStalenessLogger,
 } from './rate-staleness.js';
 
+// Rolling coupled-leg engine (issue #47 — rolling-swap §3)
+export {
+  RollingSwapEngine,
+  RollingSessionStore,
+  createConnectorLegBSender,
+  parseRollingFillPayload,
+  buildRollingReject,
+  ROLLING_PROTOCOL,
+  ROLLING_REJECT_REASONS,
+  ROLLING_FILL_CONTEXT_KIND,
+  DEFAULT_ROLLING_SESSION_TTL_MS,
+  DEFAULT_ROLLING_MAX_SESSIONS,
+  DEFAULT_LEG_B_BUDGET_MS,
+  DEFAULT_LEG_B_EXPIRY_MARGIN_MS,
+  DEFAULT_MIN_LEG_B_TIME_MS,
+} from './rolling-engine.js';
+export type {
+  RollingSwapEngineConfig,
+  RollingSession,
+  RollingSessionStoreConfig,
+  RollingFillPayload,
+  RollingAdvancePayload,
+  RollingAcceptRecord,
+  RollingFillRequest,
+  RollingFillResponse,
+  RollingRejectReason,
+  RollingSeenPacketIds,
+  LegBPrepare,
+  LegBResult,
+  LegBSender,
+  ConnectorLegBSenderOptions,
+} from './rolling-engine.js';
+
+// HTTP rate provider — CLI `rateProvider` wiring (issue #47 AC-3)
+export {
+  createHttpRateProvider,
+  DEFAULT_RATE_FETCH_TIMEOUT_MS,
+} from './rate-provider.js';
+export type { HttpRateProviderOptions } from './rate-provider.js';
+
 // Convenience re-export for operators (Story 12.7 AC-1) — do not wrap.
 export { createSwapHandler } from '@toon-protocol/sdk';
 export type { CreateSwapHandlerConfig } from '@toon-protocol/sdk';

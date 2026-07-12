@@ -83,6 +83,15 @@ import {
   withMaxRateAge,
 } from './rate-staleness.js';
 import type { MaxRateAgeConfig, SwapRateProvider } from './rate-staleness.js';
+import {
+  RollingSessionStore,
+  RollingSwapEngine,
+  ROLLING_REJECT_REASONS,
+  buildRollingReject,
+  createConnectorLegBSender,
+  parseRollingFillPayload,
+} from './rolling-engine.js';
+import type { LegBSender, RollingSession } from './rolling-engine.js';
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -296,6 +305,33 @@ export interface SwapNodeConfig {
    */
   stateStore?: SwapStateStore;
 
+  // --- Rolling coupled-leg engine (issue #47, rolling-swap §3) ---
+  /**
+   * Knobs for the rolling swap engine. The engine itself is ALWAYS wired
+   * (a fill for an unregistered session is a benign F06); these only tune
+   * its bounds. See `rolling-engine.ts` for semantics and defaults.
+   */
+  rolling?: {
+    /** Default session lifetime (ms) when a session has no explicit expiry. */
+    sessionTtlMs?: number;
+    /** Bound on concurrently registered sessions. */
+    maxSessions?: number;
+    /** Max leg-B round-trip budget (ms) when leg A's expiry allows it. */
+    legBBudgetMs?: number;
+    /** Leg-B expiry margin (ms) under leg-A expiry (spec R7). */
+    legBExpiryMarginMs?: number;
+    /** Reject fills whose remaining leg-A budget (ms) is below this. */
+    minLegBTimeMs?: number;
+  };
+  /**
+   * Leg-B egress override (tests / custom connectors). When omitted, the
+   * swap node wires {@link createConnectorLegBSender} over the effective
+   * connector — which requires the connector's conditioned-PREPARE
+   * origination seam; absent that, rolling fills are rejected fail-closed
+   * (never sent unconditioned — rolling-swap §3 R4).
+   */
+  rollingLegBSender?: LegBSender;
+
   // --- Shared infra ---
   relayUrls: readonly string[];
   knownPeers?: readonly { ilpAddress: string; btpUrl?: string }[];
@@ -443,8 +479,18 @@ export interface SwapNodeInstance {
   readonly connector?: EmbeddableConnectorLike;
   stop(): Promise<void>;
   health(): SwapNodeHealthResponse;
+  /**
+   * Register a rolling-swap session (issue #47) — the RFQ intake seam.
+   * Fill packets referencing an unregistered `streamNonce` are rejected
+   * benignly (F06 `unknown_session`). The RFQ transport story calls this
+   * when a kind:20033 quote request is answered; tests and operators may
+   * call it directly.
+   */
+  registerRollingSession(session: RollingSession): void;
   /** @internal — AC-10 test hook. */
   readonly _handlerRegistry?: HandlerRegistry;
+  /** @internal — issue #47 test hook (rolling-engine introspection). */
+  readonly _rollingEngine?: RollingSwapEngine;
 }
 
 export interface SwapNodeHealthResponse {
@@ -667,6 +713,35 @@ export function validateConfig(config: SwapNodeConfig): void {
         "SwapNodeConfig.maxRateAge requires a rateProvider: the staleness bound applies to the age of the maker's own rate-feed ticks, so a static pair.rate gives the guard nothing to measure. Supply a rateProvider that returns { rate, at } timestamped quotes."
       );
     }
+  }
+
+  if (config.rolling !== undefined) {
+    const knobs: readonly (keyof NonNullable<SwapNodeConfig['rolling']>)[] = [
+      'sessionTtlMs',
+      'maxSessions',
+      'legBBudgetMs',
+      'legBExpiryMarginMs',
+      'minLegBTimeMs',
+    ];
+    for (const k of knobs) {
+      const v = config.rolling[k];
+      if (v === undefined) continue;
+      if (typeof v !== 'number' || !Number.isFinite(v) || v <= 0) {
+        throw new SwapNodeStartError(
+          'INVALID_CONFIG',
+          `SwapNodeConfig.rolling.${k} MUST be a positive finite number`
+        );
+      }
+    }
+  }
+  if (
+    config.rollingLegBSender !== undefined &&
+    typeof config.rollingLegBSender !== 'function'
+  ) {
+    throw new SwapNodeStartError(
+      'INVALID_CONFIG',
+      'SwapNodeConfig.rollingLegBSender MUST be a function when set'
+    );
   }
 
   if (config.chainProviders !== undefined) {
@@ -1274,6 +1349,57 @@ export async function startSwapNode(
     }
   }
 
+  // 11a-pre. Rolling coupled-leg engine (issue #47, rolling-swap §3).
+  //
+  // Constructed unconditionally: without registered sessions every rolling
+  // fill is a benign F06, so an idle engine costs nothing. Shares the
+  // staleness guard (same feed-tick state as the legacy gate) and — when
+  // persistence is enabled — the persistent replay set, so rolling replay
+  // reservations hit disk synchronously (state-store crash rule 4) under
+  // `rolling:${streamNonce}:${seq}` keys, disjoint from gift-wrap ids.
+  const resolvedNodeId =
+    config.nodeId ?? `toon-swap-${identity.pubkey.slice(0, 16)}`;
+  const rollingLegBSender: LegBSender =
+    config.rollingLegBSender ??
+    (effectiveConnector
+      ? createConnectorLegBSender(effectiveConnector, {
+          nodeId: resolvedNodeId,
+          logger: { warn: logger.warn, info: logger.info },
+        })
+      : async () => ({
+          type: 'reject',
+          code: 'T00',
+          message: 'no connector available for leg-B egress',
+        }));
+  const rollingSessions = new RollingSessionStore({
+    ...(config.rolling?.sessionTtlMs !== undefined && {
+      ttlMs: config.rolling.sessionTtlMs,
+    }),
+    ...(config.rolling?.maxSessions !== undefined && {
+      maxSessions: config.rolling.maxSessions,
+    }),
+  });
+  const rollingSeen =
+    config.seenPacketIds ?? persistentSeen ?? new PersistentSeenPacketIds();
+  const rollingEngine = new RollingSwapEngine({
+    sessions: rollingSessions,
+    claimIssuer,
+    legBSender: rollingLegBSender,
+    seenPacketIds: rollingSeen,
+    ...(config.rateProvider && { rateProvider: config.rateProvider }),
+    ...(stalenessGuard && { stalenessGuard }),
+    logger: { info: logger.info, warn: logger.warn, error: logger.error },
+    ...(config.rolling?.legBBudgetMs !== undefined && {
+      legBBudgetMs: config.rolling.legBBudgetMs,
+    }),
+    ...(config.rolling?.legBExpiryMarginMs !== undefined && {
+      legBExpiryMarginMs: config.rolling.legBExpiryMarginMs,
+    }),
+    ...(config.rolling?.minLegBTimeMs !== undefined && {
+      minLegBTimeMs: config.rolling.minLegBTimeMs,
+    }),
+  });
+
   // 11a. Wire the HandlerRegistry to the connector's local-delivery path.
   //
   // Story 50.3 (SOL settlement leg, AC#4): inbound kind:1059 (NIP-59 gift-wrap)
@@ -1302,9 +1428,90 @@ export async function startSwapNode(
   const toonDecoder = (toon: string): NostrEvent =>
     decodeEventFromToon(Buffer.from(toon, 'base64'));
 
+  // Issue #47 dispatch matrix (condition class × payload class):
+  //
+  //   | executionCondition   | payload        | path                          |
+  //   |----------------------|----------------|-------------------------------|
+  //   | absent / all-zero    | TOON/gift-wrap | LEGACY, byte-for-byte         |
+  //   | absent / all-zero    | rolling fill   | reject F99 condition_required |
+  //   | non-zero (32B)       | rolling fill   | rolling engine (coupled legs) |
+  //   | non-zero (32B)       | anything else  | reject F99 (see below)        |
+  //
+  // The last row is load-bearing: the legacy handler cannot mint a
+  // sender-chosen preimage, so dispatching it would debit inventory and
+  // issue a claim only for the connector to convert the FULFILL into F99
+  // (contract rule 3) with nothing recorded upstream — a maker-side loss on
+  // every such packet. Rejecting BEFORE dispatch keeps the failure benign
+  // and stateless.
+  const decodeSenderCondition = (b64?: string): Uint8Array | null => {
+    if (typeof b64 !== 'string' || b64.length === 0) return null;
+    let buf: Buffer;
+    try {
+      buf = Buffer.from(b64, 'base64');
+    } catch {
+      return null;
+    }
+    if (buf.length !== 32) return null;
+    if (buf.every((b) => b === 0)) return null; // legacy class (contract §classes)
+    return new Uint8Array(buf);
+  };
+
   const handlePacket = async (
     request: HandlePacketRequest
   ): Promise<HandlePacketResponse> => {
+    const requestExt = request as HandlePacketRequest & {
+      executionCondition?: string;
+      expiresAt?: string;
+    };
+    const senderCondition = decodeSenderCondition(
+      requestExt.executionCondition
+    );
+    const rollingFill = parseRollingFillPayload(request.data);
+
+    if (rollingFill === 'malformed') {
+      // Self-identified rolling/1 traffic that violates the fill shape:
+      // reject F01 rather than letting it fall through to the legacy TOON
+      // parser's misleading F06.
+      return buildRollingReject({
+        code: 'F01',
+        semantic: 'invalid_request',
+        message: 'malformed rolling fill payload',
+        reason: ROLLING_REJECT_REASONS.MALFORMED_FILL,
+      }) as HandlePacketResponse;
+    }
+    if (senderCondition) {
+      if (rollingFill === null) {
+        return buildRollingReject({
+          code: 'F99',
+          semantic: 'application_error',
+          message:
+            'sender-chosen execution conditions are not supported on the legacy swap path',
+          reason: ROLLING_REJECT_REASONS.CONDITION_UNSUPPORTED_LEGACY,
+        }) as HandlePacketResponse;
+      }
+      return (await rollingEngine.handleFill({
+        amount: request.amount,
+        destination: request.destination,
+        executionCondition: senderCondition,
+        payload: rollingFill,
+        ...(requestExt.expiresAt !== undefined && {
+          expiresAt: requestExt.expiresAt,
+        }),
+      })) as HandlePacketResponse;
+    }
+    if (rollingFill !== null) {
+      // A rolling fill without a sender-chosen condition has NO coupling
+      // (spec R2: a zero condition is skipped by every verifier) — refuse
+      // rather than fill uncoupled.
+      return buildRollingReject({
+        code: 'F99',
+        semantic: 'application_error',
+        message: 'rolling fill requires a sender-chosen execution condition',
+        reason: ROLLING_REJECT_REASONS.CONDITION_REQUIRED,
+      }) as HandlePacketResponse;
+    }
+
+    // Legacy path (zero-condition gift-wrap) — unchanged below.
     let meta;
     try {
       meta = shallowParseToon(Buffer.from(request.data, 'base64'));
@@ -1667,6 +1874,10 @@ export async function startSwapNode(
     swapNodeKeys,
     ...(effectiveConnector !== undefined && { connector: effectiveConnector }),
     _handlerRegistry: registry,
+    _rollingEngine: rollingEngine,
+    registerRollingSession: (session: RollingSession) => {
+      rollingEngine.registerSession(session);
+    },
     health: getHealth,
     async stop() {
       if (stopped) return;
