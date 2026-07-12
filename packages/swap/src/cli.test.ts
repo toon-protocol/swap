@@ -368,3 +368,91 @@ describe('issue #46 — SWAP_STATE_PATH env overlay', () => {
     }
   });
 });
+
+// ===========================================================================
+// Issue #47 AC-3 — SWAP_RATE_URL wires the per-packet rateProvider
+// ===========================================================================
+
+describe('issue #47 — SWAP_RATE_URL rateProvider wiring', () => {
+  const rateFixturePath = resolve(
+    __dirname,
+    '..',
+    'fixtures',
+    'swap.config.json'
+  );
+
+  async function withEnvVars<T>(
+    overrides: Record<string, string | undefined>,
+    fn: () => Promise<T>
+  ): Promise<T> {
+    const prev: Record<string, string | undefined> = {};
+    for (const k of Object.keys(overrides)) prev[k] = process.env[k];
+    try {
+      for (const [k, v] of Object.entries(overrides)) {
+        if (v === undefined) {
+          // eslint-disable-next-line @typescript-eslint/no-dynamic-delete
+          delete process.env[k];
+        } else process.env[k] = v;
+      }
+      return await fn();
+    } finally {
+      for (const [k, v] of Object.entries(prev)) {
+        if (v === undefined) {
+          // eslint-disable-next-line @typescript-eslint/no-dynamic-delete
+          delete process.env[k];
+        } else process.env[k] = v;
+      }
+    }
+  }
+
+  it('[P1] SWAP_RATE_URL + SWAP_MAX_RATE_AGE_MS boots — proving the provider was wired (maxRateAge without a rateProvider is INVALID_CONFIG)', async () => {
+    const mod = (await import('./cli.js')) as {
+      main: (argv: string[]) => Promise<{ stop: () => Promise<void> }>;
+    };
+    const instance = await withEnvVars(
+      {
+        SWAP_RATE_URL: 'http://127.0.0.1:9/rates',
+        SWAP_MAX_RATE_AGE_MS: '1500',
+      },
+      () => mod.main(['--config', rateFixturePath])
+    );
+    try {
+      expect(instance).toBeDefined();
+    } finally {
+      await instance.stop();
+    }
+  });
+
+  it('[P1] SWAP_MAX_RATE_AGE_MS WITHOUT SWAP_RATE_URL still fails INVALID_CONFIG (control)', async () => {
+    const mod = (await import('./cli.js')) as {
+      main: (argv: string[]) => Promise<unknown>;
+    };
+    await withEnvVars(
+      { SWAP_RATE_URL: undefined, SWAP_MAX_RATE_AGE_MS: '1500' },
+      async () => {
+        await expect(
+          mod.main(['--config', rateFixturePath])
+        ).rejects.toMatchObject({ code: 'INVALID_CONFIG' });
+      }
+    );
+  });
+
+  it('[P2] invalid SWAP_RATE_URL / SWAP_RATE_TIMEOUT_MS throw before boot', async () => {
+    const mod = (await import('./cli.js')) as {
+      main: (argv: string[]) => Promise<unknown>;
+    };
+    await withEnvVars({ SWAP_RATE_URL: 'not-a-url' }, async () => {
+      await expect(mod.main(['--config', rateFixturePath])).rejects.toThrow(
+        /http\(s\) URL/
+      );
+    });
+    await withEnvVars(
+      { SWAP_RATE_URL: 'http://feed.local/rates', SWAP_RATE_TIMEOUT_MS: '-5' },
+      async () => {
+        await expect(mod.main(['--config', rateFixturePath])).rejects.toThrow(
+          /SWAP_RATE_TIMEOUT_MS/
+        );
+      }
+    );
+  });
+});

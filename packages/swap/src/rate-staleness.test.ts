@@ -249,9 +249,10 @@ describe('buildStaleRateReject — the reject contract', () => {
       code: STALE_RATE_SEMANTIC_REASON,
       message: STALE_RATE_REJECT_MESSAGE,
     });
-    // 'timeout' → T00 in connector <=3.20.1 REJECT_CODE_MAP (T-class,
-    // retryable). Flip to 'stale_rate' when the connector maps it to T99.
-    expect(STALE_RATE_SEMANTIC_REASON).toBe('timeout');
+    // 'stale_rate' → native wire T99 since connector 3.29.0 added the
+    // REJECT_CODE_MAP entry (this package pins ^3.29.1). Still T-class,
+    // retryable — the benign contract is preserved with the exact code.
+    expect(STALE_RATE_SEMANTIC_REASON).toBe('stale_rate');
   });
 });
 

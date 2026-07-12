@@ -36,16 +36,13 @@
  * - `data`: base64 JSON {@link StaleRateRejectData} —
  *   `{"reason":"stale_rate","maxRateAgeMs":…,"lastRateAt":…,"pair":…}`
  * - `rejectReason.code`: {@link STALE_RATE_SEMANTIC_REASON} (`'timeout'`).
- *   WIRE GOTCHA: the published connector (3.20.1, highest on npm) re-encodes
- *   `rejectReason.code` through its `REJECT_CODE_MAP`, which has no
- *   `stale_rate`/T99 entry — an unknown semantic collapses to F99 (F-class,
- *   "don't retry"), which would invert the benign-retry contract. `'timeout'`
- *   maps to wire code T00 (T-class), preserving retry semantics; `message`
- *   and `data` pass through verbatim, so the sender's authoritative
- *   discriminator is `data.reason === 'stale_rate'` (fallback:
- *   `message === 'stale_rate'`), NOT the wire code. Once the connector's
- *   `REJECT_CODE_MAP` gains `stale_rate: 'T99'`, flip
- *   {@link STALE_RATE_SEMANTIC_REASON} to `'stale_rate'` for native T99.
+ *   Since connector 3.29.0 (this package pins ^3.29.1) the connector's
+ *   `REJECT_CODE_MAP` carries `stale_rate: 'T99'`, so the semantic reason
+ *   re-encodes to native wire code T99 (T-class, retryable) end-to-end —
+ *   the historical `'timeout'`→T00 workaround for ≤3.20.1 is retired.
+ *   `message` and `data` pass through verbatim; the sender's authoritative
+ *   discriminator remains `data.reason === 'stale_rate'` (fallback:
+ *   `message === 'stale_rate'`), NOT the wire code.
  *
  * ## Knob semantics
  *
@@ -94,11 +91,14 @@ export const STALE_RATE_REASON = 'stale_rate';
 /**
  * Semantic reject reason fed to the connector's PaymentHandlerAdapter.
  *
- * `'timeout'` → wire code T00 on connector <=3.20.1 (`REJECT_CODE_MAP`),
- * keeping the reject T-class on today's wire. Flip to `'stale_rate'` when the
- * connector's map gains a `stale_rate: 'T99'` entry (connector follow-up).
+ * `'stale_rate'` → wire code T99 since connector 3.29.0 added the
+ * `stale_rate: 'T99'` `REJECT_CODE_MAP` entry (this package pins ^3.29.1),
+ * closing the swap#48 wire gotcha: the reject is now natively T-class T99
+ * end-to-end. Senders' authoritative discriminator remains
+ * `data.reason === 'stale_rate'` (fallback: `message === 'stale_rate'`),
+ * never the wire code.
  */
-export const STALE_RATE_SEMANTIC_REASON = 'timeout';
+export const STALE_RATE_SEMANTIC_REASON = 'stale_rate';
 
 /**
  * Structured reject payload, base64-JSON-encoded into the ILP reject `data`

@@ -28,12 +28,22 @@
  *   SWAP_MAX_RATE_AGE      — full per-chain/per-pair maxRateAge config as JSON,
  *                            e.g. '{"defaultMs":3000,"perChain":{"mina":15000}}'
  *                            (SWAP_MAX_RATE_AGE_MS still overrides defaultMs)
+ *   SWAP_RATE_URL          — HTTP JSON rate feed (issue #47 AC-3): wires the
+ *                            per-packet `rateProvider` so deployed swap nodes
+ *                            price every fill at the feed's current tick
+ *                            instead of the config-frozen pair.rate. Accepted
+ *                            response shapes: {"rate":"0.0004","at":<unix-ms>}
+ *                            or a map keyed by pairKey (optionally under
+ *                            "rates"). Timestamped ("at") responses arm the
+ *                            SWAP_MAX_RATE_AGE staleness guard.
+ *   SWAP_RATE_TIMEOUT_MS   — per-request feed timeout (default 1500)
  *
  * NOTE on maxRateAge (swap#48): the staleness bound applies to the maker's
  * own rate-feed ticks, so it REQUIRES a `rateProvider` returning timestamped
- * quotes — which only programmatic `startSwapNode()` embeddings can supply.
- * Setting it on a static-rate JSON-config swap node fails boot with
- * INVALID_CONFIG (loud by design; a static rate has no age to measure).
+ * quotes — set SWAP_RATE_URL (timestamped responses) or use a programmatic
+ * `startSwapNode()` embedding. Setting it on a static-rate JSON-config swap
+ * node fails boot with INVALID_CONFIG (loud by design; a static rate has no
+ * age to measure).
  */
 
 import { parseArgs } from 'node:util';
@@ -43,6 +53,7 @@ import { pathToFileURL } from 'node:url';
 
 import { startSwapNode } from './swap-node.js';
 import type { SwapNodeConfig, SwapNodeInstance } from './swap-node.js';
+import { createHttpRateProvider } from './rate-provider.js';
 
 interface CliRawConfig {
   mnemonic?: string;
@@ -262,6 +273,25 @@ function applyEnvOverlay(cfg: SwapNodeConfig): SwapNodeConfig {
       throw new Error('SWAP_MAX_RATE_AGE_MS must be a positive integer (ms)');
     }
     out.maxRateAge = { ...(out.maxRateAge ?? {}), defaultMs: ms };
+  }
+  // Fresh per-packet rate feed (issue #47 AC-3). Deployed swap nodes have
+  // always priced at the config-frozen pair.rate because nothing wired the
+  // SDK's per-packet rateProvider hook; SWAP_RATE_URL closes that gap.
+  if (env['SWAP_RATE_URL']) {
+    let timeoutMs: number | undefined;
+    if (env['SWAP_RATE_TIMEOUT_MS']) {
+      timeoutMs = Number(env['SWAP_RATE_TIMEOUT_MS']);
+      if (
+        !Number.isFinite(timeoutMs) ||
+        !Number.isInteger(timeoutMs) ||
+        timeoutMs <= 0
+      ) {
+        throw new Error('SWAP_RATE_TIMEOUT_MS must be a positive integer (ms)');
+      }
+    }
+    out.rateProvider = createHttpRateProvider(env['SWAP_RATE_URL'], {
+      ...(timeoutMs !== undefined && { timeoutMs }),
+    });
   }
   return out;
 }
