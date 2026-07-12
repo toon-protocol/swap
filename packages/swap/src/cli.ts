@@ -23,6 +23,17 @@
  *   TOON_PARENT_AUTH_TOKEN — BTP auth token for the parent peer (default: "")
  *   TOON_ILP_ADDRESS       — advertised ILP address + self-route prefix
  *   TOON_NODE_ID           — connector nodeId override (default: toon-swap-<pk16>)
+ *   SWAP_MAX_RATE_AGE_MS   — maker staleness bound default (positive integer ms;
+ *                            sets/overrides maxRateAge.defaultMs)
+ *   SWAP_MAX_RATE_AGE      — full per-chain/per-pair maxRateAge config as JSON,
+ *                            e.g. '{"defaultMs":3000,"perChain":{"mina":15000}}'
+ *                            (SWAP_MAX_RATE_AGE_MS still overrides defaultMs)
+ *
+ * NOTE on maxRateAge (swap#48): the staleness bound applies to the maker's
+ * own rate-feed ticks, so it REQUIRES a `rateProvider` returning timestamped
+ * quotes — which only programmatic `startSwapNode()` embeddings can supply.
+ * Setting it on a static-rate JSON-config swap node fails boot with
+ * INVALID_CONFIG (loud by design; a static rate has no age to measure).
  */
 
 import { parseArgs } from 'node:util';
@@ -79,6 +90,10 @@ interface CliRawConfig {
   // Embedded-connector ClaimReceiver signer + parent treasury address.
   settlementPrivateKey?: string;
   parentEvmAddress?: string;
+  // Maker staleness bound(s) — swap#48. Forwarded verbatim; startSwapNode()'s
+  // validateConfig() enforces the shape AND the rateProvider requirement
+  // (see the maxRateAge NOTE in the header).
+  maxRateAge?: unknown;
 }
 
 function toBigInt(v: unknown): bigint {
@@ -176,6 +191,9 @@ function parseRawConfig(raw: CliRawConfig): SwapNodeConfig {
     cfg.settlementPrivateKey = raw.settlementPrivateKey;
   }
   if (raw.parentEvmAddress) cfg.parentEvmAddress = raw.parentEvmAddress;
+  if (raw.maxRateAge !== undefined) {
+    cfg.maxRateAge = raw.maxRateAge as SwapNodeConfig['maxRateAge'];
+  }
   return cfg;
 }
 
@@ -217,6 +235,34 @@ function applyEnvOverlay(cfg: SwapNodeConfig): SwapNodeConfig {
   }
   if (env['TOON_ILP_ADDRESS']) out.ilpAddress = env['TOON_ILP_ADDRESS'];
   if (env['TOON_NODE_ID']) out.nodeId = env['TOON_NODE_ID'];
+  // Maker staleness bound(s) — swap#48. SWAP_MAX_RATE_AGE replaces the whole
+  // structure; SWAP_MAX_RATE_AGE_MS then overrides just defaultMs (so the two
+  // compose: JSON for per-chain/per-pair shape, _MS for a quick default).
+  if (env['SWAP_MAX_RATE_AGE']) {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(env['SWAP_MAX_RATE_AGE']);
+    } catch {
+      throw new Error(
+        'SWAP_MAX_RATE_AGE must be valid JSON, e.g. {"defaultMs":3000,"perChain":{"mina":15000}}'
+      );
+    }
+    if (
+      typeof parsed !== 'object' ||
+      parsed === null ||
+      Array.isArray(parsed)
+    ) {
+      throw new Error('SWAP_MAX_RATE_AGE must be a JSON object');
+    }
+    out.maxRateAge = parsed as SwapNodeConfig['maxRateAge'];
+  }
+  if (env['SWAP_MAX_RATE_AGE_MS']) {
+    const ms = Number(env['SWAP_MAX_RATE_AGE_MS']);
+    if (!Number.isFinite(ms) || !Number.isInteger(ms) || ms <= 0) {
+      throw new Error('SWAP_MAX_RATE_AGE_MS must be a positive integer (ms)');
+    }
+    out.maxRateAge = { ...(out.maxRateAge ?? {}), defaultMs: ms };
+  }
   return out;
 }
 

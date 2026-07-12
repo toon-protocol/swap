@@ -81,6 +81,33 @@ export type {
 export { SwapNodeStartError } from './errors.js';
 export type { SwapNodeStartErrorCode } from './errors.js';
 
+// Maker staleness reject — maxRateAge (toon-protocol/swap#48, rolling-swap §4)
+export {
+  RateFreshnessGuard,
+  withMaxRateAge,
+  buildStaleRateReject,
+  normalizeRateProvider,
+  validateMaxRateAgeConfig,
+  pairKey,
+  StaleRateError,
+  STALE_RATE_REJECT_CODE,
+  STALE_RATE_REJECT_MESSAGE,
+  STALE_RATE_REASON,
+  STALE_RATE_SEMANTIC_REASON,
+  RECOMMENDED_MAX_RATE_AGE_MS,
+} from './rate-staleness.js';
+export type {
+  MaxRateAgeConfig,
+  SwapRateProvider,
+  SwapRateQuote,
+  TimestampedRate,
+  StaleRateRejectData,
+  FreshnessVerdict,
+  RateFreshnessGuardConfig,
+  WithMaxRateAgeOptions,
+  RateStalenessLogger,
+} from './rate-staleness.js';
+
 // Convenience re-export for operators (Story 12.7 AC-1) — do not wrap.
 export { createSwapHandler } from '@toon-protocol/sdk';
 export type { CreateSwapHandlerConfig } from '@toon-protocol/sdk';
