@@ -11,10 +11,10 @@
  *
  *   1. The parent peer config (`relation: 'parent'`, self-route + default-up
  *      route) is accepted by the connector constructor — a rename or schema
- *      change there would fire `mill.connector.auto_create_failed` and the
- *      Mill would silently boot connectorless.
+ *      change there would fire `swap.connector.auto_create_failed` and the
+ *      swap node would silently boot connectorless.
  *   2. The `setPacketHandler` local-delivery seam still exists on the real
- *      connector (`mill.connector.packet_handler_wired`); without it inbound
+ *      connector (`swap.connector.packet_handler_wired`); without it inbound
  *      kind:1059 swap packets can never reach the swap handler.
  *   3. Boot MUST NOT abort when the parent is unreachable (R-8N2 — the BTP
  *      dial retries in the background), and `stop()` tears the auto-created
@@ -23,8 +23,8 @@
 
 import { describe, it, expect } from 'vitest';
 
-import { startMill } from './mill.js';
-import type { MillConfig } from './mill.js';
+import { startSwapNode } from './swap-node.js';
+import type { SwapNodeConfig } from './swap-node.js';
 
 const FIXTURE_MNEMONIC =
   'abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about';
@@ -32,7 +32,7 @@ const FIXTURE_MNEMONIC =
 /** Ephemeral-range BTP port; singleFork-free suite so keep it randomized. */
 const BTP_PORT = 20000 + Math.floor(Math.random() * 20000);
 
-function buildConfig(events: string[]): MillConfig {
+function buildConfig(events: string[]): SwapNodeConfig {
   return {
     mnemonic: FIXTURE_MNEMONIC,
     swapPairs: [
@@ -77,20 +77,20 @@ function buildConfig(events: string[]): MillConfig {
 describe('embedded child-connector boot (connector migration smoke, #45)', () => {
   it('[P0] auto-creates a real ConnectorNode with a parent peer and survives an unreachable parent', async () => {
     const events: string[] = [];
-    const instance = await startMill(buildConfig(events));
+    const instance = await startSwapNode(buildConfig(events));
     try {
       // The auto-create path accepted the parent-peer + routes config on the
       // REAL installed connector (no constructor rejection).
-      expect(events).toContain('mill.connector.embedded_with_parent');
-      expect(events).not.toContain('mill.connector.auto_create_failed');
+      expect(events).toContain('swap.connector.embedded_with_parent');
+      expect(events).not.toContain('swap.connector.auto_create_failed');
 
       // The local-delivery seam is intact on the real connector.
-      expect(events).toContain('mill.connector.packet_handler_wired');
-      expect(events).not.toContain('mill.connector.packet_handler_unavailable');
+      expect(events).toContain('swap.connector.packet_handler_wired');
+      expect(events).not.toContain('swap.connector.packet_handler_unavailable');
 
       // R-8N2: connector .start() resolved despite the dead parent.
-      expect(events).toContain('mill.connector.started');
-      expect(events).not.toContain('mill.connector.start_failed');
+      expect(events).toContain('swap.connector.started');
+      expect(events).not.toContain('swap.connector.start_failed');
 
       expect(instance.connector).toBeDefined();
       expect(typeof instance.connector?.setPacketHandler).toBe('function');

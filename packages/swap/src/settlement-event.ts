@@ -1,7 +1,7 @@
 /**
  * Settlement event payload — Story D3.
  *
- * When a Mill-issued claim is settled on-chain, the Mill emits a
+ * When a swap-node-issued claim is settled on-chain, the swap node emits a
  * `SettlementEvent` describing the on-chain transaction. Downstream
  * consumers (the townhouse-web earnings aggregator, story D4) read
  * `txHash` + `chain` to render block-explorer deeplinks.
@@ -19,7 +19,7 @@
 export type SettlementChain = 'evm' | 'solana';
 
 /**
- * Settlement event emitted by the Mill when a claim is settled on-chain.
+ * Settlement event emitted by the swap node when a claim is settled on-chain.
  *
  * Field semantics:
  * - `txHash`: the on-chain transaction identifier.
@@ -36,7 +36,7 @@ export type SettlementChain = 'evm' | 'solana';
  *   string, target micro-units).
  * - `nonce`: balance-proof nonce settled (decimal string).
  * - `recipient`: the chain-specific payout address (the sender's address).
- * - `settledAt`: ms-epoch timestamp the Mill recorded the settlement.
+ * - `settledAt`: ms-epoch timestamp the swap node recorded the settlement.
  *
  * @stable — D4 earnings aggregator depends on `txHash` + `chain`.
  * @since D3
@@ -58,7 +58,7 @@ export interface SettlementEvent {
   nonce: string;
   /** Chain-specific payout address (sender). */
   recipient: string;
-  /** ms-epoch the Mill recorded the settlement. */
+  /** ms-epoch the swap node recorded the settlement. */
   settledAt: number;
 }
 

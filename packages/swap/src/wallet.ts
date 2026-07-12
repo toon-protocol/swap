@@ -1,5 +1,5 @@
 /**
- * `deriveMillKeys` — BIP-44 multi-chain HD key derivation (Story 12.4 AC-3).
+ * `deriveSwapNodeKeys` — BIP-44 multi-chain HD key derivation (Story 12.4 AC-3).
  *
  * Default account index is 2 (D12-011 — distinct from the connector's
  * account index 1 so one mnemonic governs both sides).
@@ -21,11 +21,11 @@ import { keccak_256 } from '@noble/hashes/sha3.js';
 import { bytesToHex } from '@noble/hashes/utils.js';
 import { derivePath as ed25519DerivePath } from 'ed25519-hd-key';
 
-import { MillWalletError } from './errors.js';
+import { SwapWalletError } from './errors.js';
 
-export type MillChainKind = 'evm' | 'mina' | 'solana';
+export type SwapNodeChainKind = 'evm' | 'mina' | 'solana';
 
-export interface MillKeys {
+export interface SwapNodeKeys {
   evm?: {
     privateKey: Uint8Array;
     address: `0x${string}`;
@@ -43,9 +43,9 @@ export interface MillKeys {
   };
 }
 
-export interface DeriveMillKeysInput {
+export interface DeriveSwapNodeKeysInput {
   mnemonic: string;
-  chains: readonly MillChainKind[];
+  chains: readonly SwapNodeChainKind[];
   passphrase?: string;
   accountIndex?: number;
   addressIndex?: number;
@@ -53,9 +53,9 @@ export interface DeriveMillKeysInput {
 
 const MAX_BIP32_INDEX = 0x7fffffff;
 
-export async function deriveMillKeys(
-  input: DeriveMillKeysInput
-): Promise<MillKeys> {
+export async function deriveSwapNodeKeys(
+  input: DeriveSwapNodeKeysInput
+): Promise<SwapNodeKeys> {
   const {
     mnemonic,
     chains,
@@ -65,7 +65,7 @@ export async function deriveMillKeys(
   } = input;
 
   if (!validateMnemonic(mnemonic, wordlist)) {
-    throw new MillWalletError('INVALID_MNEMONIC', 'Invalid BIP-39 mnemonic');
+    throw new SwapWalletError('INVALID_MNEMONIC', 'Invalid BIP-39 mnemonic');
   }
 
   if (
@@ -73,13 +73,13 @@ export async function deriveMillKeys(
     accountIndex < 0 ||
     accountIndex > MAX_BIP32_INDEX
   ) {
-    throw new MillWalletError(
+    throw new SwapWalletError(
       'DERIVATION_FAILED',
       `Invalid accountIndex: ${String(accountIndex)}`
     );
   }
 
-  const result: MillKeys = {};
+  const result: SwapNodeKeys = {};
   if (chains.length === 0) {
     return result;
   }
@@ -100,8 +100,8 @@ export async function deriveMillKeys(
 
     return result;
   } catch (err) {
-    if (err instanceof MillWalletError) throw err;
-    throw new MillWalletError(
+    if (err instanceof SwapWalletError) throw err;
+    throw new SwapWalletError(
       'DERIVATION_FAILED',
       `Key derivation failed: ${
         err instanceof Error ? err.message : String(err)
@@ -123,11 +123,11 @@ function deriveEvm(
   seed: Uint8Array,
   accountIndex: number,
   addressIndex: number
-): NonNullable<MillKeys['evm']> {
+): NonNullable<SwapNodeKeys['evm']> {
   const path = `m/44'/60'/${accountIndex}'/0/${addressIndex}`;
   const hdKey = HDKey.fromMasterSeed(seed).derive(path);
   if (!hdKey.privateKey) {
-    throw new MillWalletError(
+    throw new SwapWalletError(
       'DERIVATION_FAILED',
       `EVM private key missing at ${path}`
     );
@@ -164,11 +164,11 @@ function deriveMina(
   seed: Uint8Array,
   accountIndex: number,
   addressIndex: number
-): NonNullable<MillKeys['mina']> {
+): NonNullable<SwapNodeKeys['mina']> {
   const path = `m/44'/12586'/${accountIndex}'/0/${addressIndex}`;
   const hdKey = HDKey.fromMasterSeed(seed).derive(path);
   if (!hdKey.privateKey) {
-    throw new MillWalletError(
+    throw new SwapWalletError(
       'DERIVATION_FAILED',
       `Mina private key missing at ${path}`
     );
@@ -181,7 +181,7 @@ function deriveMina(
   // to guarantee the value is in-domain).
   const scalar = new Uint8Array(hdKey.privateKey);
   if (scalar.length !== 32) {
-    throw new MillWalletError(
+    throw new SwapWalletError(
       'DERIVATION_FAILED',
       `Mina scalar must be 32 bytes (got ${scalar.length})`
     );
@@ -220,7 +220,7 @@ function deriveMina(
 function deriveSolana(
   seed: Uint8Array,
   accountIndex: number
-): NonNullable<MillKeys['solana']> {
+): NonNullable<SwapNodeKeys['solana']> {
   const path = `m/44'/501'/${accountIndex}'/0'/0'`;
   const seedHex = bytesToHex(seed);
   const { key } = ed25519DerivePath(path, seedHex);

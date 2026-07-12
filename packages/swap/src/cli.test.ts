@@ -1,13 +1,13 @@
 /**
- * ATDD RED-phase tests for the Mill CLI (`packages/mill/src/cli.ts`, Story 12.7 AC-9).
+ * ATDD RED-phase tests for the swap node CLI (`packages/swap/src/cli.ts`, Story 12.7 AC-9).
  *
  * The CLI mirrors `packages/town/src/cli.ts`:
  *   - shebang `#!/usr/bin/env node`
  *   - `main(argv): Promise<void>` exported AND self-invoked when run as entrypoint
- *   - `--config <path>` reads JSON config file (default `./mill.config.json`)
- *   - env overlay: MILL_MNEMONIC, MILL_SECRET_KEY_HEX, MILL_BLS_PORT, MILL_RELAYS
+ *   - `--config <path>` reads JSON config file (default `./swap.config.json`)
+ *   - env overlay: SWAP_MNEMONIC, SWAP_SECRET_KEY_HEX, SWAP_BLS_PORT, SWAP_RELAYS
  *   - SIGINT / SIGTERM → instance.stop() → process.exit(0)
- *   - prints "Mill listening on http://localhost:<port>"
+ *   - prints "Swap node listening on http://localhost:<port>"
  *
  * All describe/it blocks are `.skip` — remove .skip as dev delivers each piece.
  */
@@ -16,7 +16,7 @@ import { describe, it, expect } from 'vitest';
 import { existsSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 
-describe('AC-9 Mill CLI — structural guarantees', () => {
+describe('AC-9 swap node CLI — structural guarantees', () => {
   it('[P1] cli.ts file exists with shebang on line 1', () => {
     const cliPath = resolve(__dirname, 'cli.ts');
     expect(existsSync(cliPath)).toBe(true);
@@ -30,8 +30,8 @@ describe('AC-9 Mill CLI — structural guarantees', () => {
   });
 });
 
-describe('AC-9 Mill CLI — main() smoke test', () => {
-  it('[P1] main() with fixture config boots Mill and stop()s within 5s', async () => {
+describe('AC-9 swap node CLI — main() smoke test', () => {
+  it('[P1] main() with fixture config boots swap node and stop()s within 5s', async () => {
     const mod = (await import('./cli.js')) as {
       main: (argv: string[]) => Promise<{ stop: () => Promise<void> }>;
     };
@@ -39,7 +39,7 @@ describe('AC-9 Mill CLI — main() smoke test', () => {
       __dirname,
       '..',
       'fixtures',
-      'mill.config.json'
+      'swap.config.json'
     );
     let timer: ReturnType<typeof setTimeout> | undefined;
     try {
@@ -59,25 +59,25 @@ describe('AC-9 Mill CLI — main() smoke test', () => {
     }
   });
 
-  it('[P2] MILL_MNEMONIC env var overlays config file value', async () => {
+  it('[P2] SWAP_MNEMONIC env var overlays config file value', async () => {
     const mod = (await import('./cli.js')) as {
       main: (argv: string[]) => Promise<{ stop: () => Promise<void> }>;
     };
-    const prev = process.env['MILL_MNEMONIC'];
-    process.env['MILL_MNEMONIC'] =
+    const prev = process.env['SWAP_MNEMONIC'];
+    process.env['SWAP_MNEMONIC'] =
       'abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about';
     try {
       const fixturePath = resolve(
         __dirname,
         '..',
         'fixtures',
-        'mill.config.json'
+        'swap.config.json'
       );
       const instance = await mod.main(['--config', fixturePath]);
       await instance.stop();
     } finally {
-      if (prev === undefined) delete process.env['MILL_MNEMONIC'];
-      else process.env['MILL_MNEMONIC'] = prev;
+      if (prev === undefined) delete process.env['SWAP_MNEMONIC'];
+      else process.env['SWAP_MNEMONIC'] = prev;
     }
   });
 });
@@ -85,14 +85,14 @@ describe('AC-9 Mill CLI — main() smoke test', () => {
 // ---------------------------------------------------------------------------
 // Gap-fill: AC-9 env-overlay coverage — added by testarch-automate.
 //
-// The story's AC-9 lists four env vars (MILL_MNEMONIC, MILL_SECRET_KEY_HEX,
-// MILL_BLS_PORT, MILL_RELAYS); only MILL_MNEMONIC was previously exercised.
+// The story's AC-9 lists four env vars (SWAP_MNEMONIC, SWAP_SECRET_KEY_HEX,
+// SWAP_BLS_PORT, SWAP_RELAYS); only SWAP_MNEMONIC was previously exercised.
 // These tests pin the remaining three plus the invalid-value validation
-// branches inside `applyEnvOverlay` (packages/mill/src/cli.ts:94-122).
+// branches inside `applyEnvOverlay` (packages/swap/src/cli.ts:94-122).
 // ---------------------------------------------------------------------------
 
-describe('AC-9 Mill CLI — env-overlay gap-fill', () => {
-  const fixturePath = resolve(__dirname, '..', 'fixtures', 'mill.config.json');
+describe('AC-9 swap node CLI — env-overlay gap-fill', () => {
+  const fixturePath = resolve(__dirname, '..', 'fixtures', 'swap.config.json');
 
   async function withEnv<T>(
     overrides: Record<string, string | undefined>,
@@ -118,7 +118,7 @@ describe('AC-9 Mill CLI — env-overlay gap-fill', () => {
     }
   }
 
-  it('[P2] MILL_BLS_PORT env var overrides config.blsPort', async () => {
+  it('[P2] SWAP_BLS_PORT env var overrides config.blsPort', async () => {
     const mod = (await import('./cli.js')) as {
       main: (argv: string[]) => Promise<{
         blsPort: number;
@@ -127,7 +127,7 @@ describe('AC-9 Mill CLI — env-overlay gap-fill', () => {
     };
     // Use port 0 via env so the kernel assigns — we only assert the env
     // overlay was consulted (blsPort should be a valid assigned port).
-    const instance = await withEnv({ MILL_BLS_PORT: '0' }, () =>
+    const instance = await withEnv({ SWAP_BLS_PORT: '0' }, () =>
       mod.main(['--config', fixturePath])
     );
     try {
@@ -139,29 +139,29 @@ describe('AC-9 Mill CLI — env-overlay gap-fill', () => {
     }
   });
 
-  it('[P2] invalid MILL_BLS_PORT (non-numeric) throws a clear error before boot', async () => {
+  it('[P2] invalid SWAP_BLS_PORT (non-numeric) throws a clear error before boot', async () => {
     const mod = (await import('./cli.js')) as {
       main: (argv: string[]) => Promise<unknown>;
     };
-    await withEnv({ MILL_BLS_PORT: 'not-a-number' }, async () => {
+    await withEnv({ SWAP_BLS_PORT: 'not-a-number' }, async () => {
       await expect(mod.main(['--config', fixturePath])).rejects.toThrow(
-        /MILL_BLS_PORT must be 0\.\.65535/
+        /SWAP_BLS_PORT must be 0\.\.65535/
       );
     });
   });
 
-  it('[P2] invalid MILL_BLS_PORT (out of range) throws a clear error before boot', async () => {
+  it('[P2] invalid SWAP_BLS_PORT (out of range) throws a clear error before boot', async () => {
     const mod = (await import('./cli.js')) as {
       main: (argv: string[]) => Promise<unknown>;
     };
-    await withEnv({ MILL_BLS_PORT: '70000' }, async () => {
+    await withEnv({ SWAP_BLS_PORT: '70000' }, async () => {
       await expect(mod.main(['--config', fixturePath])).rejects.toThrow(
-        /MILL_BLS_PORT must be 0\.\.65535/
+        /SWAP_BLS_PORT must be 0\.\.65535/
       );
     });
   });
 
-  it('[P2] MILL_RELAYS env var overrides config.relayUrls (comma-separated)', async () => {
+  it('[P2] SWAP_RELAYS env var overrides config.relayUrls (comma-separated)', async () => {
     // applyEnvOverlay splits on commas, trims each, filters blanks. We assert
     // the overlay mechanism itself by verifying boot still succeeds when env
     // provides the non-empty relayUrls (and config fixture is unchanged).
@@ -169,7 +169,7 @@ describe('AC-9 Mill CLI — env-overlay gap-fill', () => {
       main: (argv: string[]) => Promise<{ stop: () => Promise<void> }>;
     };
     const instance = await withEnv(
-      { MILL_RELAYS: 'ws://a.example:1 , ws://b.example:2 , ' },
+      { SWAP_RELAYS: 'ws://a.example:1 , ws://b.example:2 , ' },
       () => mod.main(['--config', fixturePath])
     );
     try {
@@ -179,55 +179,55 @@ describe('AC-9 Mill CLI — env-overlay gap-fill', () => {
     }
   });
 
-  it('[P2] invalid MILL_SECRET_KEY_HEX (non-hex) throws before boot', async () => {
+  it('[P2] invalid SWAP_SECRET_KEY_HEX (non-hex) throws before boot', async () => {
     const mod = (await import('./cli.js')) as {
       main: (argv: string[]) => Promise<unknown>;
     };
     await withEnv(
       {
         // Remove mnemonic so the overlay selects the secretKey branch.
-        MILL_MNEMONIC: undefined,
-        MILL_SECRET_KEY_HEX: 'zz'.repeat(32),
+        SWAP_MNEMONIC: undefined,
+        SWAP_SECRET_KEY_HEX: 'zz'.repeat(32),
       },
       async () => {
         await expect(mod.main(['--config', fixturePath])).rejects.toThrow(
-          /MILL_SECRET_KEY_HEX must be a 64-char hex string/
+          /SWAP_SECRET_KEY_HEX must be a 64-char hex string/
         );
       }
     );
   });
 
-  it('[P2] MILL_SECRET_KEY_HEX wrong length throws before boot', async () => {
+  it('[P2] SWAP_SECRET_KEY_HEX wrong length throws before boot', async () => {
     const mod = (await import('./cli.js')) as {
       main: (argv: string[]) => Promise<unknown>;
     };
     await withEnv(
       {
-        MILL_MNEMONIC: undefined,
-        MILL_SECRET_KEY_HEX: 'ab'.repeat(16), // 32 hex chars (16 bytes)
+        SWAP_MNEMONIC: undefined,
+        SWAP_SECRET_KEY_HEX: 'ab'.repeat(16), // 32 hex chars (16 bytes)
       },
       async () => {
         await expect(mod.main(['--config', fixturePath])).rejects.toThrow(
-          /MILL_SECRET_KEY_HEX must be a 64-char hex string/
+          /SWAP_SECRET_KEY_HEX must be a 64-char hex string/
         );
       }
     );
   });
 
-  it('[P2] valid MILL_SECRET_KEY_HEX overlays mnemonic → fails with MILL_REQUIRES_MNEMONIC (D12-011)', async () => {
-    // Proves the overlay swapped identity to secretKey: startMill must then
-    // reject because Mill keys cannot be derived from a raw secret key.
+  it('[P2] valid SWAP_SECRET_KEY_HEX overlays mnemonic → fails with SWAP_REQUIRES_MNEMONIC (D12-011)', async () => {
+    // Proves the overlay swapped identity to secretKey: startSwapNode must then
+    // reject because swap node keys cannot be derived from a raw secret key.
     const mod = (await import('./cli.js')) as {
       main: (argv: string[]) => Promise<unknown>;
     };
     await withEnv(
       {
-        MILL_MNEMONIC: undefined,
-        MILL_SECRET_KEY_HEX: '11'.repeat(32),
+        SWAP_MNEMONIC: undefined,
+        SWAP_SECRET_KEY_HEX: '11'.repeat(32),
       },
       async () => {
         await expect(mod.main(['--config', fixturePath])).rejects.toMatchObject(
-          { code: 'MILL_REQUIRES_MNEMONIC' }
+          { code: 'SWAP_REQUIRES_MNEMONIC' }
         );
       }
     );
@@ -243,16 +243,16 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 function writeTempConfig(obj: unknown): string {
-  const dir = mkdtempSync(join(tmpdir(), 'mill-cli-sec-'));
-  const p = join(dir, 'mill.config.json');
+  const dir = mkdtempSync(join(tmpdir(), 'swap-cli-sec-'));
+  const p = join(dir, 'swap.config.json');
   writeFileSync(p, JSON.stringify(obj), 'utf-8');
   return p;
 }
 
 /** Write a raw JSON string (bypasses JS object-literal `__proto__` stripping). */
 function writeTempRawJson(json: string): string {
-  const dir = mkdtempSync(join(tmpdir(), 'mill-cli-sec-'));
-  const p = join(dir, 'mill.config.json');
+  const dir = mkdtempSync(join(tmpdir(), 'swap-cli-sec-'));
+  const p = join(dir, 'swap.config.json');
   writeFileSync(p, json, 'utf-8');
   return p;
 }

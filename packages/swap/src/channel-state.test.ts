@@ -5,8 +5,8 @@
  */
 import { describe, it, expect } from 'vitest';
 
-import { MillChannelState } from './channel-state.js';
-import { MillWalletError } from './errors.js';
+import { SwapChannelState } from './channel-state.js';
+import { SwapWalletError } from './errors.js';
 
 const KEY = {
   assetCode: 'ETH',
@@ -15,7 +15,7 @@ const KEY = {
 };
 
 function makeProvisioned() {
-  return new MillChannelState({
+  return new SwapChannelState({
     channels: {
       [`${KEY.assetCode}:${KEY.chain}:${KEY.senderPubkey}`]: {
         channelId: '0xchan',
@@ -27,7 +27,7 @@ function makeProvisioned() {
   });
 }
 
-describe('MillChannelState — per-channel nonce + cumulativeAmount (Story 12.4 AC-7)', () => {
+describe('SwapChannelState — per-channel nonce + cumulativeAmount (Story 12.4 AC-7)', () => {
   it('[P0] reserve increments nonce by 1 and adds cumulativeDelta atomically', () => {
     const cs = makeProvisioned();
 
@@ -41,13 +41,13 @@ describe('MillChannelState — per-channel nonce + cumulativeAmount (Story 12.4 
     expect(r2.cumulativeAmount).toBe(15n);
   });
 
-  it("[P0] reserve on missing channel throws MillWalletError('UNSUPPORTED_CHAIN')", () => {
-    const cs = new MillChannelState({ channels: {} });
+  it("[P0] reserve on missing channel throws SwapWalletError('UNSUPPORTED_CHAIN')", () => {
+    const cs = new SwapChannelState({ channels: {} });
     try {
       cs.reserve({ ...KEY, cumulativeDelta: 1n });
       throw new Error('expected throw');
     } catch (err) {
-      expect(err).toBeInstanceOf(MillWalletError);
+      expect(err).toBeInstanceOf(SwapWalletError);
       expect((err as { code?: string }).code).toBe('UNSUPPORTED_CHAIN');
     }
   });
@@ -86,7 +86,7 @@ describe('MillChannelState — per-channel nonce + cumulativeAmount (Story 12.4 
   // -------------------------------------------------------------------------
 
   it('[P1] get() returns null for an unprovisioned channel', () => {
-    const cs = new MillChannelState({ channels: {} });
+    const cs = new SwapChannelState({ channels: {} });
     expect(cs.get(KEY)).toBeNull();
   });
 
@@ -102,7 +102,7 @@ describe('MillChannelState — per-channel nonce + cumulativeAmount (Story 12.4 
   });
 
   it('[P1] release on an unprovisioned channel is a no-op (does not throw)', () => {
-    const cs = new MillChannelState({ channels: {} });
+    const cs = new SwapChannelState({ channels: {} });
     expect(() => cs.release({ ...KEY, cumulativeDelta: 1n })).not.toThrow();
   });
 
@@ -128,7 +128,7 @@ describe('MillChannelState — per-channel nonce + cumulativeAmount (Story 12.4 
 
   it('[P2] custom clock is used for updatedAt on reserve and release', () => {
     let now = 100;
-    const cs = new MillChannelState({
+    const cs = new SwapChannelState({
       channels: {
         [`${KEY.assetCode}:${KEY.chain}:${KEY.senderPubkey}`]: {
           channelId: '0xchan',
@@ -154,7 +154,7 @@ describe('MillChannelState — per-channel nonce + cumulativeAmount (Story 12.4 
     const logger = {
       warn: (...args: unknown[]) => calls.push(args),
     };
-    const cs = new MillChannelState({
+    const cs = new SwapChannelState({
       channels: {
         [`${KEY.assetCode}:${KEY.chain}:${KEY.senderPubkey}`]: {
           channelId: '0xchan',
@@ -169,7 +169,7 @@ describe('MillChannelState — per-channel nonce + cumulativeAmount (Story 12.4 
     cs.release({ ...KEY, cumulativeDelta: 100n });
     expect(calls.length).toBe(1);
     expect(calls[0]?.[0]).toBe(
-      'mill.channelState.release.noop_would_underflow'
+      'swap.channelState.release.noop_would_underflow'
     );
     // State unchanged.
     expect(cs.get(KEY)!.nonce).toBe(1n);
@@ -178,13 +178,13 @@ describe('MillChannelState — per-channel nonce + cumulativeAmount (Story 12.4 
 
   it('[P2] release on unknown channel emits warn + no throw', () => {
     const calls: unknown[][] = [];
-    const cs = new MillChannelState({
+    const cs = new SwapChannelState({
       channels: {},
       logger: { warn: (...a: unknown[]) => calls.push(a) },
     });
     cs.release({ ...KEY, cumulativeDelta: 1n });
     expect(calls.length).toBe(1);
-    expect(calls[0]?.[0]).toBe('mill.channelState.release.unknown_channel');
+    expect(calls[0]?.[0]).toBe('swap.channelState.release.unknown_channel');
   });
 
   // -------------------------------------------------------------------------
@@ -199,7 +199,7 @@ describe('MillChannelState — per-channel nonce + cumulativeAmount (Story 12.4 
       chain: 'evm:8453',
       senderPubkey: 'b'.repeat(64),
     };
-    const cs = new MillChannelState({
+    const cs = new SwapChannelState({
       channels: {
         [`${KEY.assetCode}:${KEY.chain}:${KEY.senderPubkey}`]: {
           channelId: '0xchan-1',
@@ -239,7 +239,7 @@ describe('MillChannelState — per-channel nonce + cumulativeAmount (Story 12.4 
   });
 
   it('[P2] releaseAll() is a no-op on an empty channel map (does not throw)', () => {
-    const cs = new MillChannelState({ channels: {} });
+    const cs = new SwapChannelState({ channels: {} });
     expect(() => cs.releaseAll()).not.toThrow();
   });
 
@@ -255,7 +255,7 @@ describe('MillChannelState — per-channel nonce + cumulativeAmount (Story 12.4 
 
   it('[P2] releaseAll() stamps updatedAt from the injected clock', () => {
     let now = 100;
-    const cs = new MillChannelState({
+    const cs = new SwapChannelState({
       channels: {
         [`${KEY.assetCode}:${KEY.chain}:${KEY.senderPubkey}`]: {
           channelId: '0xchan',
@@ -283,7 +283,7 @@ describe('Story 12.8 AC-12 — sender→channel sticky binding', () => {
   const SENDER_B = 'b'.repeat(64);
 
   function makeTwoChannelPool() {
-    return new MillChannelState({
+    return new SwapChannelState({
       channels: {
         // Provision two channels keyed by channelId for the same (asset, chain).
         'ETH:evm:31337:0xchan-1': {
@@ -404,6 +404,6 @@ describe('Story 12.8 AC-12 — sender→channel sticky binding', () => {
         senderPubkey: SENDER_C,
         cumulativeDelta: 1n,
       })
-    ).toThrow(MillWalletError);
+    ).toThrow(SwapWalletError);
   });
 });

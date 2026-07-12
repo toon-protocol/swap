@@ -23,10 +23,35 @@ Renamed identifiers, applied throughout src + tests:
 - `millPubkey` / `millIlpAddress` → `swapPubkey` / `swapIlpAddress` (`StreamSwapParams`, client-side sender params)
 - Error codes `MILL_SIGNER_MISMATCH` / `MILL_RECIPIENT_MISMATCH` → `SWAP_SIGNER_MISMATCH` / `SWAP_RECIPIENT_MISMATCH` (sender-side verification; not used in this repo)
 
-**Unchanged on purpose:** operator-facing env/config names (`MILL_MNEMONIC`,
-`MILL_SECRET_KEY_HEX`, `MILL_BLS_PORT`, `MILL_RELAYS`, `TOON_CONNECTOR_URL`) and
-internal `Mill*` type/file names. Per #45: env names may stay, wire fields must
-change.
+**Local vocabulary (renamed in a follow-up on the same PR):** issue #45
+originally kept the operator-facing env names (`MILL_MNEMONIC`, …) and internal
+`Mill*` type/file names; that carve-out was later overridden and the mill
+vocabulary is now fully retired, matching the org's dvm→store precedent. The
+full local rename, with **no legacy aliases and no fallback env reads**:
+
+- Env vars: `MILL_MNEMONIC` → `SWAP_MNEMONIC`, `MILL_SECRET_KEY_HEX` →
+  `SWAP_SECRET_KEY_HEX`, `MILL_BLS_PORT` → `SWAP_BLS_PORT`, `MILL_RELAYS` →
+  `SWAP_RELAYS` (`TOON_CONNECTOR_URL` unchanged)
+- Public API: `startMill()` → `startSwapNode()`, `MillConfig` →
+  `SwapNodeConfig`, `MillInstance` → `SwapNodeInstance`, `MillLogger` →
+  `SwapNodeLogger`, `MillHealthResponse` → `SwapNodeHealthResponse`,
+  `MillStartError(Code)` → `SwapNodeStartError(Code)`,
+  `Mill{Evm,Solana,Mina}ChainProvider` / `MillChainProvider` →
+  `SwapNode…ChainProvider`, `MillKeys` → `SwapNodeKeys`, `MillChainKind` →
+  `SwapNodeChainKind`, `deriveMillKeys` → `deriveSwapNodeKeys`,
+  `DeriveMillKeysInput` → `DeriveSwapNodeKeysInput`, `MillInventory*` →
+  `SwapInventory*`, `MillChannelState*` → `SwapChannelState*`,
+  `MillWalletError(Code)` → `SwapWalletError(Code)`,
+  `MillInstance.millKeys` → `SwapNodeInstance.swapNodeKeys`
+- Error-code strings: `MILL_REQUIRES_MNEMONIC` → `SWAP_REQUIRES_MNEMONIC`
+- Files: `src/mill.ts` → `src/swap-node.ts`, `src/mill.connector-boot.test.ts`
+  → `src/swap-node.connector-boot.test.ts`, `fixtures/mill.config.json` →
+  `fixtures/swap.config.json` (CLI default config path `./mill.config.json` →
+  `./swap.config.json`)
+- Default ILP address prefix: `g.toon.mill.<pubkey16>` → `g.toon.swap.<pubkey16>`
+  (self-declared via kind:10032 discovery, so peers learn it from the
+  announcement; no live deployment existed at rename time)
+- Log event names: `mill.*` → `swap.*`
 
 ## The deploy-ordering trap (read this twice)
 
@@ -77,7 +102,7 @@ nothing published past 3.20.1). This repo therefore pins the highest published
 version, `^3.20.1`, which already carries the two load-bearing child-connector
 behaviors (`relation: 'parent'` claimless-parent-forward skip, connector#78,
 present since ≥3.8; and the `setPacketHandler` local-delivery seam) — both
-re-verified at runtime by `src/mill.connector-boot.test.ts`. Bump the range to
+re-verified at runtime by `src/swap-node.connector-boot.test.ts`. Bump the range to
 `^3.28` once the connector repo's publish job is fixed and re-run that smoke
 test; no code change here is expected.
 

@@ -11,7 +11,7 @@ import { ed25519 } from '@noble/curves/ed25519.js';
 import { sha256 } from '@noble/hashes/sha2.js';
 
 // Story 12.6 AC-6: balance-proof hashes moved to @toon-protocol/sdk so the
-// Mill-side signer and the sender-side verifier share a single source of truth.
+// swap-node-side signer and the sender-side verifier share a single source of truth.
 import {
   balanceProofHashEvm,
   balanceProofHashSolana,
@@ -22,8 +22,8 @@ import {
   hexToBytes,
 } from '@toon-protocol/sdk';
 
-import type { MillChainKind } from './wallet.js';
-import { MillWalletError } from './errors.js';
+import type { SwapNodeChainKind } from './wallet.js';
+import { SwapWalletError } from './errors.js';
 
 export interface PaymentChannelSignParams {
   channelId: string;
@@ -34,7 +34,7 @@ export interface PaymentChannelSignParams {
 
 export interface PaymentChannelSigner {
   readonly chain: string;
-  readonly chainKind: MillChainKind;
+  readonly chainKind: SwapNodeChainKind;
   signBalanceProof(params: PaymentChannelSignParams): Promise<Uint8Array>;
 }
 
@@ -49,7 +49,7 @@ export interface EvmPaymentChannelSignerConfig {
 
 export class EvmPaymentChannelSigner implements PaymentChannelSigner {
   public readonly chain: string;
-  public readonly chainKind: MillChainKind = 'evm';
+  public readonly chainKind: SwapNodeChainKind = 'evm';
   private readonly privateKey: Uint8Array;
 
   constructor(cfg: EvmPaymentChannelSignerConfig) {
@@ -57,7 +57,7 @@ export class EvmPaymentChannelSigner implements PaymentChannelSigner {
       !(cfg.privateKey instanceof Uint8Array) ||
       cfg.privateKey.length !== 32
     ) {
-      throw new MillWalletError(
+      throw new SwapWalletError(
         'SIGNING_FAILED',
         `EVM signer requires a 32-byte secp256k1 private key (got ${
           cfg.privateKey instanceof Uint8Array
@@ -115,7 +115,7 @@ export class EvmPaymentChannelSigner implements PaymentChannelSigner {
       out[64] = 27 + recovery;
       return out;
     } catch (err) {
-      throw new MillWalletError(
+      throw new SwapWalletError(
         'SIGNING_FAILED',
         'EVM balance-proof signing failed',
         { cause: err }
@@ -143,8 +143,8 @@ export interface MinaPaymentChannelSignerConfig {
 const MINA_PRIVATE_KEY_VERSION = 0x5a;
 
 /**
- * Convert a big-endian 32-byte hex scalar (the form `deriveMillKeys()` emits
- * for Mina — see `packages/mill/src/wallet.ts` `deriveMina`) into the Mina
+ * Convert a big-endian 32-byte hex scalar (the form `deriveSwapNodeKeys()` emits
+ * for Mina — see `packages/swap/src/wallet.ts` `deriveMina`) into the Mina
  * base58check private-key string mina-signer's `signFields`/`derivePublicKey`
  * require. If the input already looks like a base58 `EK…` key it is returned
  * unchanged.
@@ -152,9 +152,9 @@ const MINA_PRIVATE_KEY_VERSION = 0x5a;
  * Layout (pre-checksum): `[0x5a, 0x01, <scalar bytes little-endian>]`, then
  * append the first 4 bytes of `sha256(sha256(payload))` and base58-encode.
  *
- * This closes the Story 12.4/12.8 gap where the Mill stored a hex scalar but
+ * This closes the Story 12.4/12.8 gap where the swap node stored a hex scalar but
  * passed it verbatim to mina-signer (which rejected it as invalid base58),
- * preventing the Mill from ever producing a sender-verifiable Mina claim.
+ * preventing the swap node from ever producing a sender-verifiable Mina claim.
  */
 export function hexToMinaBase58PrivateKey(privateKey: string): string {
   // Already a Mina base58 private key (EK… ~52 chars) — pass through.
@@ -174,7 +174,7 @@ export function hexToMinaBase58PrivateKey(privateKey: string): string {
 
 export class MinaPaymentChannelSigner implements PaymentChannelSigner {
   public readonly chain: string;
-  public readonly chainKind: MillChainKind = 'mina';
+  public readonly chainKind: SwapNodeChainKind = 'mina';
   private readonly privateKey: string;
   private readonly publicKey: string;
 
@@ -204,7 +204,7 @@ export class MinaPaymentChannelSigner implements PaymentChannelSigner {
       }
 
       // Pack params into field elements via the SHARED helper in
-      // `@toon-protocol/sdk` so the Mill signer and the sender-side
+      // `@toon-protocol/sdk` so the swap node signer and the sender-side
       // `verifyMinaSignature` cannot drift (Story 12.6 AC-6 pattern). The
       // helper hashes `channelId`/`recipient` to a Pallas-field-safe bigint
       // (first 240 bits of sha256) — see `balanceProofFieldsMina`.
@@ -219,7 +219,7 @@ export class MinaPaymentChannelSigner implements PaymentChannelSigner {
         // mina-signer peer dep IS present — any signing failure here is a
         // REAL error that must surface, not be swallowed into a fake
         // fallback "signature". A silent fallback in this branch would let
-        // an invalid claim leave the Mill and fail only at sender-side
+        // an invalid claim leave the swap node and fail only at sender-side
         // settlement (Story 12.5/12.8). Propagate the error so the
         // MultiChainClaimIssuer wrapper catches it and rolls back inventory
         // + channel-state, re-throwing as SIGNING_FAILED.
@@ -235,7 +235,7 @@ export class MinaPaymentChannelSigner implements PaymentChannelSigner {
           ) => { signature: unknown };
         };
         const client = new ClientCtor({ network: 'mainnet' });
-        // `deriveMillKeys()` emits a big-endian hex scalar; mina-signer needs a
+        // `deriveSwapNodeKeys()` emits a big-endian hex scalar; mina-signer needs a
         // Mina base58check (`EK…`) private key. Convert before signing so the
         // produced signature is verifiable by the sender-side
         // `verifyMinaSignature` (Story 12.8).
@@ -262,7 +262,7 @@ export class MinaPaymentChannelSigner implements PaymentChannelSigner {
       );
       return sha256(msg);
     } catch (err) {
-      throw new MillWalletError(
+      throw new SwapWalletError(
         'SIGNING_FAILED',
         'Mina balance-proof signing failed',
         { cause: err }
@@ -282,7 +282,7 @@ export interface SolanaPaymentChannelSignerConfig {
 
 export class SolanaPaymentChannelSigner implements PaymentChannelSigner {
   public readonly chain: string;
-  public readonly chainKind: MillChainKind = 'solana';
+  public readonly chainKind: SwapNodeChainKind = 'solana';
   private readonly privateKey: Uint8Array;
 
   constructor(cfg: SolanaPaymentChannelSignerConfig) {
@@ -290,7 +290,7 @@ export class SolanaPaymentChannelSigner implements PaymentChannelSigner {
       !(cfg.privateKey instanceof Uint8Array) ||
       cfg.privateKey.length !== 32
     ) {
-      throw new MillWalletError(
+      throw new SwapWalletError(
         'SIGNING_FAILED',
         `Solana signer requires a 32-byte Ed25519 seed (got ${
           cfg.privateKey instanceof Uint8Array
@@ -316,7 +316,7 @@ export class SolanaPaymentChannelSigner implements PaymentChannelSigner {
       const sig = ed25519.sign(msg, this.privateKey);
       return new Uint8Array(sig);
     } catch (err) {
-      throw new MillWalletError(
+      throw new SwapWalletError(
         'SIGNING_FAILED',
         'Solana balance-proof signing failed',
         { cause: err }

@@ -1,13 +1,13 @@
 /**
- * `MillChannelState` — per-channel nonce + cumulativeAmount tracking.
+ * `SwapChannelState` — per-channel nonce + cumulativeAmount tracking.
  *
  * Storage is keyed by `${assetCode}:${chain}:${channelId}` (post
  * Story 12.8 AC-12 alignment — previously the lookup side mis-keyed by
  * `senderPubkey`, which could never hit provisioned entries). Operators
- * provision channels at boot (Story 12.7) by channelId; the Mill looks
+ * provision channels at boot (Story 12.7) by channelId; the swap node looks
  * them up at runtime by (asset, chain, channelId) via a sender→channel
  * "sticky binding" that's established on the first `reserve()` for each
- * sender and held for the lifetime of this `MillChannelState` instance.
+ * sender and held for the lifetime of this `SwapChannelState` instance.
  *
  * The sticky-binding policy ("first channel with sufficient capacity")
  * is deliberately minimal — a single sender never migrates to a second
@@ -18,7 +18,7 @@
  * In-memory only; persistence is Story 12.9's concern.
  */
 
-import { MillWalletError } from './errors.js';
+import { SwapWalletError } from './errors.js';
 
 export interface ChannelEntry {
   channelId: string;
@@ -31,7 +31,7 @@ export interface ReleaseLogger {
   warn?: (...a: unknown[]) => void;
 }
 
-export interface MillChannelStateInit {
+export interface SwapChannelStateInit {
   channels: Record<string, ChannelEntry>;
   clock?: () => number;
   /** Optional logger — `release` emits `warn` when a no-op reversal would drive nonce/cumulative negative (AC-7). */
@@ -59,7 +59,7 @@ function bindingKey(p: {
   return `${p.assetCode}:${p.chain}:${p.senderPubkey}`;
 }
 
-export class MillChannelState {
+export class SwapChannelState {
   /** channelKey() → ChannelEntry */
   private readonly channels = new Map<string, ChannelEntry>();
   /**
@@ -77,7 +77,7 @@ export class MillChannelState {
   private readonly clock: () => number;
   private readonly logger?: ReleaseLogger;
 
-  constructor(init?: MillChannelStateInit) {
+  constructor(init?: SwapChannelStateInit) {
     this.clock = init?.clock ?? Date.now;
     this.logger = init?.logger;
     if (init) {
@@ -92,7 +92,7 @@ export class MillChannelState {
    *
    * Used by deployments where channels are discovered dynamically (e.g., the
    * Docker SDK entrypoint syncing the connector's channel-manager into the
-   * Mill's swap-channel state). Idempotent on the storage key — re-registering
+   * swap node's swap-channel state). Idempotent on the storage key — re-registering
    * the same `(assetCode, chain, channelId)` triple does NOT clobber an
    * already-tracked nonce / cumulativeAmount.
    */
@@ -118,7 +118,7 @@ export class MillChannelState {
    * on first use. Returns `null` if no unbound channel is available for
    * this `(asset, chain)`.
    *
-   * @internal — exposed for AC-12 test introspection via the Mill.
+   * @internal — exposed for AC-12 test introspection via the swap node.
    */
   resolveChannel(p: {
     assetCode: string;
@@ -156,7 +156,7 @@ export class MillChannelState {
   reserve(p: ReserveParams): Reservation {
     const entry = this.resolveChannel(p);
     if (!entry) {
-      throw new MillWalletError(
+      throw new SwapWalletError(
         'UNSUPPORTED_CHAIN',
         `No channel provisioned for sender on ${p.chain}`
       );
@@ -178,7 +178,7 @@ export class MillChannelState {
   release(p: ReserveParams): void {
     const entry = this.resolveChannel(p);
     if (!entry) {
-      this.logger?.warn?.('mill.channelState.release.unknown_channel', {
+      this.logger?.warn?.('swap.channelState.release.unknown_channel', {
         assetCode: p.assetCode,
         chain: p.chain,
       });
@@ -186,7 +186,7 @@ export class MillChannelState {
     }
     if (entry.nonce <= 0n || entry.cumulativeAmount < p.cumulativeDelta) {
       // Nothing to reverse; defensive. Emit a warn per AC-7 ("no-op + warn log").
-      this.logger?.warn?.('mill.channelState.release.noop_would_underflow', {
+      this.logger?.warn?.('swap.channelState.release.noop_would_underflow', {
         assetCode: p.assetCode,
         chain: p.chain,
         nonce: entry.nonce.toString(),
@@ -224,7 +224,7 @@ export class MillChannelState {
    * Bulk-release all tracked reservations (Story 12.7 AC-3 / AC-12).
    *
    * Resets every channel entry's nonce and cumulativeAmount to zero — used
-   * during Mill `stop()` to free reservation state before shutdown. This does
+   * during swap node `stop()` to free reservation state before shutdown. This does
    * NOT reverse signed claims already emitted; it simply clears in-memory
    * reservation bookkeeping so GC can reclaim the map.
    */

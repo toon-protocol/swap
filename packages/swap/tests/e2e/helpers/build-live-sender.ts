@@ -1,5 +1,5 @@
 /**
- * Shared live-sender builder for Mill E2E tests.
+ * Shared live-sender builder for swap-node E2E tests.
  *
  * Extracts the duplicated ConnectorNode + StreamSwapClient wiring that was
  * repeated across all four E2E test files (EVM, Solana, Mina, pair-matrix).
@@ -19,7 +19,7 @@ import {
   REGISTRY_ADDRESS,
   CHAIN_ID,
   ANVIL_RPC,
-  MILL_E2E_EVM_SENDER_PRIVATE_KEY,
+  SWAP_E2E_EVM_SENDER_PRIVATE_KEY,
   publicModeSettlementKey,
 } from './infra-gate.js';
 
@@ -35,7 +35,7 @@ export interface LiveSender {
 }
 
 export interface BuildLiveSenderOptions {
-  /** Unique prefix for the connector node ID (e.g. 'mill-evm'). */
+  /** Unique prefix for the connector node ID (e.g. 'swap-evm'). */
   nodeIdPrefix: string;
   /** BTP server port — must be unique per test file to avoid conflicts. */
   btpServerPort: number;
@@ -64,10 +64,10 @@ export async function buildLiveSender(
   // FRESH, just-in-time-funded participant so each run/connector gets its own
   // channelId and never collides with a prior run's channel
   // (InvalidChannelState). Local Anvil: pass-through to the deterministic key.
-  // Called per builder invocation, so every mill connector gets its own
+  // Called per builder invocation, so every swap node connector gets its own
   // ephemeral participant (issue #191).
   const evmKeyId = await publicModeSettlementKey(
-    MILL_E2E_EVM_SENDER_PRIVATE_KEY
+    SWAP_E2E_EVM_SENDER_PRIVATE_KEY
   );
 
   const connectorLogger = createLogger(opts.loggerName, 'warn');
@@ -165,8 +165,8 @@ export async function buildLiveSender(
   // Warmup: send a single small ILP packet through the BTP socket. This
   // forces the sender's connector to flush a per-packet-claim message to
   // peer1, which (a) registers the external channel on peer1 via
-  // claim-receiver and (b) gives peer1's mill channel-sync poll a chance
-  // to copy that channel into MillChannelState BEFORE the real
+  // claim-receiver and (b) gives peer1's swap node channel-sync poll a chance
+  // to copy that channel into SwapChannelState BEFORE the real
   // streamSwap() PREPAREs arrive. Without this, the first 1-2 swap
   // PREPAREs race past the channel-registration step on peer1 and get
   // rejected with F99 ("No channel provisioned for sender on
@@ -185,8 +185,8 @@ export async function buildLiveSender(
   } catch {
     /* warmup failure is fine — claim still ships */
   }
-  // Give peer1's mill channel-sync poll (250ms interval) two cycles to
-  // copy the registered channel into MillChannelState.
+  // Give peer1's swap node channel-sync poll (250ms interval) two cycles to
+  // copy the registered channel into SwapChannelState.
   await new Promise((r) => setTimeout(r, 1000));
 
   // Build StreamSwapClient shim that bridges connector.sendPacket() into the

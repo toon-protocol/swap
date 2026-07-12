@@ -2,13 +2,13 @@
  * Fixture topology helpers for Story 12.8 integration tests.
  *
  * GREEN-phase implementation:
- *   - `buildFixtureMill()` boots an in-process Mill via `startMill()`
+ *   - `buildFixtureSwapNode()` boots an in-process swap node via `startSwapNode()`
  *     with an injected fake `EmbeddableConnectorLike` (we do NOT auto-wire
  *     a real `ConnectorNode` here — parallel tests would collide on BTP
  *     server ports, and the AC-11 auto-wire path is separately exercised
- *     by `mill.test.ts`'s dedicated auto-create suite).
+ *     by `swap-node.connector-boot.test.ts`'s dedicated auto-create suite).
  *   - `buildFixtureSender()` returns a `StreamSwapClient`-compatible
- *     handle whose `sendSwapPacket()` bridges directly into the Mill's
+ *     handle whose `sendSwapPacket()` bridges directly into the swap node's
  *     internal `HandlerRegistry.dispatch()` for kind:1059 gift-wraps. This
  *     exercises the real `createSwapHandler` ↔ `MultiChainClaimIssuer` ↔
  *     `EvmPaymentChannelSigner` production code path end-to-end; the only
@@ -27,10 +27,10 @@ import {
 } from 'nostr-tools/pure';
 
 import {
-  startMill,
-  deriveMillKeys,
-  type MillInstance,
-  type MillConfig,
+  startSwapNode,
+  deriveSwapNodeKeys,
+  type SwapNodeInstance,
+  type SwapNodeConfig,
   type Publisher,
 } from '@toon-protocol/swap';
 import type {
@@ -72,8 +72,8 @@ export function fixtureSwapPair(): SwapPair {
 // Fake EmbeddableConnectorLike
 // ---------------------------------------------------------------------------
 //
-// Minimum surface `startMill()` requires of `config.connector`. The real
-// ILP transport is bypassed — the sender calls `mill._handlerRegistry.dispatch()`
+// Minimum surface `startSwapNode()` requires of `config.connector`. The real
+// ILP transport is bypassed — the sender calls `swap._handlerRegistry.dispatch()`
 // directly (see `buildFixtureSender()`).
 
 interface FakeConnector extends EmbeddableConnectorLike {
@@ -93,7 +93,7 @@ function makeFakeConnector(): FakeConnector {
     registerPeer: async (_params) => undefined,
     removePeer: async (_peerId) => undefined,
     setPacketHandler: (_h) => undefined,
-    // Close is called by Mill.stop() when ownsConnector=true; here we don't
+    // Close is called by swapNode.stop() when ownsConnector=true; here we don't
     // own it (we supply it explicitly), so this is only for test teardown.
     close: async () => {
       c._closed = true;
@@ -143,26 +143,26 @@ export interface FixtureSender {
 }
 
 // ---------------------------------------------------------------------------
-// buildFixtureMill()
+// buildFixtureSwapNode()
 // ---------------------------------------------------------------------------
 
-export interface BuildFixtureMillOptions {
+export interface BuildFixtureSwapNodeOptions {
   /** Override the default swapPairs (AC-4 rate-drift test uses this). */
   readonly swapPairs?: readonly SwapPair[];
   /** Inject a capturing publisher (AC-2). */
   readonly publisher?: Publisher;
-  /** Override Mill-side rate provider (AC-4.3). */
-  readonly rateProvider?: MillConfig['rateProvider'];
+  /** Override swap-node-side rate provider (AC-4.3). */
+  readonly rateProvider?: SwapNodeConfig['rateProvider'];
   /** Provide multiple channels for AC-7 two-sender tests. */
   readonly channelCount?: number;
 }
 
 /**
- * Boot a Mill against the fixture topology.
+ * Boot a swap node against the fixture topology.
  */
-export async function buildFixtureMill(
-  options: BuildFixtureMillOptions = {},
-): Promise<MillInstance> {
+export async function buildFixtureSwapNode(
+  options: BuildFixtureSwapNodeOptions = {},
+): Promise<SwapNodeInstance> {
   const pairs: readonly SwapPair[] = options.swapPairs ?? [fixtureSwapPair()];
   const targetChain = pairs[0]!.to.chain;
 
@@ -177,7 +177,7 @@ export async function buildFixtureMill(
     updatedAt: 0,
   }));
 
-  const config: MillConfig = {
+  const config: SwapNodeConfig = {
     mnemonic: FIXTURE_MNEMONIC,
     connector: makeFakeConnector(),
     swapPairs: pairs,
@@ -193,7 +193,7 @@ export async function buildFixtureMill(
     ...(options.rateProvider && { rateProvider: options.rateProvider }),
   };
 
-  return startMill(config);
+  return startSwapNode(config);
 }
 
 // ---------------------------------------------------------------------------
@@ -201,10 +201,10 @@ export async function buildFixtureMill(
 // ---------------------------------------------------------------------------
 
 /**
- * Construct an in-process sender bridged to the given Mill's `HandlerRegistry`.
+ * Construct an in-process sender bridged to the given swap node's `HandlerRegistry`.
  *
  * The sender's `sendSwapPacket()` bypasses the real ILP/BTP transport and
- * invokes `mill._handlerRegistry.dispatch()` directly for kind:1059
+ * invokes `swap._handlerRegistry.dispatch()` directly for kind:1059
  * gift-wraps. This exercises `createSwapHandler` + `MultiChainClaimIssuer` +
  * per-chain signers end-to-end — the full swap-composition pipeline this
  * story is chartered to prove — while keeping the test topology hermetic
@@ -214,14 +214,14 @@ export async function buildFixtureMill(
  * the two identities by pubkey.
  */
 export async function buildFixtureSender(
-  mill: MillInstance,
+  swapNode: SwapNodeInstance,
   senderSeed?: Uint8Array,
 ): Promise<FixtureSender> {
   const senderSecretKey =
     senderSeed && senderSeed.length === 32 ? senderSeed : generateSecretKey();
   const senderPubkey = getPublicKey(senderSecretKey);
 
-  const registry = (mill as unknown as { _handlerRegistry?: unknown })
+  const registry = (swapNode as unknown as { _handlerRegistry?: unknown })
     ._handlerRegistry as {
     dispatch: (ctx: unknown) => Promise<
       HandlePacketAcceptResponse | HandlePacketRejectResponse
@@ -230,7 +230,7 @@ export async function buildFixtureSender(
 
   if (!registry) {
     throw new Error(
-      'Fixture: mill._handlerRegistry is not exposed; cannot bridge sender → handler',
+      'Fixture: swapNode._handlerRegistry is not exposed; cannot bridge sender → handler',
     );
   }
 
@@ -325,11 +325,11 @@ export async function buildFixtureSender(
 
 /**
  * Derive the connector-side (BIP-44 account 1) EVM address from the fixture
- * mnemonic. Used by AC-1.1 to assert disjointness with the Mill-side
- * (account 2) EVM address that `startMill()` derives via `deriveMillKeys()`.
+ * mnemonic. Used by AC-1.1 to assert disjointness with the swap-node-side
+ * (account 2) EVM address that `startSwapNode()` derives via `deriveSwapNodeKeys()`.
  */
 export async function deriveFixtureConnectorEvmAddress(): Promise<string> {
-  const keys = await deriveMillKeys({
+  const keys = await deriveSwapNodeKeys({
     mnemonic: FIXTURE_MNEMONIC,
     chains: ['evm'],
     accountIndex: 1,

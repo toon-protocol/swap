@@ -6,12 +6,12 @@ import { resolve } from 'path';
  *
  * Mirrors `packages/town/vitest.e2e.config.ts` (AC-15.1).
  *
- * The default `packages/mill/vitest.config.ts` runs ONLY `src/**\/*.test.ts`
+ * The default `packages/swap/vitest.config.ts` runs ONLY `src/**\/*.test.ts`
  * so these integration tests do not double-execute under `pnpm --filter
  * @toon-protocol/swap test` (AC-15.4).
  *
  * Pool: `forks` — process-per-test isolation matters because each test
- * boots an in-process `MillInstance` + peered `ConnectorNode` pair and
+ * boots an in-process `SwapNodeInstance` + peered `ConnectorNode` pair and
  * binds to ephemeral ports. A shared worker pool would leak handles.
  */
 export default defineConfig({

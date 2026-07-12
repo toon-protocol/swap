@@ -46,7 +46,7 @@ const PEER1_NOSTR_PUBKEY =
   'd6bfe100d1600c0d8f769501676fc74c3809500bd131c8a549f88cf616c21f35';
 
 // Sender builder extracted to helpers/build-live-sender.ts (shared across all
-// Mill E2E test files to eliminate ~80 lines of duplicated wiring per file).
+// swap-node E2E test files to eliminate ~80 lines of duplicated wiring per file).
 
 // ---------------------------------------------------------------------------
 // Suite
@@ -71,10 +71,10 @@ describe('Docker Swap-Flow Mina E2E (Story 12.10, Task 4)', () => {
 
     try {
       sender = await buildLiveSender({
-        nodeIdPrefix: 'mill-mina',
+        nodeIdPrefix: 'swap-mina',
         btpServerPort: 19924,
         healthCheckPort: 19925,
-        loggerName: 'mill-e2e-mina-connector',
+        loggerName: 'swap-e2e-mina-connector',
       });
       swapResult = await streamSwap({
         client: sender.client,

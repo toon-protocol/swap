@@ -48,7 +48,7 @@ const PEER1_NOSTR_PUBKEY =
   'd6bfe100d1600c0d8f769501676fc74c3809500bd131c8a549f88cf616c21f35';
 
 // Sender builder extracted to helpers/build-live-sender.ts (shared across all
-// Mill E2E test files to eliminate ~80 lines of duplicated wiring per file).
+// swap-node E2E test files to eliminate ~80 lines of duplicated wiring per file).
 
 // ---------------------------------------------------------------------------
 // Suite
@@ -70,10 +70,10 @@ describe('Docker Swap-Flow Solana E2E (Story 12.10, Task 3)', () => {
 
     try {
       const baseSender = await buildLiveSender({
-        nodeIdPrefix: 'mill-sol',
+        nodeIdPrefix: 'swap-sol',
         btpServerPort: 19922,
         healthCheckPort: 19923,
-        loggerName: 'mill-e2e-solana-connector',
+        loggerName: 'swap-e2e-solana-connector',
       });
       // Generate a Solana keypair for the chain-recipient.
       // generateSolanaKeypair() returns publicKey already base58-encoded;

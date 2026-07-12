@@ -35,12 +35,12 @@ import type { BuildSettlementTxResult } from '@toon-protocol/sdk';
 import { generateSecretKey, getPublicKey } from 'nostr-tools/pure';
 import { nip44 } from 'nostr-tools';
 
-import type { MillInstance } from '@toon-protocol/swap';
+import type { SwapNodeInstance } from '@toon-protocol/swap';
 
 import {
   FIXTURE_MNEMONIC,
   ANVIL_CHAIN_ID,
-  buildFixtureMill,
+  buildFixtureSwapNode,
   buildFixtureSender,
   deriveFixtureConnectorEvmAddress,
   fixtureSwapPair,
@@ -57,48 +57,48 @@ const FIXTURE_EVM_RECIPIENT = '0x' + '11'.repeat(20);
 const FIXTURE_EVM_RECIPIENT_2 = '0x' + '22'.repeat(20);
 /** Deterministic ILP destination used by the fixture bridge. The handler
  *  dispatch is direct, so the value is illustrative only. */
-const FIXTURE_MILL_ILP_ADDRESS = 'g.toon.mill.fixture';
+const FIXTURE_SWAP_NODE_ILP_ADDRESS = 'g.toon.swap.fixture';
 
 // ---------------------------------------------------------------------------
 // AC-1 — Deterministic fixture topology
 // ---------------------------------------------------------------------------
 
 describe('AC-1 [P1] deterministic fixture topology (T-061 prerequisite)', () => {
-  let mill: MillInstance;
+  let swapNode: SwapNodeInstance;
   let sender: FixtureSender;
 
   beforeAll(async () => {
-    mill = await buildFixtureMill();
-    sender = await buildFixtureSender(mill, new Uint8Array(32).fill(1));
+    swapNode = await buildFixtureSwapNode();
+    sender = await buildFixtureSender(swapNode, new Uint8Array(32).fill(1));
   });
 
   afterAll(async () => {
     await sender?.close?.();
-    await mill?.stop?.();
+    await swapNode?.stop?.();
   });
 
   it('AC-1.0 — fixture mnemonic is 12 words (BIP-39 shape)', () => {
     expect(FIXTURE_MNEMONIC.split(' ')).toHaveLength(12);
   });
 
-  it('AC-1.1 — connector-side (account 1) EVM address ≠ Mill-side (account 2) EVM address (D12-011)', async () => {
+  it('AC-1.1 — connector-side (account 1) EVM address ≠ swap-node-side (account 2) EVM address (D12-011)', async () => {
     const account1Addr = await deriveFixtureConnectorEvmAddress();
-    const account2Addr = mill.millKeys.evm?.address.toLowerCase();
+    const account2Addr = swapNode.swapNodeKeys.evm?.address.toLowerCase();
     expect(account1Addr).toMatch(/^0x[0-9a-f]{40}$/);
     expect(account2Addr).toMatch(/^0x[0-9a-f]{40}$/);
     expect(account1Addr).not.toBe(account2Addr);
   });
 
-  it('AC-1.2 — mill.identity.pubkey is a valid 32-byte Nostr x-only pubkey', () => {
-    expect(mill.identity.pubkey).toMatch(/^[0-9a-f]{64}$/);
+  it('AC-1.2 — swapNode.identity.pubkey is a valid 32-byte Nostr x-only pubkey', () => {
+    expect(swapNode.identity.pubkey).toMatch(/^[0-9a-f]{64}$/);
   });
 
   it('AC-1.3 — /health responds status:"ok" within 2s', async () => {
-    expect(mill.blsPort).toBeGreaterThan(0);
+    expect(swapNode.blsPort).toBeGreaterThan(0);
     const controller = new AbortController();
     const t = setTimeout(() => controller.abort(), 2_000);
     try {
-      const res = await fetch(`http://127.0.0.1:${mill.blsPort}/health`, {
+      const res = await fetch(`http://127.0.0.1:${swapNode.blsPort}/health`, {
         signal: controller.signal,
       });
       expect(res.status).toBe(200);
@@ -109,9 +109,9 @@ describe('AC-1 [P1] deterministic fixture topology (T-061 prerequisite)', () => 
     }
   });
 
-  it('AC-1.4 — sender has distinct Nostr pubkey from Mill', () => {
+  it('AC-1.4 — sender has distinct Nostr pubkey from swap node', () => {
     expect(sender.publicKey).toMatch(/^[0-9a-f]{64}$/);
-    expect(sender.publicKey).not.toBe(mill.identity.pubkey);
+    expect(sender.publicKey).not.toBe(swapNode.identity.pubkey);
   });
 });
 
@@ -127,7 +127,7 @@ describe('AC-2 [P1] kind:10032 publication round-trip + publisher injection (T-8
         captured.push(event);
       },
     };
-    const mill = await buildFixtureMill({ publisher: mockPublisher });
+    const swapNode = await buildFixtureSwapNode({ publisher: mockPublisher });
     try {
       const start = Date.now();
       while (captured.length === 0 && Date.now() - start < 3_000) {
@@ -142,7 +142,7 @@ describe('AC-2 [P1] kind:10032 publication round-trip + publisher injection (T-8
       );
       expect(parsed.swapPairs).toEqual([fixtureSwapPair()]);
     } finally {
-      await mill.stop();
+      await swapNode.stop();
     }
   });
 
@@ -163,18 +163,18 @@ describe('AC-2 [P1] kind:10032 publication round-trip + publisher injection (T-8
     expect(parsed.swapPairs).toBeUndefined();
   });
 
-  it('AC-13.4 — rejecting publisher does NOT fail startMill() boot', async () => {
+  it('AC-13.4 — rejecting publisher does NOT fail startSwapNode() boot', async () => {
     const rejectingPublisher = {
       publish: async () => {
         throw new Error('simulated relay outage');
       },
     };
-    const mill = await buildFixtureMill({ publisher: rejectingPublisher });
+    const swapNode = await buildFixtureSwapNode({ publisher: rejectingPublisher });
     try {
-      expect(mill).toBeDefined();
-      expect(mill.identity.pubkey).toMatch(/^[0-9a-f]{64}$/);
+      expect(swapNode).toBeDefined();
+      expect(swapNode.identity.pubkey).toMatch(/^[0-9a-f]{64}$/);
     } finally {
-      await mill.stop();
+      await swapNode.stop();
     }
   });
 });
@@ -184,17 +184,17 @@ describe('AC-2 [P1] kind:10032 publication round-trip + publisher injection (T-8
 // ---------------------------------------------------------------------------
 
 describe('AC-3 [P1] Handler registered on kind:1059 (T-8D, R-010, R-015)', () => {
-  let mill: MillInstance;
+  let swapNode: SwapNodeInstance;
   let sender: FixtureSender;
 
   beforeAll(async () => {
-    mill = await buildFixtureMill();
-    sender = await buildFixtureSender(mill, new Uint8Array(32).fill(3));
+    swapNode = await buildFixtureSwapNode();
+    sender = await buildFixtureSender(swapNode, new Uint8Array(32).fill(3));
   });
 
   afterAll(async () => {
     await sender.close();
-    await mill.stop();
+    await swapNode.stop();
   });
 
   it('AC-3 — malformed kind:1059 payload → ILP REJECT with INVALID_GIFT_WRAP', async () => {
@@ -209,7 +209,7 @@ describe('AC-3 [P1] Handler registered on kind:1059 (T-8D, R-010, R-015)', () =>
     // symbols so a handler refactor propagates here.
     const garbage = new Uint8Array([0xff, 0x00, 0x13, 0x37, 0xde, 0xad]);
     const response = await sender.client.sendSwapPacket({
-      destination: FIXTURE_MILL_ILP_ADDRESS,
+      destination: FIXTURE_SWAP_NODE_ILP_ADDRESS,
       amount: 1_000_000n,
       toonData: garbage,
     });
@@ -231,14 +231,14 @@ describe('AC-3 [P1] Handler registered on kind:1059 (T-8D, R-010, R-015)', () =>
 
 describe('AC-4 [P0] end-to-end swap: 1-packet, 10-packet, rate-drift (T-061, T-064)', () => {
   it('AC-4.1 — single-packet swap: 1 USDC → ~0.0004 ETH', async () => {
-    const mill = await buildFixtureMill();
-    const sender = await buildFixtureSender(mill, new Uint8Array(32).fill(4));
+    const swapNode = await buildFixtureSwapNode();
+    const sender = await buildFixtureSender(swapNode, new Uint8Array(32).fill(4));
     try {
       const pair = fixtureSwapPair();
       const result = await streamSwap({
         client: sender.client,
-        swapPubkey: mill.identity.pubkey,
-        swapIlpAddress: FIXTURE_MILL_ILP_ADDRESS,
+        swapPubkey: swapNode.identity.pubkey,
+        swapIlpAddress: FIXTURE_SWAP_NODE_ILP_ADDRESS,
         pair,
         senderSecretKey: sender.secretKey,
         chainRecipient: FIXTURE_EVM_RECIPIENT,
@@ -259,24 +259,24 @@ describe('AC-4 [P0] end-to-end swap: 1-packet, 10-packet, rate-drift (T-061, T-0
       expect(claim.cumulativeAmount).toBeDefined();
       expect(claim.recipient).toBe(FIXTURE_EVM_RECIPIENT);
       expect(claim.swapSignerAddress?.toLowerCase()).toBe(
-        mill.millKeys.evm!.address.toLowerCase(),
+        swapNode.swapNodeKeys.evm!.address.toLowerCase(),
       );
       expect(claim.claimBytes).toBeInstanceOf(Uint8Array);
       expect(claim.claimBytes.length).toBeGreaterThan(0);
     } finally {
       await sender.close();
-      await mill.stop();
+      await swapNode.stop();
     }
   });
 
-  it('AC-4.2 — 10-packet swap: monotonic nonces, all signed by same Mill signer', async () => {
-    const mill = await buildFixtureMill();
-    const sender = await buildFixtureSender(mill, new Uint8Array(32).fill(5));
+  it('AC-4.2 — 10-packet swap: monotonic nonces, all signed by same swap node signer', async () => {
+    const swapNode = await buildFixtureSwapNode();
+    const sender = await buildFixtureSender(swapNode, new Uint8Array(32).fill(5));
     try {
       const result = await streamSwap({
         client: sender.client,
-        swapPubkey: mill.identity.pubkey,
-        swapIlpAddress: FIXTURE_MILL_ILP_ADDRESS,
+        swapPubkey: swapNode.identity.pubkey,
+        swapIlpAddress: FIXTURE_SWAP_NODE_ILP_ADDRESS,
         pair: fixtureSwapPair(),
         senderSecretKey: sender.secretKey,
         chainRecipient: FIXTURE_EVM_RECIPIENT,
@@ -290,7 +290,7 @@ describe('AC-4 [P0] end-to-end swap: 1-packet, 10-packet, rate-drift (T-061, T-0
         result.claims.map((c) => c.swapSignerAddress?.toLowerCase()),
       );
       expect(signers.size).toBe(1);
-      expect([...signers][0]).toBe(mill.millKeys.evm!.address.toLowerCase());
+      expect([...signers][0]).toBe(swapNode.swapNodeKeys.evm!.address.toLowerCase());
 
       // Monotonic nonce across the claim sequence (decimal strings compared
       // via BigInt to avoid lexicographic pitfalls).
@@ -306,7 +306,7 @@ describe('AC-4 [P0] end-to-end swap: 1-packet, 10-packet, rate-drift (T-061, T-0
       expect(ephemeralKeys.size).toBe(10);
     } finally {
       await sender.close();
-      await mill.stop();
+      await swapNode.stop();
     }
   });
 
@@ -318,13 +318,13 @@ describe('AC-4 [P0] end-to-end swap: 1-packet, 10-packet, rate-drift (T-061, T-0
       callCount++;
       return r;
     };
-    const mill = await buildFixtureMill({ rateProvider });
-    const sender = await buildFixtureSender(mill, new Uint8Array(32).fill(6));
+    const swapNode = await buildFixtureSwapNode({ rateProvider });
+    const sender = await buildFixtureSender(swapNode, new Uint8Array(32).fill(6));
     try {
       const result = await streamSwap({
         client: sender.client,
-        swapPubkey: mill.identity.pubkey,
-        swapIlpAddress: FIXTURE_MILL_ILP_ADDRESS,
+        swapPubkey: swapNode.identity.pubkey,
+        swapIlpAddress: FIXTURE_SWAP_NODE_ILP_ADDRESS,
         pair: fixtureSwapPair(),
         senderSecretKey: sender.secretKey,
         chainRecipient: FIXTURE_EVM_RECIPIENT,
@@ -361,7 +361,7 @@ describe('AC-4 [P0] end-to-end swap: 1-packet, 10-packet, rate-drift (T-061, T-0
       }
     } finally {
       await sender.close();
-      await mill.stop();
+      await swapNode.stop();
     }
   });
 });
@@ -372,13 +372,13 @@ describe('AC-4 [P0] end-to-end swap: 1-packet, 10-packet, rate-drift (T-061, T-0
 
 describe('AC-5 [P1] replay protection via seenPacketIds (T-8E)', () => {
   it('AC-5 — re-sending a captured PREPARE yields F04 "Duplicate packet"', async () => {
-    const mill = await buildFixtureMill();
-    const sender = await buildFixtureSender(mill, new Uint8Array(32).fill(7));
+    const swapNode = await buildFixtureSwapNode();
+    const sender = await buildFixtureSender(swapNode, new Uint8Array(32).fill(7));
     try {
       const result = await streamSwap({
         client: sender.client,
-        swapPubkey: mill.identity.pubkey,
-        swapIlpAddress: FIXTURE_MILL_ILP_ADDRESS,
+        swapPubkey: swapNode.identity.pubkey,
+        swapIlpAddress: FIXTURE_SWAP_NODE_ILP_ADDRESS,
         pair: fixtureSwapPair(),
         senderSecretKey: sender.secretKey,
         chainRecipient: FIXTURE_EVM_RECIPIENT,
@@ -402,7 +402,7 @@ describe('AC-5 [P1] replay protection via seenPacketIds (T-8E)', () => {
       );
     } finally {
       await sender.close();
-      await mill.stop();
+      await swapNode.stop();
     }
   });
 });
@@ -412,14 +412,14 @@ describe('AC-5 [P1] replay protection via seenPacketIds (T-8E)', () => {
 // ---------------------------------------------------------------------------
 
 describe('AC-6 [P0] intermediary privacy — gift-wrap opaque, distinct ephemerals (T-062/063, R-006)', () => {
-  it('AC-6.1/6.2 — outbound PREPARE is a kind:1059 gift-wrap opaque to non-Mill keys', async () => {
-    const mill = await buildFixtureMill();
-    const sender = await buildFixtureSender(mill, new Uint8Array(32).fill(8));
+  it('AC-6.1/6.2 — outbound PREPARE is a kind:1059 gift-wrap opaque to non-swap-node keys', async () => {
+    const swapNode = await buildFixtureSwapNode();
+    const sender = await buildFixtureSender(swapNode, new Uint8Array(32).fill(8));
     try {
       await streamSwap({
         client: sender.client,
-        swapPubkey: mill.identity.pubkey,
-        swapIlpAddress: FIXTURE_MILL_ILP_ADDRESS,
+        swapPubkey: swapNode.identity.pubkey,
+        swapIlpAddress: FIXTURE_SWAP_NODE_ILP_ADDRESS,
         pair: fixtureSwapPair(),
         senderSecretKey: sender.secretKey,
         chainRecipient: FIXTURE_EVM_RECIPIENT,
@@ -443,30 +443,30 @@ describe('AC-6 [P0] intermediary privacy — gift-wrap opaque, distinct ephemera
       const giftWrapEvent = decodeEventFromToon(captured.toonData);
       expect(giftWrapEvent.kind).toBe(1059);
 
-      // AC-6.2: attempting to decrypt the gift-wrap with a NON-Mill private
+      // AC-6.2: attempting to decrypt the gift-wrap with a NON-swap-node private
       // key throws. This is what an intermediary on the ILP path would
       // experience — opaque ciphertext, no recoverable plaintext.
-      const nonMillSk = generateSecretKey();
+      const nonSwapNodeSk = generateSecretKey();
       expect(() =>
         unwrapSwapPacketFromToon({
           toonData: captured.toonData,
-          recipientSecretKey: nonMillSk,
+          recipientSecretKey: nonSwapNodeSk,
         }),
       ).toThrow();
     } finally {
       await sender.close();
-      await mill.stop();
+      await swapNode.stop();
     }
   });
 
-  it('AC-6.3 — 10-packet swap emits 10 distinct Mill-side ephemeral pubkeys (D12-008, R-006)', async () => {
-    const mill = await buildFixtureMill();
-    const sender = await buildFixtureSender(mill, new Uint8Array(32).fill(9));
+  it('AC-6.3 — 10-packet swap emits 10 distinct swap-node-side ephemeral pubkeys (D12-008, R-006)', async () => {
+    const swapNode = await buildFixtureSwapNode();
+    const sender = await buildFixtureSender(swapNode, new Uint8Array(32).fill(9));
     try {
       const result = await streamSwap({
         client: sender.client,
-        swapPubkey: mill.identity.pubkey,
-        swapIlpAddress: FIXTURE_MILL_ILP_ADDRESS,
+        swapPubkey: swapNode.identity.pubkey,
+        swapIlpAddress: FIXTURE_SWAP_NODE_ILP_ADDRESS,
         pair: fixtureSwapPair(),
         senderSecretKey: sender.secretKey,
         chainRecipient: FIXTURE_EVM_RECIPIENT,
@@ -480,18 +480,18 @@ describe('AC-6 [P0] intermediary privacy — gift-wrap opaque, distinct ephemera
       expect(ephemeralKeys.size).toBe(10);
     } finally {
       await sender.close();
-      await mill.stop();
+      await swapNode.stop();
     }
   });
 
   it('AC-6.4 — FULFILL claim ciphertext is sender-only readable (non-sender key throws)', async () => {
-    const mill = await buildFixtureMill();
-    const sender = await buildFixtureSender(mill, new Uint8Array(32).fill(10));
+    const swapNode = await buildFixtureSwapNode();
+    const sender = await buildFixtureSender(swapNode, new Uint8Array(32).fill(10));
     try {
       await streamSwap({
         client: sender.client,
-        swapPubkey: mill.identity.pubkey,
-        swapIlpAddress: FIXTURE_MILL_ILP_ADDRESS,
+        swapPubkey: swapNode.identity.pubkey,
+        swapIlpAddress: FIXTURE_SWAP_NODE_ILP_ADDRESS,
         pair: fixtureSwapPair(),
         senderSecretKey: sender.secretKey,
         chainRecipient: FIXTURE_EVM_RECIPIENT,
@@ -516,7 +516,7 @@ describe('AC-6 [P0] intermediary privacy — gift-wrap opaque, distinct ephemera
       expect(() => nip44.v2.decrypt(meta.claim, conv)).toThrow();
     } finally {
       await sender.close();
-      await mill.stop();
+      await swapNode.stop();
     }
   });
 });
@@ -526,17 +526,17 @@ describe('AC-6 [P0] intermediary privacy — gift-wrap opaque, distinct ephemera
 // ---------------------------------------------------------------------------
 
 describe('AC-7 + AC-12 [P1] two-sender swap + sticky per-sender channel binding (T-066)', () => {
-  it('AC-7 — two distinct senders both receive claims signed by same Mill', async () => {
-    const mill = await buildFixtureMill({ channelCount: 2 });
-    const senderA = await buildFixtureSender(mill, new Uint8Array(32).fill(11));
-    const senderB = await buildFixtureSender(mill, new Uint8Array(32).fill(12));
+  it('AC-7 — two distinct senders both receive claims signed by same swap node', async () => {
+    const swapNode = await buildFixtureSwapNode({ channelCount: 2 });
+    const senderA = await buildFixtureSender(swapNode, new Uint8Array(32).fill(11));
+    const senderB = await buildFixtureSender(swapNode, new Uint8Array(32).fill(12));
     try {
       expect(senderA.publicKey).not.toBe(senderB.publicKey);
 
       const resA = await streamSwap({
         client: senderA.client,
-        swapPubkey: mill.identity.pubkey,
-        swapIlpAddress: FIXTURE_MILL_ILP_ADDRESS,
+        swapPubkey: swapNode.identity.pubkey,
+        swapIlpAddress: FIXTURE_SWAP_NODE_ILP_ADDRESS,
         pair: fixtureSwapPair(),
         senderSecretKey: senderA.secretKey,
         chainRecipient: FIXTURE_EVM_RECIPIENT,
@@ -545,8 +545,8 @@ describe('AC-7 + AC-12 [P1] two-sender swap + sticky per-sender channel binding 
       });
       const resB = await streamSwap({
         client: senderB.client,
-        swapPubkey: mill.identity.pubkey,
-        swapIlpAddress: FIXTURE_MILL_ILP_ADDRESS,
+        swapPubkey: swapNode.identity.pubkey,
+        swapIlpAddress: FIXTURE_SWAP_NODE_ILP_ADDRESS,
         pair: fixtureSwapPair(),
         senderSecretKey: senderB.secretKey,
         chainRecipient: FIXTURE_EVM_RECIPIENT_2,
@@ -559,9 +559,9 @@ describe('AC-7 + AC-12 [P1] two-sender swap + sticky per-sender channel binding 
       expect(resA.claims.length).toBe(1);
       expect(resB.claims.length).toBe(1);
 
-      const millAddr = mill.millKeys.evm!.address.toLowerCase();
-      expect(resA.claims[0]!.swapSignerAddress?.toLowerCase()).toBe(millAddr);
-      expect(resB.claims[0]!.swapSignerAddress?.toLowerCase()).toBe(millAddr);
+      const swapNodeAddr = swapNode.swapNodeKeys.evm!.address.toLowerCase();
+      expect(resA.claims[0]!.swapSignerAddress?.toLowerCase()).toBe(swapNodeAddr);
+      expect(resB.claims[0]!.swapSignerAddress?.toLowerCase()).toBe(swapNodeAddr);
 
       expect(resA.claims[0]!.recipient).toBe(FIXTURE_EVM_RECIPIENT);
       expect(resB.claims[0]!.recipient).toBe(FIXTURE_EVM_RECIPIENT_2);
@@ -577,8 +577,8 @@ describe('AC-7 + AC-12 [P1] two-sender swap + sticky per-sender channel binding 
       // same channelId (sticky binding).
       const resA2 = await streamSwap({
         client: senderA.client,
-        swapPubkey: mill.identity.pubkey,
-        swapIlpAddress: FIXTURE_MILL_ILP_ADDRESS,
+        swapPubkey: swapNode.identity.pubkey,
+        swapIlpAddress: FIXTURE_SWAP_NODE_ILP_ADDRESS,
         pair: fixtureSwapPair(),
         senderSecretKey: senderA.secretKey,
         chainRecipient: FIXTURE_EVM_RECIPIENT,
@@ -590,7 +590,7 @@ describe('AC-7 + AC-12 [P1] two-sender swap + sticky per-sender channel binding 
     } finally {
       await senderA.close();
       await senderB.close();
-      await mill.stop();
+      await swapNode.stop();
     }
   });
 });
@@ -601,13 +601,13 @@ describe('AC-7 + AC-12 [P1] two-sender swap + sticky per-sender channel binding 
 
 describe('AC-8 [P0] streamSwap → buildSettlementTx schema round-trip (T-8A)', () => {
   it('AC-8 — claims feed directly into buildSettlementTx with NO transformation', async () => {
-    const mill = await buildFixtureMill();
-    const sender = await buildFixtureSender(mill, new Uint8Array(32).fill(13));
+    const swapNode = await buildFixtureSwapNode();
+    const sender = await buildFixtureSender(swapNode, new Uint8Array(32).fill(13));
     try {
       const result = await streamSwap({
         client: sender.client,
-        swapPubkey: mill.identity.pubkey,
-        swapIlpAddress: FIXTURE_MILL_ILP_ADDRESS,
+        swapPubkey: swapNode.identity.pubkey,
+        swapIlpAddress: FIXTURE_SWAP_NODE_ILP_ADDRESS,
         pair: fixtureSwapPair(),
         senderSecretKey: sender.secretKey,
         chainRecipient: FIXTURE_EVM_RECIPIENT,
@@ -627,7 +627,7 @@ describe('AC-8 [P0] streamSwap → buildSettlementTx schema round-trip (T-8A)', 
         claims: result.claims,
         signers: {
           [chain]: {
-            address: mill.millKeys.evm!.address.toLowerCase(),
+            address: swapNode.swapNodeKeys.evm!.address.toLowerCase(),
             contractAddress: channelContractAddress,
             chainId: ANVIL_CHAIN_ID,
           },
@@ -643,14 +643,14 @@ describe('AC-8 [P0] streamSwap → buildSettlementTx schema round-trip (T-8A)', 
       expect(bundle.unsignedTxBytes.length).toBeGreaterThan(0);
       expect(bundle.recipient).toBe(FIXTURE_EVM_RECIPIENT);
       expect(bundle.swapSignerAddress.toLowerCase()).toBe(
-        mill.millKeys.evm!.address.toLowerCase(),
+        swapNode.swapNodeKeys.evm!.address.toLowerCase(),
       );
       // Winner should be highest-nonce claim (all 10 merged into one bundle).
       expect(bundle.claimsMerged).toBe(10);
       expect(settlement.rejected.length).toBe(0);
     } finally {
       await sender.close();
-      await mill.stop();
+      await swapNode.stop();
     }
   });
 });
