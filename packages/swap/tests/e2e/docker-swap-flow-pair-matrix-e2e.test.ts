@@ -197,8 +197,8 @@ describe('Docker Swap-Flow Pair-Matrix E2E (Story 12.10, Task 5) — 9 ordered c
       // Run streamSwap for this pair
       const result = await streamSwap({
         client: sharedSender!.client,
-        millPubkey: PEER1_NOSTR_PUBKEY,
-        millIlpAddress: 'g.toon.peer1',
+        swapPubkey: PEER1_NOSTR_PUBKEY,
+        swapIlpAddress: 'g.toon.peer1',
         pair: {
           from: {
             assetCode: 'USD',

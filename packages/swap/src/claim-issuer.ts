@@ -235,8 +235,8 @@ export class MultiChainClaimIssuer implements ClaimIssuer {
     // provided a signer-address map. Absent signer address = legacy caller,
     // metadata stays in the pre-12.6 shape.
     const result: IssueClaimResult = { claim, claimId };
-    const millSignerAddress = this.signerAddresses[targetChain];
-    if (millSignerAddress !== undefined) {
+    const swapSignerAddress = this.signerAddresses[targetChain];
+    if (swapSignerAddress !== undefined) {
       result.channelId = reservation.channelId;
       result.nonce = reservation.nonce;
       result.cumulativeAmount = reservation.cumulativeAmount;
@@ -244,7 +244,7 @@ export class MultiChainClaimIssuer implements ClaimIssuer {
       // address, not the Nostr identity key. The sender's AC-7 equality
       // check asserts `metadata.recipient === params.chainRecipient`.
       result.recipient = chainRecipient;
-      result.millSignerAddress = millSignerAddress;
+      result.swapSignerAddress = swapSignerAddress;
     }
     return result;
   }

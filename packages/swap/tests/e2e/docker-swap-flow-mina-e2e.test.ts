@@ -78,8 +78,8 @@ describe('Docker Swap-Flow Mina E2E (Story 12.10, Task 4)', () => {
       });
       swapResult = await streamSwap({
         client: sender.client,
-        millPubkey: PEER1_NOSTR_PUBKEY,
-        millIlpAddress: 'g.toon.peer1',
+        swapPubkey: PEER1_NOSTR_PUBKEY,
+        swapIlpAddress: 'g.toon.peer1',
         pair: {
           from: {
             assetCode: 'USD',
@@ -160,7 +160,7 @@ describe('Docker Swap-Flow Mina E2E (Story 12.10, Task 4)', () => {
     expect(lastClaim.cumulativeAmount).toBeDefined();
     expect(lastClaim.recipient).toBeDefined();
     expect(lastClaim.recipient).toBe(minaAccount!.pk);
-    expect(lastClaim.millSignerAddress).toBeDefined();
+    expect(lastClaim.swapSignerAddress).toBeDefined();
 
     // buildSettlementTx for Mina claims should throw UNSUPPORTED_CHAIN
     // because the Mina settlement builder is a stub (Story 12.6 AC-9).
@@ -169,7 +169,7 @@ describe('Docker Swap-Flow Mina E2E (Story 12.10, Task 4)', () => {
         claims: swapResult!.claims,
         signers: {
           [DOCKER_CHAIN_MINA]: {
-            address: lastClaim.millSignerAddress!,
+            address: lastClaim.swapSignerAddress!,
           },
         },
         recipients: {

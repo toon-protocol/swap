@@ -217,7 +217,7 @@ describe.skipIf(!hasMinaSigner)(
         sourceAmount: 1n,
         targetAmount: 1n,
         claimBytes: sig,
-        millEphemeralPubkey: '0'.repeat(64),
+        swapEphemeralPubkey: '0'.repeat(64),
         pair: {
           from: { assetCode: 'USDC', assetScale: 6, chain: 'evm:base:8453' },
           to: { assetCode: 'MINA', assetScale: 9, chain: 'mina:mainnet' },
@@ -228,7 +228,7 @@ describe.skipIf(!hasMinaSigner)(
         nonce: nonce.toString(),
         cumulativeAmount: cumulativeAmount.toString(),
         recipient,
-        millSignerAddress: realPubKey,
+        swapSignerAddress: realPubKey,
       } as unknown as AccumulatedClaim;
 
       const verifyClient = new Client({

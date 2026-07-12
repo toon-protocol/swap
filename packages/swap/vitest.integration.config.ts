@@ -17,13 +17,11 @@ import { resolve } from 'path';
 export default defineConfig({
   resolve: {
     alias: {
-      // NOTE: Do NOT alias `@toon-protocol/connector` — it is an external
-      // dependency resolved via node_modules; there is no local source in
-      // this monorepo.
-      // Sub-path aliases MUST precede the root alias so they match first.
-      '@toon-protocol/core/toon': resolve(__dirname, '../../packages/core/src/toon/index.ts'),
-      '@toon-protocol/core': resolve(__dirname, '../../packages/core/src/index.ts'),
-      '@toon-protocol/sdk': resolve(__dirname, '../../packages/sdk/src/index.ts'),
+      // NOTE: `@toon-protocol/core`, `@toon-protocol/sdk`, and
+      // `@toon-protocol/connector` are external dependencies resolved via
+      // node_modules — there is no local source for them in this repo.
+      // (Stale post-extraction aliases to `../../packages/{core,sdk}/src`
+      // were removed with the sdk 2.x migration, issue #45.)
       '@toon-protocol/swap': resolve(__dirname, './src/index.ts'),
     },
   },

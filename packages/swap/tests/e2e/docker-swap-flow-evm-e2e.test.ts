@@ -93,8 +93,8 @@ describe('Docker Swap-Flow EVM E2E (Story 12.10, Task 2)', () => {
       });
       swapResult = await streamSwap({
         client: sender.client,
-        millPubkey: PEER1_NOSTR_PUBKEY,
-        millIlpAddress: 'g.toon.peer1',
+        swapPubkey: PEER1_NOSTR_PUBKEY,
+        swapIlpAddress: 'g.toon.peer1',
         pair: {
           from: {
             assetCode: 'USD',
@@ -370,14 +370,14 @@ describe('Docker Swap-Flow EVM E2E (Story 12.10, Task 2)', () => {
     expect(lastClaim.nonce).toBeDefined();
     expect(lastClaim.cumulativeAmount).toBeDefined();
     expect(lastClaim.recipient).toBeDefined();
-    expect(lastClaim.millSignerAddress).toBeDefined();
+    expect(lastClaim.swapSignerAddress).toBeDefined();
 
     // buildSettlementTx requires lowercase EVM addresses (regex enforced).
     // Both the mill signer address (returned in claim metadata) and the
     // token-network contract address are normalized to lowercase here so
     // the EVM_ADDRESS_REGEX guard in build-settlement-tx.ts accepts them.
     const signerConfig = {
-      address: lastClaim.millSignerAddress!.toLowerCase(),
+      address: lastClaim.swapSignerAddress!.toLowerCase(),
       contractAddress: TOKEN_NETWORK_ADDRESS.toLowerCase(),
       chainId: CHAIN_ID,
     };
@@ -408,7 +408,7 @@ describe('Docker Swap-Flow EVM E2E (Story 12.10, Task 2)', () => {
     expect(bundle.nonce).toBe(lastClaim.nonce);
     expect(bundle.cumulativeAmount).toBe(lastClaim.cumulativeAmount);
     expect(bundle.recipient).toBe(EVM_CHAIN_RECIPIENT);
-    expect(bundle.millSignerAddress).toBe(lastClaim.millSignerAddress);
+    expect(bundle.swapSignerAddress).toBe(lastClaim.swapSignerAddress);
     expect(bundle.unsignedTxBytes.length).toBeGreaterThan(0);
     expect(bundle.claimsMerged).toBeGreaterThanOrEqual(1);
 

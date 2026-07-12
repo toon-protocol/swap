@@ -517,7 +517,7 @@ describe('MultiChainClaimIssuer (Story 12.4 AC-6, AC-8, AC-10)', () => {
 //
 // When the issuer is constructed with a `signerAddresses` map, every
 // `issueClaim()` result MUST expose channelId/nonce/cumulativeAmount/
-// recipient/millSignerAddress so the Mill's swap handler can emit them in
+// recipient/swapSignerAddress so the Mill's swap handler can emit them in
 // FULFILL metadata (the load-bearing contract for `buildSettlementTx()`).
 //
 // When `signerAddresses` is omitted (legacy caller), the result MUST stay in
@@ -529,7 +529,7 @@ describe('Story 12.6 AC-3 — IssueClaimResult settlement-context fields', () =>
   const EVM_MILL_SIGNER = '0x' + 'c'.repeat(40);
   const CHAIN = 'evm:base:8453';
 
-  it('[P0] surfaces channelId/nonce/cumulativeAmount/recipient/millSignerAddress when signerAddresses configured', async () => {
+  it('[P0] surfaces channelId/nonce/cumulativeAmount/recipient/swapSignerAddress when signerAddresses configured', async () => {
     const inventory = new MillInventory({
       balances: { 'ETH:evm:base:8453': { available: 1_000n, total: 1_000n } },
     });
@@ -573,7 +573,7 @@ describe('Story 12.6 AC-3 — IssueClaimResult settlement-context fields', () =>
     // Story 12.8 session 3.
     expect(result.recipient).toBe(FIXTURE_EVM_RECIPIENT);
     // Mill signer address threaded through from config.
-    expect(result.millSignerAddress).toBe(EVM_MILL_SIGNER);
+    expect(result.swapSignerAddress).toBe(EVM_MILL_SIGNER);
   });
 
   it('[P0] monotonically increments nonce + cumulativeAmount across two sequential claims', async () => {
@@ -619,10 +619,10 @@ describe('Story 12.6 AC-3 — IssueClaimResult settlement-context fields', () =>
     expect(r2.nonce).toBe(2n);
     // Balance proofs are CUMULATIVE — total running balance, not per-packet.
     expect(r2.cumulativeAmount).toBe(50n);
-    // channelId + recipient + millSignerAddress stable across claims.
+    // channelId + recipient + swapSignerAddress stable across claims.
     expect(r2.channelId).toBe(r1.channelId);
     expect(r2.recipient).toBe(r1.recipient);
-    expect(r2.millSignerAddress).toBe(r1.millSignerAddress);
+    expect(r2.swapSignerAddress).toBe(r1.swapSignerAddress);
   });
 
   it('[P0] omits all settlement fields when signerAddresses NOT configured (legacy shape)', async () => {
@@ -660,7 +660,7 @@ describe('Story 12.6 AC-3 — IssueClaimResult settlement-context fields', () =>
     expect(result.nonce).toBeUndefined();
     expect(result.cumulativeAmount).toBeUndefined();
     expect(result.recipient).toBeUndefined();
-    expect(result.millSignerAddress).toBeUndefined();
+    expect(result.swapSignerAddress).toBeUndefined();
     // But the base fields still work.
     expect(result.claim).toBeInstanceOf(Uint8Array);
     expect(typeof result.claimId).toBe('string');
@@ -698,7 +698,7 @@ describe('Story 12.6 AC-3 — IssueClaimResult settlement-context fields', () =>
     });
 
     // Chain-specific miss -> legacy shape for this claim.
-    expect(result.millSignerAddress).toBeUndefined();
+    expect(result.swapSignerAddress).toBeUndefined();
     expect(result.channelId).toBeUndefined();
     expect(result.nonce).toBeUndefined();
     expect(result.cumulativeAmount).toBeUndefined();

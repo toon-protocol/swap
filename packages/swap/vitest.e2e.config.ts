@@ -5,10 +5,10 @@ import { resolve } from 'path';
  * Story 12.10 — Docker-based E2E vitest config.
  *
  * Modeled on `packages/sdk/vitest.e2e.config.ts` (AC-1). Targets
- * `tests/e2e/**\/*.test.ts`, bumps `testTimeout` to 180000ms because Mina
- * lightnet inclusion budgets 60s+ per settlement, and wires cross-package
- * aliases so Mill E2E tests can import directly from `@toon-protocol/sdk`
- * and sibling packages WITHOUT a `pnpm build` pass (development loop).
+ * `tests/e2e/**\/*.test.ts` and bumps `testTimeout` to 180000ms because
+ * Mina lightnet inclusion budgets 60s+ per settlement.
+ * `@toon-protocol/{core,sdk,connector}` resolve from node_modules; only
+ * `@toon-protocol/swap` is aliased to local source (development loop).
  *
  * Prerequisites: `./scripts/sdk-e2e-infra.sh up` must be running. Tests
  * runtime-skip via `skipIfNotReady()` when infra is down (AC-2) — they do
@@ -17,18 +17,11 @@ import { resolve } from 'path';
 export default defineConfig({
   resolve: {
     alias: {
-      // Sub-path aliases MUST precede the root alias so they match first.
-      '@toon-protocol/core/toon': resolve(
-        __dirname,
-        '../core/src/toon/index.ts'
-      ),
-      '@toon-protocol/core/nip34': resolve(
-        __dirname,
-        '../core/src/nip34/index.ts'
-      ),
-      '@toon-protocol/core': resolve(__dirname, '../core/src/index.ts'),
-      '@toon-protocol/relay': resolve(__dirname, '../relay/src/index.ts'),
-      '@toon-protocol/sdk': resolve(__dirname, '../sdk/src/index.ts'),
+      // NOTE: `@toon-protocol/core`, `@toon-protocol/sdk`, and
+      // `@toon-protocol/connector` are external dependencies resolved via
+      // node_modules — there is no local source for them in this repo.
+      // (Stale post-extraction aliases to sibling `../{core,relay,sdk}/src`
+      // were removed with the sdk 2.x migration, issue #45.)
       '@toon-protocol/swap': resolve(__dirname, './src/index.ts'),
     },
   },

@@ -66,8 +66,8 @@ describe('AC-9 [P2] Anvil-backed settlement tx well-formedness (opt-in, SDK E2E 
     try {
       const result = await streamSwap({
         client: sender.client,
-        millPubkey: mill.identity.pubkey,
-        millIlpAddress: FIXTURE_MILL_ILP_ADDRESS,
+        swapPubkey: mill.identity.pubkey,
+        swapIlpAddress: FIXTURE_MILL_ILP_ADDRESS,
         pair: fixtureSwapPair(),
         senderSecretKey: sender.secretKey,
         chainRecipient: FIXTURE_EVM_RECIPIENT,

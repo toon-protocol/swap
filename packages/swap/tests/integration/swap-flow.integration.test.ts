@@ -237,8 +237,8 @@ describe('AC-4 [P0] end-to-end swap: 1-packet, 10-packet, rate-drift (T-061, T-0
       const pair = fixtureSwapPair();
       const result = await streamSwap({
         client: sender.client,
-        millPubkey: mill.identity.pubkey,
-        millIlpAddress: FIXTURE_MILL_ILP_ADDRESS,
+        swapPubkey: mill.identity.pubkey,
+        swapIlpAddress: FIXTURE_MILL_ILP_ADDRESS,
         pair,
         senderSecretKey: sender.secretKey,
         chainRecipient: FIXTURE_EVM_RECIPIENT,
@@ -258,7 +258,7 @@ describe('AC-4 [P0] end-to-end swap: 1-packet, 10-packet, rate-drift (T-061, T-0
       expect(claim.nonce).toBeDefined();
       expect(claim.cumulativeAmount).toBeDefined();
       expect(claim.recipient).toBe(FIXTURE_EVM_RECIPIENT);
-      expect(claim.millSignerAddress?.toLowerCase()).toBe(
+      expect(claim.swapSignerAddress?.toLowerCase()).toBe(
         mill.millKeys.evm!.address.toLowerCase(),
       );
       expect(claim.claimBytes).toBeInstanceOf(Uint8Array);
@@ -275,8 +275,8 @@ describe('AC-4 [P0] end-to-end swap: 1-packet, 10-packet, rate-drift (T-061, T-0
     try {
       const result = await streamSwap({
         client: sender.client,
-        millPubkey: mill.identity.pubkey,
-        millIlpAddress: FIXTURE_MILL_ILP_ADDRESS,
+        swapPubkey: mill.identity.pubkey,
+        swapIlpAddress: FIXTURE_MILL_ILP_ADDRESS,
         pair: fixtureSwapPair(),
         senderSecretKey: sender.secretKey,
         chainRecipient: FIXTURE_EVM_RECIPIENT,
@@ -287,7 +287,7 @@ describe('AC-4 [P0] end-to-end swap: 1-packet, 10-packet, rate-drift (T-061, T-0
       expect(result.state).toBe('completed');
       expect(result.claims.length).toBe(10);
       const signers = new Set(
-        result.claims.map((c) => c.millSignerAddress?.toLowerCase()),
+        result.claims.map((c) => c.swapSignerAddress?.toLowerCase()),
       );
       expect(signers.size).toBe(1);
       expect([...signers][0]).toBe(mill.millKeys.evm!.address.toLowerCase());
@@ -301,7 +301,7 @@ describe('AC-4 [P0] end-to-end swap: 1-packet, 10-packet, rate-drift (T-061, T-0
 
       // Every packet issued a distinct ephemeral pubkey (AC-6.3 precondition).
       const ephemeralKeys = new Set(
-        result.claims.map((c) => c.millEphemeralPubkey),
+        result.claims.map((c) => c.swapEphemeralPubkey),
       );
       expect(ephemeralKeys.size).toBe(10);
     } finally {
@@ -323,8 +323,8 @@ describe('AC-4 [P0] end-to-end swap: 1-packet, 10-packet, rate-drift (T-061, T-0
     try {
       const result = await streamSwap({
         client: sender.client,
-        millPubkey: mill.identity.pubkey,
-        millIlpAddress: FIXTURE_MILL_ILP_ADDRESS,
+        swapPubkey: mill.identity.pubkey,
+        swapIlpAddress: FIXTURE_MILL_ILP_ADDRESS,
         pair: fixtureSwapPair(),
         senderSecretKey: sender.secretKey,
         chainRecipient: FIXTURE_EVM_RECIPIENT,
@@ -377,8 +377,8 @@ describe('AC-5 [P1] replay protection via seenPacketIds (T-8E)', () => {
     try {
       const result = await streamSwap({
         client: sender.client,
-        millPubkey: mill.identity.pubkey,
-        millIlpAddress: FIXTURE_MILL_ILP_ADDRESS,
+        swapPubkey: mill.identity.pubkey,
+        swapIlpAddress: FIXTURE_MILL_ILP_ADDRESS,
         pair: fixtureSwapPair(),
         senderSecretKey: sender.secretKey,
         chainRecipient: FIXTURE_EVM_RECIPIENT,
@@ -418,8 +418,8 @@ describe('AC-6 [P0] intermediary privacy — gift-wrap opaque, distinct ephemera
     try {
       await streamSwap({
         client: sender.client,
-        millPubkey: mill.identity.pubkey,
-        millIlpAddress: FIXTURE_MILL_ILP_ADDRESS,
+        swapPubkey: mill.identity.pubkey,
+        swapIlpAddress: FIXTURE_MILL_ILP_ADDRESS,
         pair: fixtureSwapPair(),
         senderSecretKey: sender.secretKey,
         chainRecipient: FIXTURE_EVM_RECIPIENT,
@@ -465,8 +465,8 @@ describe('AC-6 [P0] intermediary privacy — gift-wrap opaque, distinct ephemera
     try {
       const result = await streamSwap({
         client: sender.client,
-        millPubkey: mill.identity.pubkey,
-        millIlpAddress: FIXTURE_MILL_ILP_ADDRESS,
+        swapPubkey: mill.identity.pubkey,
+        swapIlpAddress: FIXTURE_MILL_ILP_ADDRESS,
         pair: fixtureSwapPair(),
         senderSecretKey: sender.secretKey,
         chainRecipient: FIXTURE_EVM_RECIPIENT,
@@ -475,7 +475,7 @@ describe('AC-6 [P0] intermediary privacy — gift-wrap opaque, distinct ephemera
       });
       expect(result.claims.length).toBe(10);
       const ephemeralKeys = new Set(
-        result.claims.map((c) => c.millEphemeralPubkey),
+        result.claims.map((c) => c.swapEphemeralPubkey),
       );
       expect(ephemeralKeys.size).toBe(10);
     } finally {
@@ -490,8 +490,8 @@ describe('AC-6 [P0] intermediary privacy — gift-wrap opaque, distinct ephemera
     try {
       await streamSwap({
         client: sender.client,
-        millPubkey: mill.identity.pubkey,
-        millIlpAddress: FIXTURE_MILL_ILP_ADDRESS,
+        swapPubkey: mill.identity.pubkey,
+        swapIlpAddress: FIXTURE_MILL_ILP_ADDRESS,
         pair: fixtureSwapPair(),
         senderSecretKey: sender.secretKey,
         chainRecipient: FIXTURE_EVM_RECIPIENT,
@@ -535,8 +535,8 @@ describe('AC-7 + AC-12 [P1] two-sender swap + sticky per-sender channel binding 
 
       const resA = await streamSwap({
         client: senderA.client,
-        millPubkey: mill.identity.pubkey,
-        millIlpAddress: FIXTURE_MILL_ILP_ADDRESS,
+        swapPubkey: mill.identity.pubkey,
+        swapIlpAddress: FIXTURE_MILL_ILP_ADDRESS,
         pair: fixtureSwapPair(),
         senderSecretKey: senderA.secretKey,
         chainRecipient: FIXTURE_EVM_RECIPIENT,
@@ -545,8 +545,8 @@ describe('AC-7 + AC-12 [P1] two-sender swap + sticky per-sender channel binding 
       });
       const resB = await streamSwap({
         client: senderB.client,
-        millPubkey: mill.identity.pubkey,
-        millIlpAddress: FIXTURE_MILL_ILP_ADDRESS,
+        swapPubkey: mill.identity.pubkey,
+        swapIlpAddress: FIXTURE_MILL_ILP_ADDRESS,
         pair: fixtureSwapPair(),
         senderSecretKey: senderB.secretKey,
         chainRecipient: FIXTURE_EVM_RECIPIENT_2,
@@ -560,8 +560,8 @@ describe('AC-7 + AC-12 [P1] two-sender swap + sticky per-sender channel binding 
       expect(resB.claims.length).toBe(1);
 
       const millAddr = mill.millKeys.evm!.address.toLowerCase();
-      expect(resA.claims[0]!.millSignerAddress?.toLowerCase()).toBe(millAddr);
-      expect(resB.claims[0]!.millSignerAddress?.toLowerCase()).toBe(millAddr);
+      expect(resA.claims[0]!.swapSignerAddress?.toLowerCase()).toBe(millAddr);
+      expect(resB.claims[0]!.swapSignerAddress?.toLowerCase()).toBe(millAddr);
 
       expect(resA.claims[0]!.recipient).toBe(FIXTURE_EVM_RECIPIENT);
       expect(resB.claims[0]!.recipient).toBe(FIXTURE_EVM_RECIPIENT_2);
@@ -577,8 +577,8 @@ describe('AC-7 + AC-12 [P1] two-sender swap + sticky per-sender channel binding 
       // same channelId (sticky binding).
       const resA2 = await streamSwap({
         client: senderA.client,
-        millPubkey: mill.identity.pubkey,
-        millIlpAddress: FIXTURE_MILL_ILP_ADDRESS,
+        swapPubkey: mill.identity.pubkey,
+        swapIlpAddress: FIXTURE_MILL_ILP_ADDRESS,
         pair: fixtureSwapPair(),
         senderSecretKey: senderA.secretKey,
         chainRecipient: FIXTURE_EVM_RECIPIENT,
@@ -606,8 +606,8 @@ describe('AC-8 [P0] streamSwap → buildSettlementTx schema round-trip (T-8A)', 
     try {
       const result = await streamSwap({
         client: sender.client,
-        millPubkey: mill.identity.pubkey,
-        millIlpAddress: FIXTURE_MILL_ILP_ADDRESS,
+        swapPubkey: mill.identity.pubkey,
+        swapIlpAddress: FIXTURE_MILL_ILP_ADDRESS,
         pair: fixtureSwapPair(),
         senderSecretKey: sender.secretKey,
         chainRecipient: FIXTURE_EVM_RECIPIENT,
@@ -642,7 +642,7 @@ describe('AC-8 [P0] streamSwap → buildSettlementTx schema round-trip (T-8A)', 
       expect(bundle.unsignedTxBytes).toBeInstanceOf(Uint8Array);
       expect(bundle.unsignedTxBytes.length).toBeGreaterThan(0);
       expect(bundle.recipient).toBe(FIXTURE_EVM_RECIPIENT);
-      expect(bundle.millSignerAddress.toLowerCase()).toBe(
+      expect(bundle.swapSignerAddress.toLowerCase()).toBe(
         mill.millKeys.evm!.address.toLowerCase(),
       );
       // Winner should be highest-nonce claim (all 10 merged into one bundle).

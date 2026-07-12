@@ -84,8 +84,8 @@ describe('Docker Swap-Flow Solana E2E (Story 12.10, Task 3)', () => {
       sender = { ...baseSender, solanaRecipient };
       swapResult = await streamSwap({
         client: sender.client,
-        millPubkey: PEER1_NOSTR_PUBKEY,
-        millIlpAddress: 'g.toon.peer1',
+        swapPubkey: PEER1_NOSTR_PUBKEY,
+        swapIlpAddress: 'g.toon.peer1',
         pair: {
           from: {
             assetCode: 'USD',
@@ -159,14 +159,14 @@ describe('Docker Swap-Flow Solana E2E (Story 12.10, Task 3)', () => {
     expect(lastClaim.nonce).toBeDefined();
     expect(lastClaim.cumulativeAmount).toBeDefined();
     expect(lastClaim.recipient).toBeDefined();
-    expect(lastClaim.millSignerAddress).toBeDefined();
+    expect(lastClaim.swapSignerAddress).toBeDefined();
 
     // Build settlement transaction
     const settlementResult = buildSettlementTx({
       claims: swapResult!.claims,
       signers: {
         [DOCKER_CHAIN_SOLANA]: {
-          address: lastClaim.millSignerAddress!,
+          address: lastClaim.swapSignerAddress!,
           programId: SOLANA_PROGRAM_ID,
         },
       },
@@ -190,7 +190,7 @@ describe('Docker Swap-Flow Solana E2E (Story 12.10, Task 3)', () => {
     expect(bundle.nonce).toBe(lastClaim.nonce);
     expect(bundle.cumulativeAmount).toBe(lastClaim.cumulativeAmount);
     expect(bundle.recipient).toBe(sender!.solanaRecipient);
-    expect(bundle.millSignerAddress).toBe(lastClaim.millSignerAddress);
+    expect(bundle.swapSignerAddress).toBe(lastClaim.swapSignerAddress);
     expect(bundle.unsignedTxBytes.length).toBeGreaterThan(0);
     expect(bundle.claimsMerged).toBeGreaterThanOrEqual(1);
   });
