@@ -59,6 +59,7 @@ import { createHandlerContext } from '@toon-protocol/sdk';
 
 import { deriveSwapNodeKeys } from './wallet.js';
 import type { SwapNodeKeys, SwapNodeChainKind } from './wallet.js';
+import type { SettlementEvent } from './settlement-event.js';
 import { SwapInventory } from './inventory.js';
 import { SwapChannelState } from './channel-state.js';
 import type { ChannelEntry } from './channel-state.js';
@@ -248,6 +249,16 @@ export interface SwapNodeConfig {
   chains: readonly SwapNodeChainKind[];
   channels: Record<string, readonly ChannelEntry[]>;
   inventory: Record<string, bigint>;
+  /**
+   * Issue #49 — per-chain in-flight window ceiling for the ROLLING path
+   * (rolling-swap §8: size it to `δ_max·W_max·R` plus a settlement-latency
+   * buffer, NOT to notional volume). Keyed like {@link inventory}; applies
+   * to every `(pair.to.assetCode, chain)` pool on that chain. Clamped to
+   * live `available` at check time, so it can never advertise capital the
+   * maker does not hold. Absent → the ceiling degrades to `available`.
+   * Operator config ALWAYS wins over persisted snapshots for this field.
+   */
+  windowBudget?: Record<string, bigint>;
 
   /**
    * Optional live-rate hook, widened from the SDK's string-only shape:
@@ -322,6 +333,12 @@ export interface SwapNodeConfig {
     legBExpiryMarginMs?: number;
     /** Reject fills whose remaining leg-A budget (ms) is below this. */
     minLegBTimeMs?: number;
+    /**
+     * Issue #49 — grace (ms) added on top of the leg-B expiry when sizing a
+     * fill's window-reservation TTL (crashed/stalled packets free their
+     * slot right after they could no longer fulfill). Default 5s.
+     */
+    reservationGraceMs?: number;
   };
   /**
    * Leg-B egress override (tests / custom connectors). When omitted, the
@@ -487,10 +504,35 @@ export interface SwapNodeInstance {
    * call it directly.
    */
   registerRollingSession(session: RollingSession): void;
+  /**
+   * Issue #49 — apply an on-chain settlement confirmation: shrinks the
+   * matching pool's unsettled liability by the watermark delta (monotone
+   * per channel; stale/replayed confirmations are a 0n no-op) and recycles
+   * the freed capacity into the in-flight window. The pool is resolved by
+   * `event.channelId` against the provisioned channel state. Returns the
+   * liability actually reduced. Persisted (best-effort) when persistence
+   * is enabled.
+   */
+  recordSettlement(event: SettlementEvent): bigint;
   /** @internal — AC-10 test hook. */
   readonly _handlerRegistry?: HandlerRegistry;
   /** @internal — issue #47 test hook (rolling-engine introspection). */
   readonly _rollingEngine?: RollingSwapEngine;
+}
+
+/**
+ * Issue #49 — the three-bucket in-flight window view for one
+ * `assetCode:chain` pool (rolling-swap §8). All bigints as decimal strings.
+ */
+export interface SwapNodeHealthWindowEntry {
+  /** Effective ceiling: `min(configured windowBudget, available)`. */
+  budget: string;
+  /** Σ live packet reservations (reserve → commit/release/TTL). */
+  inFlight: string;
+  /** Committed liability awaiting on-chain settlement confirmation. */
+  unsettled: string;
+  /** `budget − inFlight − unsettled` — capacity for new fills. */
+  free: string;
 }
 
 export interface SwapNodeHealthResponse {
@@ -505,6 +547,12 @@ export interface SwapNodeHealthResponse {
   swapPairs: SwapPair[];
   /** Per-asset available reserves, parallel to `inventory` (which is total). */
   inventoryAvailable: Record<string, string>;
+  /**
+   * Issue #49 — in-flight vs unsettled vs free per `assetCode:chain` pool:
+   * the capital-exposure view that replaces total/available as the rolling
+   * path's operational signal (total/available remain for the legacy pool).
+   */
+  inventoryWindow: Record<string, SwapNodeHealthWindowEntry>;
 }
 
 // ---------------------------------------------------------------------------
@@ -698,6 +746,23 @@ export function validateConfig(config: SwapNodeConfig): void {
     }
   }
 
+  if (config.windowBudget !== undefined) {
+    for (const [chain, budget] of Object.entries(config.windowBudget)) {
+      if (typeof budget !== 'bigint' || budget < 0n) {
+        throw new SwapNodeStartError(
+          'INVALID_CONFIG',
+          `SwapNodeConfig.windowBudget["${chain}"] MUST be a non-negative bigint`
+        );
+      }
+      if (!distinctTargetChains.has(chain)) {
+        throw new SwapNodeStartError(
+          'INVALID_CONFIG',
+          `SwapNodeConfig.windowBudget["${chain}"] references a chain no swap pair targets`
+        );
+      }
+    }
+  }
+
   if (config.maxRateAge !== undefined) {
     try {
       validateMaxRateAgeConfig(config.maxRateAge);
@@ -722,6 +787,7 @@ export function validateConfig(config: SwapNodeConfig): void {
       'legBBudgetMs',
       'legBExpiryMarginMs',
       'minLegBTimeMs',
+      'reservationGraceMs',
     ];
     for (const k of knobs) {
       const v = config.rolling[k];
@@ -957,26 +1023,78 @@ export async function startSwapNode(
   //    (persisted wins): a restart must not reset spent inventory back to
   //    the notional boot value. Config seeds only keys the snapshot has
   //    never recorded.
+  //    Issue #49 — `windowBudget` is operator config and ALWAYS comes from
+  //    config (never the snapshot); `unsettled` + in-flight reservations +
+  //    settled watermarks rehydrate from the snapshot. Rehydrated
+  //    reservations recover by expire-and-release: they occupy the window
+  //    until their persisted `expiresAt`, then free it (state-store crash
+  //    rule 6 — no leaked capacity, and the write-ahead watermark already
+  //    prevents any double-spend).
   const inventoryInit: Record<
     string,
-    { available: bigint; total: bigint; updatedAt?: number }
+    {
+      available: bigint;
+      total: bigint;
+      updatedAt?: number;
+      windowBudget?: bigint;
+      unsettled?: bigint;
+    }
   > = {};
   for (const pair of config.swapPairs) {
     const chain = pair.to.chain;
     const asset = pair.to.assetCode;
     const bal = config.inventory[chain] ?? 0n;
-    inventoryInit[`${asset}:${chain}`] = { available: bal, total: bal };
+    const budget = config.windowBudget?.[chain];
+    inventoryInit[`${asset}:${chain}`] = {
+      available: bal,
+      total: bal,
+      ...(budget !== undefined && { windowBudget: budget }),
+    };
   }
   if (persistedState) {
     for (const [k, v] of Object.entries(persistedState.inventory)) {
+      const configBudget = inventoryInit[k]?.windowBudget;
       inventoryInit[k] = {
         available: BigInt(v.available),
         total: BigInt(v.total),
+        unsettled: BigInt(v.unsettled ?? '0'),
         updatedAt: v.updatedAt,
+        // Config wins; a snapshot-only budget (key no longer configured) is
+        // dropped rather than resurrected.
+        ...(configBudget !== undefined && { windowBudget: configBudget }),
       };
     }
   }
-  const inventory = new SwapInventory({ balances: inventoryInit });
+  const rehydratedReservations = persistedState
+    ? Object.fromEntries(
+        Object.entries(persistedState.reservations).map(([id, r]) => [
+          id,
+          { key: r.key, amount: BigInt(r.amount), expiresAt: r.expiresAt },
+        ])
+      )
+    : undefined;
+  const inventory = new SwapInventory({
+    balances: inventoryInit,
+    ...(rehydratedReservations && { reservations: rehydratedReservations }),
+    ...(persistedState && {
+      settledWatermarks: Object.fromEntries(
+        Object.entries(persistedState.settledWatermarks).map(([k, v]) => [
+          k,
+          BigInt(v),
+        ])
+      ),
+    }),
+  });
+  if (
+    rehydratedReservations &&
+    Object.keys(rehydratedReservations).length > 0
+  ) {
+    logger.info?.('swap.state.reservations_rehydrated', {
+      count: Object.keys(rehydratedReservations).length,
+      policy:
+        'expire-and-release: crashed in-flight reservations free their window slot at their persisted expiresAt (state-store crash rule 6)',
+    });
+  }
 
   // 6. Channel state — flatten `Record<chain, ChannelEntry[]>` into the
   //    `SwapChannelState` key scheme (`assetCode:chain:senderPubkey`). For
@@ -1398,6 +1516,9 @@ export async function startSwapNode(
     ...(config.rolling?.minLegBTimeMs !== undefined && {
       minLegBTimeMs: config.rolling.minLegBTimeMs,
     }),
+    ...(config.rolling?.reservationGraceMs !== undefined && {
+      reservationGraceMs: config.rolling.reservationGraceMs,
+    }),
   });
 
   // 11a. Wire the HandlerRegistry to the connector's local-delivery path.
@@ -1650,6 +1771,17 @@ export async function startSwapNode(
         invAvailable[b.chain] = b.available.toString();
       }
     }
+    // Issue #49 — the three-bucket window view (in-flight / unsettled /
+    // free) per pool: the honeypot-sized exposure signal (spec §8).
+    const inventoryWindow: Record<string, SwapNodeHealthWindowEntry> = {};
+    for (const w of inventory.windowSnapshot()) {
+      inventoryWindow[`${w.assetCode}:${w.chain}`] = {
+        budget: w.budget.toString(),
+        inFlight: w.inFlight.toString(),
+        unsettled: w.unsettled.toString(),
+        free: w.free.toString(),
+      };
+    }
     return {
       status,
       version: VERSION,
@@ -1660,6 +1792,7 @@ export async function startSwapNode(
       inventory: inv,
       swapPairs: [...config.swapPairs],
       inventoryAvailable: invAvailable,
+      inventoryWindow,
     };
   };
 
@@ -1877,6 +2010,64 @@ export async function startSwapNode(
     _rollingEngine: rollingEngine,
     registerRollingSession: (session: RollingSession) => {
       rollingEngine.registerSession(session);
+    },
+    recordSettlement: (event: SettlementEvent): bigint => {
+      // Resolve the (assetCode, chain) pool via the provisioned channel
+      // state: stored keys are `${assetCode}:${chain}:${channelId}`.
+      const { channels: liveChannels } = channelState.snapshot();
+      const matches: { assetCode: string; chain: string }[] = [];
+      for (const [storedKey, entry] of Object.entries(liveChannels)) {
+        if (entry.channelId !== event.channelId) continue;
+        const suffix = `:${event.channelId}`;
+        if (!storedKey.endsWith(suffix)) continue;
+        const prefix = storedKey.slice(0, -suffix.length);
+        const sep = prefix.indexOf(':');
+        if (sep <= 0) continue;
+        matches.push({
+          assetCode: prefix.slice(0, sep),
+          chain: prefix.slice(sep + 1),
+        });
+      }
+      if (matches.length === 0) {
+        logger.warn?.('swap.recordSettlement.unknown_channel', {
+          channelId: event.channelId,
+          txHash: event.txHash,
+        });
+        return 0n;
+      }
+      if (matches.length > 1) {
+        logger.warn?.('swap.recordSettlement.ambiguous_channel', {
+          channelId: event.channelId,
+          matches,
+          note: 'applying to the first match only; provision distinct channelIds per (asset, chain) pool',
+        });
+      }
+      const [target] = matches;
+      if (!target) return 0n; // unreachable (length checked above)
+      const reduced = inventory.recordSettlement({
+        assetCode: target.assetCode,
+        chain: target.chain,
+        channelId: event.channelId,
+        cumulativeAmount: BigInt(event.cumulativeAmount),
+      });
+      if (persister) {
+        try {
+          persister.persist();
+        } catch (err) {
+          logger.error?.('swap.recordSettlement.persist_failed', {
+            err: errSummary(err),
+          });
+        }
+      }
+      logger.info?.('swap.recordSettlement.ok', {
+        channelId: event.channelId,
+        chain: target.chain,
+        asset: target.assetCode,
+        txHash: event.txHash,
+        cumulativeAmount: event.cumulativeAmount,
+        liabilityReduced: reduced.toString(),
+      });
+      return reduced;
     },
     health: getHealth,
     async stop() {

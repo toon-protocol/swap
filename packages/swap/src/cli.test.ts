@@ -456,3 +456,38 @@ describe('issue #47 — SWAP_RATE_URL rateProvider wiring', () => {
     );
   });
 });
+
+// ---------------------------------------------------------------------------
+// Issue #49 — windowBudget config plumbing
+// ---------------------------------------------------------------------------
+
+describe('issue #49 — CLI windowBudget config key', () => {
+  it('[P1] rejects a windowBudget map with a prototype-polluting key', async () => {
+    const mod = (await import('./cli.js')) as {
+      main: (argv: string[]) => Promise<unknown>;
+    };
+    const rawJson =
+      '{"mnemonic":"x","channels":{},"inventory":{},' +
+      '"relayUrls":["wss://relay.example"],' +
+      '"windowBudget":{"__proto__":"1"}}';
+    const cfgPath = writeTempRawJson(rawJson);
+    await expect(mod.main(['--config', cfgPath])).rejects.toThrow(
+      /Unsafe key "__proto__"/
+    );
+  });
+
+  it('[P1] rejects a non-numeric windowBudget value', async () => {
+    const mod = (await import('./cli.js')) as {
+      main: (argv: string[]) => Promise<unknown>;
+    };
+    const cfg = {
+      mnemonic: 'x',
+      channels: {},
+      inventory: {},
+      windowBudget: { 'evm:8453': 'lots' },
+      relayUrls: ['wss://relay.example'],
+    };
+    const cfgPath = writeTempConfig(cfg);
+    await expect(mod.main(['--config', cfgPath])).rejects.toThrow();
+  });
+});

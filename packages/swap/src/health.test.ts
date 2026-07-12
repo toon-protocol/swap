@@ -228,3 +228,63 @@ describe('AC-1 inventoryAvailable field in /health', () => {
     }
   });
 });
+
+// ---------------------------------------------------------------------------
+// Issue #49 — /health three-bucket in-flight window view
+// ---------------------------------------------------------------------------
+
+describe('issue #49 inventoryWindow field in /health', () => {
+  it('[P1] reports budget / inFlight / unsettled / free per assetCode:chain pool, honoring windowBudget', async () => {
+    const { startSwapNode } = (await import('./swap-node.js')) as {
+      startSwapNode: (c: unknown) => Promise<{
+        blsPort: number;
+        stop: () => Promise<void>;
+      }>;
+    };
+    const instance = await startSwapNode({
+      ...validConfig(),
+      windowBudget: { 'evm:8453': 12_345n },
+    });
+    try {
+      const res = await fetch(`http://127.0.0.1:${instance.blsPort}/health`);
+      const body = (await res.json()) as {
+        inventoryWindow: Record<
+          string,
+          { budget: string; inFlight: string; unsettled: string; free: string }
+        >;
+      };
+      expect(body.inventoryWindow['USDC:evm:8453']).toEqual({
+        budget: '12345',
+        inFlight: '0',
+        unsettled: '0',
+        free: '12345',
+      });
+    } finally {
+      await instance.stop();
+    }
+  });
+
+  it('[P1] without windowBudget the ceiling degrades to available', async () => {
+    const { startSwapNode } = (await import('./swap-node.js')) as {
+      startSwapNode: (c: unknown) => Promise<{
+        blsPort: number;
+        stop: () => Promise<void>;
+      }>;
+    };
+    const instance = await startSwapNode(validConfig());
+    try {
+      const res = await fetch(`http://127.0.0.1:${instance.blsPort}/health`);
+      const body = (await res.json()) as {
+        inventoryWindow: Record<string, { budget: string; free: string }>;
+      };
+      expect(body.inventoryWindow['USDC:evm:8453']!.budget).toBe(
+        '9007199254740993'
+      );
+      expect(body.inventoryWindow['USDC:evm:8453']!.free).toBe(
+        '9007199254740993'
+      );
+    } finally {
+      await instance.stop();
+    }
+  });
+});

@@ -14,7 +14,8 @@
  *   sender ─ PREPARE(δ, condition C_i, fill {streamNonce, seq}) ─▶ maker connector
  *   maker connector ─ LocalDeliveryRequest{executionCondition: b64(C_i)} ─▶ THIS ENGINE
  *   engine: staleness gate → replay reservation → fresh rate R_i →
- *           issueClaim (debit + watermark advance + WRITE-AHEAD PERSIST) →
+ *           issueRollingClaim (TTL'd WINDOW RESERVATION + watermark advance +
+ *           WRITE-AHEAD PERSIST — issue #49: no permanent debit) →
  *           leg-B PREPARE(⌊δ·R_i⌋, SAME C_i, advance payload w/ chain-B claim) → sender
  *   sender (toon-client#352): verifies the leg-B claim BEFORE revealing —
  *           FULFILLs leg B with P_i iff the claim checks out (spec R5)
@@ -29,20 +30,34 @@
  * chain-B claim. That inversion (verify-before-reveal) is the value-atomicity
  * core; a stalling/withholding maker fails the packet and collects nothing.
  *
- * ## Failure unwinding (issue #47 AC-4)
+ * ## Failure unwinding (issue #47 AC-4) and the window lifecycle (issue #49)
  *
- * `issueClaim` debits inventory, advances the channel watermark, and persists
- * write-ahead BEFORE the leg-B PREPARE is sent (state-store crash rule 1: no
- * claim a counterparty can hold is ever ahead of the stored watermark). If
- * leg B then rejects, times out, or fulfills without the correct preimage,
- * the engine fully unwinds via `MultiChainClaimIssuer.rollbackClaim` (the
- * same credit+release+re-persist pattern as the signer-failure rollback) and
- * rejects leg A benignly. Per spec R8 the sender MUST NOT treat a claim from
- * a REJECTed packet as redeemable; the residual Byzantine exposure is the
- * designed `δ·W` in-flight bound (spec §3.1/§8), not a new gap.
+ * `issueRollingClaim` takes a TTL'd in-flight window reservation (sized to
+ * the leg-B amount, TTL = leg-B expiry + grace), advances the channel
+ * watermark, and persists write-ahead BEFORE the leg-B PREPARE is sent
+ * (state-store crash rule 1: no claim a counterparty can hold is ever ahead
+ * of the stored watermark; the reservation is durable before the advance is
+ * externalized). Then exactly one of:
+ *
+ *  - leg B fulfills with the correct preimage → `commitRollingClaim`
+ *    (reservation → unsettled channel liability, later shrunk by settlement
+ *    confirmations via `SwapInventory.recordSettlement`);
+ *  - leg B rejects / times out / fulfills without the correct preimage →
+ *    full unwind via `MultiChainClaimIssuer.rollbackRollingClaim` (release
+ *    reservation exactly once + reverse watermark + re-persist) and a benign
+ *    leg-A reject. Per spec R8 the sender MUST NOT treat a claim from a
+ *    REJECTed packet as redeemable; the residual Byzantine exposure is the
+ *    designed `δ·W` in-flight bound (spec §3.1/§8), not a new gap;
+ *  - the process crashes → the persisted reservation expires at its TTL and
+ *    frees the window slot on/after restart (expire-and-release, state-store
+ *    crash rule 6); the watermark stays advanced (never regresses).
+ *
+ * Capacity refusal is benign: a fill that does not fit
+ * `windowBudget − inFlight − unsettled` rejects T04 `insufficient_liquidity`
+ * exactly like a legacy reserves shortage.
  *
  * A crash between the write-ahead persist and the leg-A response leaves the
- * safe state on disk: watermark advanced, inventory debited, replay seq
+ * safe state on disk: watermark advanced, window reserved, replay seq
  * reserved — the restart continues monotonically above the aborted
  * reservation and replays of the fill are rejected F04 (crash rules 2 and 4).
  *
@@ -60,10 +75,12 @@ import { sha256 } from '@noble/hashes/sha2.js';
 import type { UnsignedEvent } from 'nostr-tools/pure';
 
 import { applyRate } from '@toon-protocol/sdk';
-import type { IssueClaimResult } from '@toon-protocol/sdk';
 import type { SwapPair } from '@toon-protocol/core';
 
-import type { MultiChainClaimIssuer } from './claim-issuer.js';
+import type {
+  MultiChainClaimIssuer,
+  RollingIssueClaimResult,
+} from './claim-issuer.js';
 import {
   buildStaleRateReject,
   StaleRateError,
@@ -580,11 +597,20 @@ export interface RollingSwapEngineConfig {
   legBExpiryMarginMs?: number;
   /** Reject (before any debit) when the remaining leg-A budget is below this. */
   minLegBTimeMs?: number;
+  /**
+   * Issue #49 — grace added on top of the leg-B expiry when sizing the
+   * window-reservation TTL (`ttl = legBExpiry − now + grace`), so a live
+   * packet's reservation can never expire under it while a crashed/stalled
+   * packet frees its slot right after the packet could no longer fulfill.
+   * Default 5s.
+   */
+  reservationGraceMs?: number;
 }
 
 export const DEFAULT_LEG_B_BUDGET_MS = 30_000;
 export const DEFAULT_LEG_B_EXPIRY_MARGIN_MS = 1_000;
 export const DEFAULT_MIN_LEG_B_TIME_MS = 2_000;
+export const DEFAULT_RESERVATION_GRACE_MS = 5_000;
 
 /**
  * Synthetic inner-rumor kind attached to `issueClaim` calls on the rolling
@@ -606,6 +632,7 @@ export class RollingSwapEngine {
   readonly #legBBudgetMs: number;
   readonly #legBExpiryMarginMs: number;
   readonly #minLegBTimeMs: number;
+  readonly #reservationGraceMs: number;
 
   constructor(config: RollingSwapEngineConfig) {
     this.#sessions = config.sessions;
@@ -620,6 +647,8 @@ export class RollingSwapEngine {
     this.#legBExpiryMarginMs =
       config.legBExpiryMarginMs ?? DEFAULT_LEG_B_EXPIRY_MARGIN_MS;
     this.#minLegBTimeMs = config.minLegBTimeMs ?? DEFAULT_MIN_LEG_B_TIME_MS;
+    this.#reservationGraceMs =
+      config.reservationGraceMs ?? DEFAULT_RESERVATION_GRACE_MS;
   }
 
   /** Register a session (RFQ intake seam). See {@link RollingSessionStore}. */
@@ -814,17 +843,22 @@ export class RollingSwapEngine {
       });
     }
 
-    // 6. Issue the chain-B claim: debit + watermark advance + WRITE-AHEAD
-    //    persist (crash rule 1) — all BEFORE the claim leaves the process.
-    let issued: IssueClaimResult;
+    // 6. Issue the chain-B claim: in-flight window reservation (issue #49 —
+    //    NOT a permanent debit) + watermark advance + WRITE-AHEAD persist
+    //    (crash rule 1) — all BEFORE the claim leaves the process. The
+    //    reservation TTL is the leg-B expiry + grace (spec R7 alignment):
+    //    a crash from here on frees the window slot once this packet can
+    //    no longer fulfill.
+    let issued: RollingIssueClaimResult;
     try {
-      issued = await this.#claimIssuer.issueClaim({
+      issued = await this.#claimIssuer.issueRollingClaim({
         sourceAmount,
         targetAmount,
         pair,
         senderPubkey: session.senderPubkey,
         chainRecipient: session.chainRecipient,
         rumor: this.#syntheticRumor(session, payload),
+        reservationTtlMs: legBExpiryMs - now + this.#reservationGraceMs,
       });
     } catch (err) {
       const code =
@@ -912,6 +946,14 @@ export class RollingSwapEngine {
             cumulativeAmount: issued.cumulativeAmount.toString(),
           }),
         };
+        // Issue #49: the sender revealed the preimage, so it now holds a
+        // redeemable claim — convert the window reservation into unsettled
+        // channel liability (shrunk later by settlement confirmations).
+        this.#claimIssuer.commitRollingClaim({
+          reservationId: issued.reservationId,
+          pair,
+          targetAmount,
+        });
         this.#logger.info?.('swap.rolling.fill_fulfilled', {
           streamNonce: payload.streamNonce,
           seq: payload.seq,
@@ -927,7 +969,13 @@ export class RollingSwapEngine {
       }
       // A leg-B FULFILL without the correct preimage cannot satisfy leg A
       // (the connector would F99 it anyway — contract rule 3). Unwind.
-      this.#unwind(session, targetAmount, payload, 'leg_b_fulfillment_invalid');
+      this.#unwind(
+        session,
+        issued,
+        targetAmount,
+        payload,
+        'leg_b_fulfillment_invalid'
+      );
       return buildRollingReject({
         code: 'F99',
         semantic: 'application_error',
@@ -938,8 +986,8 @@ export class RollingSwapEngine {
     }
 
     // 8b. Leg B rejected/timed out → full unwind + benign leg-A reject
-    //     (AC-2/AC-4: nothing stays debited on a failed packet).
-    this.#unwind(session, targetAmount, payload, legB.code);
+    //     (AC-2/AC-4: nothing stays reserved on a failed packet).
+    this.#unwind(session, issued, targetAmount, payload, legB.code);
     const legBFClass = legB.code.startsWith('F');
     return buildRollingReject({
       code: legBFClass ? 'F99' : 'T00',
@@ -952,6 +1000,7 @@ export class RollingSwapEngine {
 
   #unwind(
     session: RollingSession,
+    issued: RollingIssueClaimResult,
     targetAmount: bigint,
     payload: RollingFillPayload,
     cause: string
@@ -962,7 +1011,10 @@ export class RollingSwapEngine {
       targetAmount: targetAmount.toString(),
       cause,
     });
-    this.#claimIssuer.rollbackClaim({
+    // Issue #49: releases the window reservation (exactly once — the
+    // reservation is the idempotency gate) + reverses the channel watermark.
+    this.#claimIssuer.rollbackRollingClaim({
+      reservationId: issued.reservationId,
       pair: session.pair,
       senderPubkey: session.senderPubkey,
       targetAmount,

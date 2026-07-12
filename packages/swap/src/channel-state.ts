@@ -9,11 +9,16 @@
  * "sticky binding" that's established on the first `reserve()` for each
  * sender and held for the lifetime of this `SwapChannelState` instance.
  *
- * The sticky-binding policy ("first channel with sufficient capacity")
- * is deliberately minimal — a single sender never migrates to a second
- * channel — so sender⇄channel balance-proof state stays coherent. Two
- * senders with distinct pubkeys bind to distinct channels as long as
- * ≥2 channels were provisioned for that `(asset, chain)` (AC-7).
+ * The sticky-binding policy is "first UNBOUND channel" — deliberately
+ * minimal: a single sender never migrates to a second channel, so
+ * sender⇄channel balance-proof state stays coherent. Two senders with
+ * distinct pubkeys bind to distinct channels as long as ≥2 channels were
+ * provisioned for that `(asset, chain)` (AC-7). NOTE (issue #49): binding
+ * is NOT capacity-aware — `ChannelEntry` carries no deposit/capacity field
+ * to check against, so per-channel headroom cannot be enforced here.
+ * Capacity is bounded one level up by the in-flight window
+ * (`SwapInventory` budget/reservations); making the binding deposit-aware
+ * is future work once channel deposits are tracked in this state.
  *
  * State is held in memory for microtask-atomic `reserve`/`release`;
  * durability is provided by `SwapStatePersister` (`state-store.ts`, issue
@@ -137,7 +142,8 @@ export class SwapChannelState {
   /**
    * Resolve the channel for a given sender, establishing a sticky binding
    * on first use. Returns `null` if no unbound channel is available for
-   * this `(asset, chain)`.
+   * this `(asset, chain)`. First-use selection is "first unbound channel"
+   * — NOT capacity-aware (see the class docblock, issue #49).
    *
    * @internal — exposed for AC-12 test introspection via the swap node.
    */

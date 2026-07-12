@@ -294,10 +294,18 @@ describe('issue #47 — rolling dispatch matrix', () => {
       expect(legBCalls[0]!.destination).toBe('g.toon.client.sender01');
       expect(legBCalls[0]!.amount).toBe(250_000n); // 1:1 pair, same scale
 
-      // Inventory debited by the fill.
-      expect(instance.health().inventoryAvailable[`USDC:${CHAIN}`]).toBe(
-        (1_000_000_000n - 250_000n).toString()
+      // Issue #49: NO permanent debit on the rolling flow — the fill's
+      // amount is unsettled channel liability in the window view.
+      const health = instance.health();
+      expect(health.inventoryAvailable[`USDC:${CHAIN}`]).toBe(
+        1_000_000_000n.toString()
       );
+      expect(health.inventoryWindow[`USDC:${CHAIN}`]).toEqual({
+        budget: 1_000_000_000n.toString(),
+        inFlight: '0',
+        unsettled: '250000',
+        free: (1_000_000_000n - 250_000n).toString(),
+      });
     } finally {
       await instance.stop();
     }

@@ -59,6 +59,24 @@
  *    reservation bookkeeping (`releaseAll`) for GC; the on-disk snapshot
  *    keeps the last handed-out watermarks and is authoritative on the next
  *    boot.
+ * 6. **In-flight window reservations recover by expire-and-release**
+ *    (issue #49). A rolling fill's window reservation is persisted
+ *    write-ahead (inside the same rule-1 snapshot) BEFORE its leg-B advance
+ *    can be externalized, and its commit (→ `unsettled`) or release is
+ *    re-persisted when the packet resolves. After a crash, rehydrated
+ *    reservations are honored until their persisted `expiresAt` and then
+ *    expire — no engine survives a restart to commit them, the leg-A packet
+ *    has long expired upstream, and per rolling-swap §3 R8 a claim on a
+ *    REJECTed packet is void — so releasing leaks no capacity to an honest
+ *    counterparty while the write-ahead watermark (which never regresses)
+ *    prevents any double-spend. Residual windows are bounded: a Byzantine
+ *    sender banking a voided in-flight claim is the spec's designed δ·W
+ *    exposure (§3.1), and a crash between the leg-B FULFILL and the commit
+ *    persist under-reports `unsettled` by at most the packets in flight at
+ *    the crash — the same δ·W bound. The alternative (re-checking by
+ *    recomputing `unsettled` from channel cumulative − settled watermarks)
+ *    is unsound while legacy and rolling traffic share channels: it would
+ *    double-count legacy claims that already debited `available`.
  *
  * ## Rehydration precedence
  *
@@ -93,6 +111,16 @@ export interface PersistedInventoryEntry {
   available: string;
   /** String-encoded bigint. */
   total: string;
+  /**
+   * Issue #49 — committed-but-unsettled channel liability (string-encoded
+   * bigint). Absent in v1 snapshots → 0.
+   */
+  unsettled?: string;
+  /**
+   * Issue #49 — operator window ceiling at snapshot time (string-encoded
+   * bigint). Informational: on rehydration the live config wins.
+   */
+  windowBudget?: string;
   updatedAt: number;
 }
 
@@ -105,9 +133,23 @@ export interface PersistedChannelEntry {
   updatedAt: number;
 }
 
+/** Issue #49 — one persisted in-flight window reservation. */
+export interface PersistedReservationEntry {
+  /** `${assetCode}:${chain}` of the reserved pool. */
+  key: string;
+  /** String-encoded bigint. */
+  amount: string;
+  /** ms-epoch expiry — crash recovery expires-and-releases at this instant. */
+  expiresAt: number;
+}
+
 export interface PersistedSwapState {
-  /** Schema version — bump on breaking shape changes. */
-  version: 1;
+  /**
+   * Schema version — bump on breaking shape changes. v2 (issue #49) adds
+   * `reservations` + `settledWatermarks` + per-entry `unsettled`; v1
+   * snapshots load with those defaulted empty.
+   */
+  version: 2;
   /** `${assetCode}:${chain}` → reserves. */
   inventory: Record<string, PersistedInventoryEntry>;
   /** `${assetCode}:${chain}:${channelId}` → watermark entry. */
@@ -116,6 +158,13 @@ export interface PersistedSwapState {
   bindings: Record<string, string>;
   /** Replay reservations (insertion-ordered, oldest first). */
   seenPacketIds: string[];
+  /** Issue #49 — reservation id → in-flight window reservation. */
+  reservations: Record<string, PersistedReservationEntry>;
+  /**
+   * Issue #49 — `${assetCode}:${chain}:${channelId}` → highest settled
+   * cumulative watermark (string-encoded bigint).
+   */
+  settledWatermarks: Record<string, string>;
 }
 
 /** Storage abstraction so tests / future sqlite backends can swap in. */
@@ -271,15 +320,19 @@ export function validatePersistedState(raw: unknown): PersistedSwapState {
     throw new Error('state must be a JSON object');
   }
   const rec = raw as Record<string, unknown>;
-  if (rec['version'] !== 1) {
+  const version = rec['version'];
+  if (version !== 1 && version !== 2) {
     throw new Error(
-      `unsupported state schema version ${JSON.stringify(rec['version'])} (expected 1)`
+      `unsupported state schema version ${JSON.stringify(version)} (expected 1 or 2)`
     );
   }
   const invRaw = rec['inventory'];
   const chanRaw = rec['channels'];
   const bindRaw = rec['bindings'];
   const seenRaw = rec['seenPacketIds'];
+  // Issue #49 (v2) — absent in v1 snapshots → defaulted empty.
+  const resvRaw = rec['reservations'] ?? {};
+  const wmRaw = rec['settledWatermarks'] ?? {};
   if (typeof invRaw !== 'object' || invRaw === null || Array.isArray(invRaw)) {
     throw new Error('state.inventory must be an object');
   }
@@ -300,6 +353,16 @@ export function validatePersistedState(raw: unknown): PersistedSwapState {
   if (!Array.isArray(seenRaw) || seenRaw.some((s) => typeof s !== 'string')) {
     throw new Error('state.seenPacketIds must be an array of strings');
   }
+  if (
+    typeof resvRaw !== 'object' ||
+    resvRaw === null ||
+    Array.isArray(resvRaw)
+  ) {
+    throw new Error('state.reservations must be an object');
+  }
+  if (typeof wmRaw !== 'object' || wmRaw === null || Array.isArray(wmRaw)) {
+    throw new Error('state.settledWatermarks must be an object');
+  }
 
   const inventory = copyRecord(
     invRaw as Record<string, PersistedInventoryEntry>,
@@ -307,6 +370,15 @@ export function validatePersistedState(raw: unknown): PersistedSwapState {
     (v, k) => {
       assertBigintString(v?.available, `state.inventory["${k}"].available`);
       assertBigintString(v?.total, `state.inventory["${k}"].total`);
+      if (v?.unsettled !== undefined) {
+        assertBigintString(v.unsettled, `state.inventory["${k}"].unsettled`);
+      }
+      if (v?.windowBudget !== undefined) {
+        assertBigintString(
+          v.windowBudget,
+          `state.inventory["${k}"].windowBudget`
+        );
+      }
     }
   );
   const channels = copyRecord(
@@ -332,12 +404,36 @@ export function validatePersistedState(raw: unknown): PersistedSwapState {
       }
     }
   );
+  const reservations = copyRecord(
+    resvRaw as Record<string, PersistedReservationEntry>,
+    'state.reservations',
+    (v, k) => {
+      if (typeof v?.key !== 'string' || v.key.length === 0) {
+        throw new Error(`state.reservations["${k}"].key must be a string`);
+      }
+      assertBigintString(v.amount, `state.reservations["${k}"].amount`);
+      if (typeof v.expiresAt !== 'number' || !Number.isFinite(v.expiresAt)) {
+        throw new Error(
+          `state.reservations["${k}"].expiresAt must be a finite number`
+        );
+      }
+    }
+  );
+  const settledWatermarks = copyRecord(
+    wmRaw as Record<string, string>,
+    'state.settledWatermarks',
+    (v, k) => {
+      assertBigintString(v, `state.settledWatermarks["${k}"]`);
+    }
+  );
   return {
-    version: 1,
+    version: 2,
     inventory,
     channels,
     bindings,
     seenPacketIds: [...(seenRaw as string[])],
+    reservations,
+    settledWatermarks,
   };
 }
 
@@ -467,8 +563,33 @@ export class SwapStatePersister {
       inventory[`${b.assetCode}:${b.chain}`] = {
         available: b.available.toString(),
         total: b.total.toString(),
+        unsettled: b.unsettled.toString(),
+        ...(b.windowBudget !== undefined && {
+          windowBudget: b.windowBudget.toString(),
+        }),
         updatedAt: b.updatedAt,
       };
+    }
+
+    // Issue #49 — in-flight window reservations + settled watermarks.
+    const reservations: Record<string, PersistedReservationEntry> =
+      Object.create(null) as Record<string, PersistedReservationEntry>;
+    for (const [id, r] of Object.entries(
+      this.inventory.reservationsSnapshot()
+    )) {
+      reservations[id] = {
+        key: r.key,
+        amount: r.amount.toString(),
+        expiresAt: r.expiresAt,
+      };
+    }
+    const settledWatermarks: Record<string, string> = Object.create(
+      null
+    ) as Record<string, string>;
+    for (const [k, v] of Object.entries(
+      this.inventory.settledWatermarksSnapshot()
+    )) {
+      settledWatermarks[k] = v.toString();
     }
 
     const { channels: liveChannels, bindings } = this.channelState.snapshot();
@@ -485,11 +606,13 @@ export class SwapStatePersister {
     }
 
     this.store.save({
-      version: 1,
+      version: 2,
       inventory,
       channels,
       bindings,
       seenPacketIds: this.seenPacketIds?.values() ?? [],
+      reservations,
+      settledWatermarks,
     });
   }
 }

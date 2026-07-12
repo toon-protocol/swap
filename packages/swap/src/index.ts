@@ -10,9 +10,14 @@ export type {
   DeriveSwapNodeKeysInput,
 } from './wallet.js';
 
-// Inventory (Story 12.4)
-export { SwapInventory } from './inventory.js';
-export type { SwapInventoryBalance, SwapInventoryInit } from './inventory.js';
+// Inventory (Story 12.4; issue #49 in-flight window reservation lifecycle)
+export { SwapInventory, DEFAULT_RESERVATION_TTL_MS } from './inventory.js';
+export type {
+  SwapInventoryBalance,
+  SwapInventoryInit,
+  SwapInventoryReservation,
+  SwapWindowSnapshotEntry,
+} from './inventory.js';
 
 // Payment-channel signing (Story 12.4)
 export type {
@@ -43,6 +48,8 @@ export { MultiChainClaimIssuer } from './claim-issuer.js';
 export type {
   MultiChainClaimIssuerConfig,
   SwapClaimIssuerLogger,
+  IssueRollingClaimParams,
+  RollingIssueClaimResult,
 } from './claim-issuer.js';
 
 // State persistence (issue #46 — rolling-swap prerequisite P2)
@@ -60,6 +67,7 @@ export type {
   PersistedSwapState,
   PersistedInventoryEntry,
   PersistedChannelEntry,
+  PersistedReservationEntry,
 } from './state-store.js';
 
 // Errors (Story 12.4)
@@ -75,6 +83,7 @@ export type {
   SwapNodeConfig,
   SwapNodeInstance,
   SwapNodeHealthResponse,
+  SwapNodeHealthWindowEntry,
   SwapNodeLogger,
   Publisher,
 } from './swap-node.js';
@@ -123,6 +132,7 @@ export {
   DEFAULT_LEG_B_BUDGET_MS,
   DEFAULT_LEG_B_EXPIRY_MARGIN_MS,
   DEFAULT_MIN_LEG_B_TIME_MS,
+  DEFAULT_RESERVATION_GRACE_MS,
 } from './rolling-engine.js';
 export type {
   RollingSwapEngineConfig,
