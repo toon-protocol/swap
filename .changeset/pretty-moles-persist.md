@@ -1,0 +1,5 @@
+---
+'@toon-protocol/swap': minor
+---
+
+Persist swap node state across restarts (issue #46, rolling-swap prerequisite P2): inventory, channel nonce/cumulative watermarks, sticky sender→channel bindings, and replay reservations survive a crash or restart. New `SwapNodeConfig.statePath` / `stateStore` (CLI: `statePath`, env `SWAP_STATE_PATH`) enables a JSON-file snapshot written atomically (temp file + fsync + rename) with write-ahead ordering: the watermark is persisted BEFORE a signed claim can leave the process, so a handed-out claim is never ahead of the stored watermark. `startSwapNode` rehydrates the snapshot at boot (persisted values win over config notionals; corrupt snapshots fail boot loudly with `STATE_LOAD_FAILED` instead of silently resetting watermarks). Adds `JsonFileSwapStateStore`, `SwapStatePersister`, `PersistentSeenPacketIds`, `SwapChannelState.snapshot()`/binding rehydration, and `MultiChainClaimIssuer.persistState` (write-ahead failure → `PERSISTENCE_FAILED`, claim refused, state rolled back). Without `statePath`/`stateStore` the swap node runs in-memory exactly as before.

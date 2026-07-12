@@ -15,7 +15,12 @@
  * senders with distinct pubkeys bind to distinct channels as long as
  * ≥2 channels were provisioned for that `(asset, chain)` (AC-7).
  *
- * In-memory only; persistence is Story 12.9's concern.
+ * State is held in memory for microtask-atomic `reserve`/`release`;
+ * durability is provided by `SwapStatePersister` (`state-store.ts`, issue
+ * #46): `snapshot()` exports channels + bindings, and the constructor's
+ * `init.channels` / `init.bindings` rehydrate them on restart so nonce and
+ * cumulativeAmount watermarks continue monotonically across process
+ * boundaries.
  */
 
 import { SwapWalletError } from './errors.js';
@@ -36,6 +41,15 @@ export interface SwapChannelStateInit {
   clock?: () => number;
   /** Optional logger — `release` emits `warn` when a no-op reversal would drive nonce/cumulative negative (AC-7). */
   logger?: ReleaseLogger;
+  /**
+   * Issue #46 — rehydrated sticky sender→channel bindings
+   * (`${assetCode}:${chain}:${senderPubkey}` → stored channel key), as
+   * previously exported by {@link SwapChannelState.snapshot}. Bindings whose
+   * target channel key is absent from `channels` are dropped (a dangling
+   * binding would otherwise pin its sender to a channel that no longer
+   * exists, failing every subsequent `reserve()`).
+   */
+  bindings?: Record<string, string>;
 }
 
 export interface ReserveParams {
@@ -83,6 +97,13 @@ export class SwapChannelState {
     if (init) {
       for (const [k, v] of Object.entries(init.channels)) {
         this.channels.set(k, { ...v });
+      }
+      if (init.bindings) {
+        for (const [bk, storedKey] of Object.entries(init.bindings)) {
+          if (!this.channels.has(storedKey)) continue; // drop dangling binding
+          this.senderBinding.set(bk, storedKey);
+          this.boundChannels.add(storedKey);
+        }
       }
     }
   }
@@ -218,6 +239,25 @@ export class SwapChannelState {
    */
   getBindings(): Record<string, string> {
     return Object.fromEntries(this.senderBinding);
+  }
+
+  /**
+   * Issue #46 — export the full channel + binding state for persistence.
+   * Returns deep copies keyed by the internal stored-map keys; feeding the
+   * result back through the constructor (`init.channels` / `init.bindings`)
+   * reproduces this instance's watermarks and sticky bindings exactly.
+   */
+  snapshot(): {
+    channels: Record<string, ChannelEntry>;
+    bindings: Record<string, string>;
+  } {
+    const channels: Record<string, ChannelEntry> = Object.create(
+      null
+    ) as Record<string, ChannelEntry>;
+    for (const [k, v] of this.channels) {
+      channels[k] = { ...v };
+    }
+    return { channels, bindings: this.getBindings() };
   }
 
   /**
