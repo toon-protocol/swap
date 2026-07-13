@@ -86,7 +86,7 @@ describe('AC-9 swap node CLI — main() smoke test', () => {
 // The story's AC-9 lists four env vars (SWAP_MNEMONIC, SWAP_SECRET_KEY_HEX,
 // SWAP_BLS_PORT, SWAP_RELAYS); only SWAP_MNEMONIC was previously exercised.
 // These tests pin the remaining three plus the invalid-value validation
-// branches inside `applyEnvOverlay` (packages/swap/src/cli.ts:174-212).
+// branches inside `applyEnvOverlay` (packages/swap/src/cli.ts).
 // ---------------------------------------------------------------------------
 
 describe('AC-9 swap node CLI — env-overlay gap-fill', () => {
