@@ -928,8 +928,16 @@ export async function startSwapNode(
 
   // 4. Construct payment-channel signers per configured family.
   //    Re-use one signer instance per family across every `evm:*`/`solana:*`/
-  //    `mina:*` chain — the chain-id is baked into `BalanceProofParams` at
-  //    signing time, not into the signer itself (per AC-4 phase 4).
+  //    `mina:*` chain. NOTE: the shared EVM signer key is reused for every
+  //    `evm:*` chain, but the signed balance-proof digest does NOT currently
+  //    bind the chainId or the contract/deployment address —
+  //    `EvmPaymentChannelSigner.signBalanceProof` hashes only
+  //    { channelId, cumulativeAmount, nonce, recipient }. Cross-chain /
+  //    cross-deployment replay is therefore prevented ONLY by channelId
+  //    uniqueness, not by the signature itself. A proper fix that
+  //    domain-separates the digest (binding chainId + contract address) is
+  //    tracked in connector#324 (finding #1 from connector PR #320); until
+  //    then, do NOT rely on the signature to scope a balance proof to a chain.
   const signers: Record<string, PaymentChannelSigner> = {};
   const distinctTargetChains = Array.from(
     new Set(config.swapPairs.map((p) => p.to.chain))
@@ -945,7 +953,10 @@ export async function startSwapNode(
           `Pair targets ${chain} but no EVM key was derived`
         );
       }
-      // Re-use a single signer across all `evm:*` chains (AC-4 phase 4).
+      // Re-use a single signer/key across all `evm:*` chains. See the note
+      // above: the balance-proof digest does not bind chainId or contract
+      // address, so this key sharing is NOT what provides cross-chain replay
+      // protection (connector#324).
       sharedEvmSigner ??= new EvmPaymentChannelSigner({
         chain,
         privateKey: swapNodeKeys.evm.privateKey,
