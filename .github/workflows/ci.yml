@@ -57,3 +57,10 @@ jobs:
 
       - name: Smoke build
         run: devbox run -- bash -c "pnpm install --no-frozen-lockfile && pnpm build"
+
+      # Devbox pins foundry, so `anvil` is on PATH here — this is where the
+      # anvil-gated integration suite (incl. the swap#50 rolling-settlement
+      # e2e, which spawns its own two anvil chains) actually RUNS instead of
+      # runtime-skipping like it does on the plain build job.
+      - name: Integration tests (anvil-gated)
+        run: devbox run -- bash -c "pnpm --filter @toon-protocol/swap test:integration"

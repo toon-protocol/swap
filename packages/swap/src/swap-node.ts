@@ -343,9 +343,10 @@ export interface SwapNodeConfig {
   /**
    * Leg-B egress override (tests / custom connectors). When omitted, the
    * swap node wires {@link createConnectorLegBSender} over the effective
-   * connector — which requires the connector's conditioned-PREPARE
-   * origination seam; absent that, rolling fills are rejected fail-closed
-   * (never sent unconditioned — rolling-swap §3 R4).
+   * connector's public `sendPacket` — which must support
+   * `SendPacketParams.executionCondition` (connector >= 3.30.0). Absent
+   * that support, rolling fills fail closed (leg B is never sent
+   * unconditioned — rolling-swap §3 R4).
    */
   rollingLegBSender?: LegBSender;
 
@@ -1504,6 +1505,10 @@ export async function startSwapNode(
     claimIssuer,
     legBSender: rollingLegBSender,
     seenPacketIds: rollingSeen,
+    // Spec §7.2 / sdk 2.2.0 (toon#84): sign per-fulfill stream receipts with
+    // the swap node's Nostr identity key — the sdk's default receipt key —
+    // so senders verify them against the maker's advertised `swapPubkey`.
+    receiptSecretKey: identity.secretKey,
     ...(config.rateProvider && { rateProvider: config.rateProvider }),
     ...(stalenessGuard && { stalenessGuard }),
     logger: { info: logger.info, warn: logger.warn, error: logger.error },

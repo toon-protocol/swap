@@ -17,6 +17,12 @@
 
 import { describe, it, expect, vi } from 'vitest';
 import { sha256 } from '@noble/hashes/sha2.js';
+import { secp256k1 } from '@noble/curves/secp256k1.js';
+import {
+  ReceiptChainTracker,
+  serializeReceiptChain,
+  verifyStreamReceipt,
+} from '@toon-protocol/sdk';
 import type { SwapPair } from '@toon-protocol/core';
 
 import { SwapInventory } from './inventory.js';
@@ -38,6 +44,7 @@ import {
   RollingSwapEngine,
   ROLLING_PROTOCOL,
   ROLLING_REJECT_REASONS,
+  createConnectorLegBSender,
   parseRollingFillPayload,
 } from './rolling-engine.js';
 import type {
@@ -154,6 +161,8 @@ function buildStack(options?: {
   reservationGraceMs?: number;
   /** Issue #49 — in-flight window ceiling for the fixture pool. */
   windowBudget?: bigint;
+  /** Issue #50 — maker receipt key (spec §7.2 receipts on accept records). */
+  receiptSecretKey?: Uint8Array;
 }): Stack {
   const persisted = options?.rehydrateFrom ?? null;
 
@@ -295,6 +304,9 @@ function buildStack(options?: {
     }),
     ...(options?.reservationGraceMs !== undefined && {
       reservationGraceMs: options.reservationGraceMs,
+    }),
+    ...(options?.receiptSecretKey && {
+      receiptSecretKey: options.receiptSecretKey,
     }),
   });
 
@@ -983,6 +995,199 @@ describe('rolling engine — in-flight window (issue #49)', () => {
         cumulativeAmount: settledCumulative,
       })
     ).toBe(0n);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Receipts on the rolling path (issue #50, spec §7.2, sdk 2.2.0 toon#84)
+// ---------------------------------------------------------------------------
+
+describe('rolling engine — per-fulfill stream receipts', () => {
+  const RECEIPT_SECRET = new Uint8Array(32).fill(41);
+
+  function decodeAccept(response: RollingFillResponse): RollingAcceptRecord {
+    expect(response.accept).toBe(true);
+    const accepted = response as Extract<RollingFillResponse, { accept: true }>;
+    return JSON.parse(
+      Buffer.from(accepted.data, 'base64').toString('utf8')
+    ) as RollingAcceptRecord;
+  }
+
+  it('every ACCEPTED fill carries a verifiable receipt; the chain accumulates gapless and matches the watermark across a mid-stream failure', async () => {
+    const receiptPubkey = Buffer.from(
+      secp256k1.getPublicKey(RECEIPT_SECRET, true).slice(1)
+    ).toString('hex');
+    const stack = buildStack({ receiptSecretKey: RECEIPT_SECRET });
+    const tracker = new ReceiptChainTracker({
+      streamNonce: STREAM_NONCE,
+      makerPubkey: receiptPubkey,
+    });
+
+    // Fills 1-2 fulfill.
+    for (const seq of [1, 2]) {
+      const { response } = await sendFill(stack, seq);
+      const record = decodeAccept(response);
+      expect(record.receipt).toBeDefined();
+      expect(verifyStreamReceipt(record.receipt!, receiptPubkey)).toBe(true);
+      expect(tracker.add(record.receipt!)).toEqual({ ok: true });
+    }
+
+    // Fill 3: sender withholds — REJECTED packets get NO receipt and do not
+    // advance the receipt session (no seq hole, no cumulative gap).
+    stack.legB.respond = () => ({
+      type: 'reject',
+      code: 'T00',
+      message: 'withheld',
+    });
+    const { response: rejected } = await sendFill(stack, 3);
+    expect(rejected.accept).toBe(false);
+
+    // Fill 4 (new sender seq, per spec §4) fulfills; the maker's receipt seq
+    // continues gapless at 3.
+    stack.legB.respond = (prepare) => {
+      const key = Buffer.from(prepare.executionCondition).toString('base64');
+      const preimage = stackPreimages(stack).get(key);
+      return preimage
+        ? { type: 'fulfill', fulfillment: preimage }
+        : { type: 'reject', code: 'F99', message: 'unknown condition' };
+    };
+    const { response: last } = await sendFill(stack, 4);
+    const lastRecord = decodeAccept(last);
+    expect(tracker.add(lastRecord.receipt!)).toEqual({ ok: true });
+    expect(lastRecord.receipt!.seq).toBe(3);
+
+    const chain = tracker.chain();
+    expect(chain.receipts).toHaveLength(3);
+    expect(chain.holes).toEqual([]);
+    // The signed cumulativeDelivered equals the channel watermark the maker
+    // handed out — the audit artifact matches the claim stream (spec §7.2).
+    expect(chain.totalDelivered).toBe((TARGET_PER_DELTA * 3n).toString());
+    expect(chain.totalDelivered).toBe(lastRecord.cumulativeAmount);
+    // And the serialized artifact round-trips.
+    const artifact = JSON.parse(serializeReceiptChain(chain)) as {
+      receipts: unknown[];
+    };
+    expect(artifact.receipts).toHaveLength(3);
+  });
+
+  it('no receipt key wired → accept records carry no receipt (behavior unchanged)', async () => {
+    const stack = buildStack();
+    const { response } = await sendFill(stack, 1);
+    expect(decodeAccept(response).receipt).toBeUndefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// createConnectorLegBSender — public sendPacket egress (issue #50 pre-step)
+// ---------------------------------------------------------------------------
+
+describe('createConnectorLegBSender — public SendPacketParams.executionCondition egress', () => {
+  function prepareFixture(): {
+    prepare: LegBPrepare;
+    preimage: Uint8Array;
+  } {
+    const { preimage, condition } = mintPacket();
+    return {
+      preimage,
+      prepare: {
+        destination: SENDER_ILP,
+        amount: TARGET_PER_DELTA,
+        expiresAt: new Date(Date.now() + 30_000),
+        executionCondition: condition,
+        data: Buffer.from('{"proto":"rolling/1","type":"advance"}', 'utf8'),
+      },
+    };
+  }
+
+  it('passes the condition to connector.sendPacket verbatim and surfaces the revealed preimage', async () => {
+    const { prepare, preimage } = prepareFixture();
+    const calls: Record<string, unknown>[] = [];
+    const connector = {
+      sendPacket: async (params: Record<string, unknown>) => {
+        calls.push(params);
+        return {
+          type: 13,
+          fulfillment: preimage,
+          data: Buffer.from('ok'),
+        };
+      },
+    };
+    const send = createConnectorLegBSender(connector, { nodeId: 'maker' });
+    const result = await send(prepare);
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!['destination']).toBe(SENDER_ILP);
+    expect(calls[0]!['amount']).toBe(TARGET_PER_DELTA);
+    expect(calls[0]!['executionCondition']).toBe(prepare.executionCondition);
+    expect(result.type).toBe('fulfill');
+    expect(
+      Buffer.compare(
+        Buffer.from((result as { fulfillment: Uint8Array }).fulfillment),
+        Buffer.from(preimage)
+      )
+    ).toBe(0);
+  });
+
+  it('fail-closed: a FULFILL without the correct preimage (e.g. a connector that dropped the condition) is rejected at the seam', async () => {
+    const { prepare } = prepareFixture();
+    for (const fulfillment of [
+      undefined,
+      new Uint8Array(16),
+      new Uint8Array(32).fill(9), // wrong preimage
+    ]) {
+      const send = createConnectorLegBSender(
+        { sendPacket: async () => ({ type: 13, fulfillment }) },
+        { nodeId: 'maker' }
+      );
+      const result = await send(prepare);
+      expect(result.type).toBe('reject');
+      expect((result as { code: string }).code).toBe('F99');
+      expect((result as { message: string }).message).toMatch(/preimage/);
+    }
+  });
+
+  it('fail-closed: no sendPacket seam → reject, nothing sent; sendPacket throwing (3.30.0 condition validation) → benign T00', async () => {
+    const { prepare } = prepareFixture();
+
+    const noSeam = createConnectorLegBSender({}, { nodeId: 'maker' });
+    const noSeamResult = await noSeam(prepare);
+    expect(noSeamResult.type).toBe('reject');
+    expect((noSeamResult as { code: string }).code).toBe('T00');
+
+    const throwing = createConnectorLegBSender(
+      {
+        sendPacket: async () => {
+          throw new Error('executionCondition must be exactly 32 bytes');
+        },
+      },
+      { nodeId: 'maker' }
+    );
+    const thrownResult = await throwing(prepare);
+    expect(thrownResult.type).toBe('reject');
+    expect((thrownResult as { code: string }).code).toBe('T00');
+    expect((thrownResult as { message: string }).message).toMatch(
+      /leg-B send failed/
+    );
+  });
+
+  it('REJECT results pass through code/message', async () => {
+    const { prepare } = prepareFixture();
+    const send = createConnectorLegBSender(
+      {
+        sendPacket: async () => ({
+          type: 14,
+          code: 'F02',
+          message: 'no route to destination',
+        }),
+      },
+      { nodeId: 'maker' }
+    );
+    const result = await send(prepare);
+    expect(result).toMatchObject({
+      type: 'reject',
+      code: 'F02',
+      message: 'no route to destination',
+    });
   });
 });
 
