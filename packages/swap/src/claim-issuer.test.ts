@@ -721,6 +721,7 @@ describe('Story 12.9 — chain-recipient threading to signBalanceProof', () => {
   function buildIssuer(opts?: {
     signBalanceProof?: (arg: unknown) => Promise<Uint8Array>;
     withSettlementAddresses?: boolean;
+    settlementContracts?: Record<string, string>;
   }): {
     issuer: MultiChainClaimIssuer;
     signer: {
@@ -759,9 +760,53 @@ describe('Story 12.9 — chain-recipient threading to signBalanceProof', () => {
             signerAddresses: { [CHAIN]: EVM_SWAP_SIGNER_FOR_SETTLEMENT },
           }
         : {}),
+      ...(opts?.settlementContracts
+        ? { settlementContracts: opts.settlementContracts }
+        : {}),
     });
     return { issuer, signer, inventory, channelState };
   }
+
+  it('[P0] v2 EIP-712: signer receives chainId (parsed from pair.to.chain) and verifyingContract (from settlementContracts) — connector#324 finding #1', async () => {
+    const VERIFYING_CONTRACT = '0x5FbDB2315678afecb367f032d93F642f64180aa3';
+    const { issuer, signer } = buildIssuer({
+      settlementContracts: { [CHAIN]: VERIFYING_CONTRACT },
+    });
+    await issuer.issueClaim({
+      sourceAmount: 100_000n,
+      targetAmount: 50n,
+      pair: PAIR_USDC_TO_ETH,
+      senderPubkey: SENDER_PUBKEY,
+      chainRecipient: FIXTURE_EVM_RECIPIENT,
+      rumor: makeRumor(),
+    });
+    expect(signer.signBalanceProof).toHaveBeenCalledTimes(1);
+    const arg = signer.signBalanceProof.mock.calls[0]![0] as {
+      chainId?: bigint;
+      verifyingContract?: string;
+    };
+    // 'evm:base:8453' → chainId 8453n.
+    expect(arg.chainId).toBe(8453n);
+    expect(arg.verifyingContract).toBe(VERIFYING_CONTRACT);
+  });
+
+  it('[P1] v2 EIP-712: verifyingContract is undefined when no settlementContracts entry is configured (EVM signer then fails closed)', async () => {
+    const { issuer, signer } = buildIssuer();
+    await issuer.issueClaim({
+      sourceAmount: 100_000n,
+      targetAmount: 50n,
+      pair: PAIR_USDC_TO_ETH,
+      senderPubkey: SENDER_PUBKEY,
+      chainRecipient: FIXTURE_EVM_RECIPIENT,
+      rumor: makeRumor(),
+    });
+    const arg = signer.signBalanceProof.mock.calls[0]![0] as {
+      chainId?: bigint;
+      verifyingContract?: string;
+    };
+    expect(arg.chainId).toBe(8453n);
+    expect(arg.verifyingContract).toBeUndefined();
+  });
 
   it('[P0] T-10: signer receives 20-byte chainRecipient, NOT 32-byte senderPubkey (AC-11, AC-16a)', async () => {
     const { issuer, signer } = buildIssuer();

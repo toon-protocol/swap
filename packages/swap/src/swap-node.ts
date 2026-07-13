@@ -162,6 +162,17 @@ export interface SwapNodeEvmChainProvider {
   registryAddress: string;
   /** Settlement token (USDC, M2M, …) contract address. */
   tokenAddress: string;
+  /**
+   * v2 EIP-712 balance-proof migration (connector#324 finding #1): the deployed
+   * `RollingSwapChannel` settlement contract address for this chain — the
+   * EIP-712 `verifyingContract` the swap node signs claims against. The v2
+   * digest binds `(chainId, verifyingContract)`, so a claim is valid on exactly
+   * one deployment. The CONNECTOR MUST PROVIDE this (it owns the deployment).
+   * Optional here so pre-v2 configs still parse; when present, `startSwapNode()`
+   * threads it into the claim issuer's `settlementContracts` map. Absent it, EVM
+   * claim signing fails closed with `SIGNING_FAILED`.
+   */
+  settlementAddress?: string;
   /** Hex private key used to sign settlement claims. Defaulted by the swap node. */
   keyId?: string;
 }
@@ -928,8 +939,12 @@ export async function startSwapNode(
 
   // 4. Construct payment-channel signers per configured family.
   //    Re-use one signer instance per family across every `evm:*`/`solana:*`/
-  //    `mina:*` chain — the chain-id is baked into `BalanceProofParams` at
-  //    signing time, not into the signer itself (per AC-4 phase 4).
+  //    `mina:*` chain. The EVM signing KEY is shared across chains, but the v2
+  //    balance-proof digest is EIP-712 domain-separated (connector#324 finding
+  //    #1): `(chainId, verifyingContract)` are threaded into each
+  //    `signBalanceProof` call from the target channel — NOT baked into the
+  //    signer — so one shared signer safely serves every EVM (chain,
+  //    deployment) while each signature stays bound to exactly one of them.
   const signers: Record<string, PaymentChannelSigner> = {};
   const distinctTargetChains = Array.from(
     new Set(config.swapPairs.map((p) => p.to.chain))
@@ -1182,11 +1197,22 @@ export async function startSwapNode(
 
   // 7. signerAddresses map + claim issuer.
   const signerAddresses = buildSignerAddresses(config.swapPairs, swapNodeKeys);
+  // v2 EIP-712 domain (connector#324 finding #1): per-chain RollingSwapChannel
+  // settlement contract addresses (the `verifyingContract`), keyed by the
+  // chainProvider's chain id (which matches `pair.to.chain`). Sourced from the
+  // operator/connector-supplied `chainProviders[].settlementAddress`.
+  const settlementContracts: Record<string, string> = {};
+  for (const p of config.chainProviders ?? []) {
+    if (p.chainType === 'evm' && p.settlementAddress) {
+      settlementContracts[p.chainId] = p.settlementAddress;
+    }
+  }
   const claimIssuer = new MultiChainClaimIssuer({
     inventory,
     signers,
     channelState,
     signerAddresses,
+    settlementContracts,
     // Issue #46 — write-ahead persist before any claim leaves the process.
     ...(persister && { persistState: () => persister.persist() }),
     logger: {

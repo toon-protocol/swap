@@ -26,11 +26,20 @@ export type {
   EvmPaymentChannelSignerConfig,
   MinaPaymentChannelSignerConfig,
   SolanaPaymentChannelSignerConfig,
+  ClaimBalanceProofDigestParams,
+  CooperativeCloseDigestParams,
 } from './payment-channel-signer.js';
 export {
   EvmPaymentChannelSigner,
   MinaPaymentChannelSigner,
   SolanaPaymentChannelSigner,
+  // v2 EIP-712 balance-proof digest helpers (connector#324 finding #1).
+  claimBalanceProofDigestEvmV2,
+  cooperativeCloseDigestEvmV2,
+  eip712DomainSeparatorV2,
+  EIP712_DOMAIN_TYPEHASH,
+  CLAIM_BALANCE_PROOF_TYPEHASH,
+  COOPERATIVE_CLOSE_TYPEHASH,
 } from './payment-channel-signer.js';
 
 // Channel state (Story 12.4)

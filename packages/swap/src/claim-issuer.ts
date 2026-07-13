@@ -86,6 +86,21 @@ function validateClaimIssuerChainRecipient(
 }
 
 /**
+ * Parse the numeric EIP-712 `chainId` from a target-chain string. The v2
+ * balance-proof digest (connector#324 finding #1) binds the settlement chain
+ * id, and `pair.to.chain` encodes it as the trailing colon-separated segment
+ * (`'evm:base:8453'` → `8453n`, `'evm:8453'` → `8453n`). Returns `undefined`
+ * for non-EVM chains or chains without a numeric trailing segment; the EVM
+ * signer then surfaces the missing domain as `SIGNING_FAILED`.
+ */
+function evmNumericChainId(chain: string): bigint | undefined {
+  if (!chain.startsWith('evm:')) return undefined;
+  const last = chain.split(':').pop();
+  if (last === undefined || !/^\d+$/.test(last)) return undefined;
+  return BigInt(last);
+}
+
+/**
  * Inventory hold abstraction — how {@link MultiChainClaimIssuer.issueWithHold}
  * stays byte-equal across the legacy (debit/credit) and rolling
  * (reserve/release) flows. `undo()` reverses the hold and must be
@@ -136,6 +151,19 @@ export interface MultiChainClaimIssuerConfig {
    */
   signerAddresses?: Record<string, string>;
   /**
+   * v2 EIP-712 balance-proof migration (connector#324 finding #1). Per-chain
+   * `RollingSwapChannel` settlement contract address (the EIP-712
+   * `verifyingContract`), keyed by target-chain string (e.g.
+   * `'evm:base:8453'`). The v2 EVM signer folds `chainId` + `verifyingContract`
+   * into the signed digest, so a claim is valid on exactly one (chain,
+   * deployment) pair. `startSwapNode()` populates this from
+   * `SwapNodeEvmChainProvider.settlementAddress` — the connector MUST provide
+   * that deployment address per chain. Only required for EVM signers; a missing
+   * entry surfaces at sign time as `SIGNING_FAILED` from the EVM signer. Solana
+   * and Mina signers ignore it (their digests are not EIP-712 domain-separated).
+   */
+  settlementContracts?: Record<string, string>;
+  /**
    * Issue #46 — synchronous write-ahead persistence hook, wired by
    * `startSwapNode()` to `SwapStatePersister.persist`. Called (a) after
    * debit+reserve and BEFORE signing, so the stored watermark is always >=
@@ -153,6 +181,7 @@ export class MultiChainClaimIssuer implements ClaimIssuer {
   private readonly logger?: SwapClaimIssuerLogger;
   private readonly newClaimId: () => string;
   private readonly signerAddresses: Record<string, string>;
+  private readonly settlementContracts: Record<string, string>;
   private readonly persistState?: () => void;
 
   constructor(config: MultiChainClaimIssuerConfig) {
@@ -183,6 +212,7 @@ export class MultiChainClaimIssuer implements ClaimIssuer {
     this.channelState = config.channelState;
     this.logger = config.logger;
     this.signerAddresses = config.signerAddresses ?? {};
+    this.settlementContracts = config.settlementContracts ?? {};
     if (config.persistState) this.persistState = config.persistState;
     this.newClaimId =
       config.newClaimId ??
@@ -352,11 +382,21 @@ export class MultiChainClaimIssuer implements ClaimIssuer {
       // shape; passing `senderPubkey` caused the Story 12.8 schema-drift
       // blocker. `senderPubkey` remains in use below for inventory and
       // channel-state keying — that binding is identity-layer and unchanged.
+      // v2 EIP-712 domain (connector#324 finding #1): thread the settlement
+      // `chainId` (parsed from the target chain string) and `verifyingContract`
+      // (the per-chain RollingSwapChannel deployment address) into the sign
+      // call so the digest is bound to exactly one (chain, contract) pair. For
+      // non-EVM chains these are `undefined` and ignored by the Solana/Mina
+      // signers. For EVM, a missing settlement-contract entry is caught by the
+      // signer (SIGNING_FAILED) — the connector must supply it (see
+      // `settlementContracts`).
       claim = await signer.signBalanceProof({
         channelId: reservation.channelId,
         cumulativeAmount: reservation.cumulativeAmount,
         nonce: reservation.nonce,
         recipient: chainRecipient,
+        chainId: evmNumericChainId(targetChain),
+        verifyingContract: this.settlementContracts[targetChain],
       });
     } catch (err) {
       hold.undo();

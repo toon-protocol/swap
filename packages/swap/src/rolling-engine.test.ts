@@ -258,6 +258,12 @@ function buildStack(options?: {
       }),
     },
     signerAddresses: { [CHAIN]: '0x' + '22'.repeat(20) },
+    // v2 EIP-712 domain (connector#324 finding #1): the real EVM signer now
+    // requires the per-chain RollingSwapChannel `verifyingContract`. chainId is
+    // parsed from CHAIN ('evm:31337' → 31337n).
+    settlementContracts: {
+      [CHAIN]: '0x5FbDB2315678afecb367f032d93F642f64180aa3',
+    },
     persistState: () => persister.persist(),
   });
 
