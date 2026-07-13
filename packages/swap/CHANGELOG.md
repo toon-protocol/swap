@@ -1,5 +1,15 @@
 # @toon-protocol/swap
 
+## 2.1.0
+
+### Minor Changes
+
+- df1168d: Rolling swap settlement-batching e2e + per-fulfill stream receipts + public leg-B egress (swap#50).
+  - **Receipts on the rolling path (spec §7.2, sdk 2.2.0 toon#84):** every ACCEPTED rolling fill's `RollingAcceptRecord` now carries a signed `StreamReceipt` (`receipt` field, additive) — BIP-340-signed with the swap node's identity key via the sdk's `issueSessionReceipt`, gapless per-session maker seq, verifiable against `swapPubkey`. Rejected fills never advance the receipt session. New optional `RollingSwapEngineConfig.receiptSecretKey` / `receiptSessions`; `startSwapNode()` wires the identity key automatically.
+  - **Leg-B egress reach-in retired:** `createConnectorLegBSender` now originates the conditioned leg-B PREPARE through the connector's PUBLIC `sendPacket` (`SendPacketParams.executionCondition`, connector 3.30.0 #314) instead of the internal `_packetHandler.handlePreparePacket`. Still fail-closed: no seam / thrown validation / a FULFILL that does not reveal the preimage of `C_i` (the signature of a condition-dropping pre-3.30.0 connector) all reject benignly — leg B is never externalized unconditioned by this package, and a rejected packet's claim is void per spec R8.
+  - **Dependency floors:** `@toon-protocol/connector` ^3.30.0 (public executionCondition), `@toon-protocol/sdk` ^2.2.0 (receipts).
+  - **Settlement-batching e2e (the epic's closing proof):** a self-contained anvil-gated integration suite drives a 25-fill rolling swap (one fill withheld mid-stream) between two REAL in-process ConnectorNodes over BTP across two anvil chains, and proves N leg-A + N leg-B advances net to exactly ONE on-chain settlement per chain at the final cumulative watermark — chain A submitted by the connector's own SettlementMonitor→SettlementExecutor auto-drive, chain B by the receive-side client machinery (`@toon-protocol/client` 0.18.0 ingest→store→build→submit), with the accumulated receipt chain matching the settled amount and `recordSettlement()` recycling the window. Runs in the devbox CI job (foundry pinned); runtime-skips where `anvil` is absent.
+
 ## 2.0.0
 
 ### Major Changes
