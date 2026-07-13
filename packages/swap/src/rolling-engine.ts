@@ -74,7 +74,15 @@
 import { sha256 } from '@noble/hashes/sha2.js';
 import type { UnsignedEvent } from 'nostr-tools/pure';
 
-import { applyRate } from '@toon-protocol/sdk';
+import {
+  applyRate,
+  issueSessionReceipt,
+  BoundedReceiptSessions,
+} from '@toon-protocol/sdk';
+import type {
+  StreamReceipt,
+  ReceiptSessionStoreLike,
+} from '@toon-protocol/sdk';
 import type { SwapPair } from '@toon-protocol/core';
 
 import type {
@@ -176,6 +184,17 @@ export interface RollingAcceptRecord {
   channelId?: string;
   nonce?: string;
   cumulativeAmount?: string;
+  /**
+   * Signed per-fulfill stream receipt (sdk 2.2.0, toon#84 — rolling-swap
+   * spec §7.2): the maker's transferable attestation of the session's
+   * cumulative delivered asset B, BIP-340-signed with the maker's receipt
+   * key (the swap node's Nostr identity key; verify against `swapPubkey`).
+   * Present when the engine is wired with a receipt key. NOTE: `receipt.seq`
+   * is the maker's own gapless fulfill counter, NOT the sender's fill `seq`
+   * (which burns on failures) — hole detection in the sender's
+   * `ReceiptChainTracker` keys off this counter.
+   */
+  receipt?: StreamReceipt;
 }
 
 /**
@@ -362,35 +381,27 @@ export type LegBResult =
  */
 export type LegBSender = (prepare: LegBPrepare) => Promise<LegBResult>;
 
-/** Numeric ILP packet-type discriminants (`@toon-protocol/shared` PacketType). */
-const PACKET_TYPE_PREPARE = 12;
+/** Numeric ILP FULFILL discriminant (`@toon-protocol/shared` PacketType). */
 const PACKET_TYPE_FULFILL = 13;
 
 /**
- * Minimal slice of the connector's internal packet handler the leg-B egress
- * needs. `ConnectorNode.sendPacket` (connector 3.29.1) strips
- * `executionCondition` when building the PREPARE, so the engine calls the
- * SAME underlying entrypoint `sendPacket` wraps — `handlePreparePacket` —
- * with the condition attached. The connector's forward path passes a non-zero
- * condition through unchanged (spec R3) and verifies the returned fulfillment
- * hop-side. Runtime-guarded and fail-closed: when the seam is absent the leg
- * B is NOT sent unconditioned (that would sever the coupling, R4) — the fill
- * is rejected instead. Follow-up: add `executionCondition` to the connector's
- * public `SendPacketParams` and drop this reach-in.
+ * Minimal structural slice of `ConnectorNode.sendPacket` as of connector
+ * 3.30.0: `SendPacketParams.executionCondition` (base64 string or 32-byte
+ * non-zero `Uint8Array`) is public wire surface (toon-protocol/connector#314),
+ * and a FULFILL result surfaces the revealed `fulfillment`. The engine
+ * therefore originates its conditioned leg-B PREPARE through the same public
+ * API every other egress uses — the #56-era reach-in into the connector's
+ * internal `_packetHandler.handlePreparePacket` is retired.
  */
-interface ConditionCapablePacketHandler {
-  handlePreparePacket(
-    packet: {
-      type: number;
-      destination: string;
-      amount: bigint;
-      expiresAt: Date;
-      executionCondition: Uint8Array;
-      data: Buffer;
-    },
-    sourcePeerId: string
-  ): Promise<{
-    type: number;
+interface ConditionCapableConnector {
+  sendPacket(params: {
+    destination: string;
+    amount: bigint;
+    expiresAt: Date;
+    data?: Buffer;
+    executionCondition?: Uint8Array | string;
+  }): Promise<{
+    type: number | string;
     fulfillment?: Uint8Array;
     data?: Buffer | Uint8Array;
     code?: string;
@@ -399,15 +410,29 @@ interface ConditionCapablePacketHandler {
 }
 
 export interface ConnectorLegBSenderOptions {
-  /** sourcePeerId for the origination hop — the connector's own nodeId. */
+  /** The connector's own nodeId — diagnostics context only. */
   nodeId: string;
   logger?: RateStalenessLogger;
 }
 
 /**
- * Build the production {@link LegBSender} over an embedded ConnectorNode.
- * See {@link ConditionCapablePacketHandler} for why this reaches one level
- * below `sendPacket` (and why it fails closed when it cannot).
+ * Build the production {@link LegBSender} over a connector's public
+ * `sendPacket` (requires `@toon-protocol/connector` >= 3.30.0 for
+ * `SendPacketParams.executionCondition`).
+ *
+ * Fail-closed (spec R4 — leg B is NEVER sent without the shared condition):
+ *
+ * - a connector without `sendPacket` → the fill is rejected, nothing sent;
+ * - `sendPacket` throwing (including the 3.30.0
+ *   `InvalidExecutionConditionError` validation) → rejected;
+ * - a FULFILL that does not reveal the preimage of `C_i` → rejected here at
+ *   the seam (the engine re-verifies independently). This is also the
+ *   surface where an out-of-contract connector that silently DROPPED the
+ *   condition (pre-3.30.0 `sendPacket` built the PREPARE without it) shows
+ *   up: the sender's daemon never reveals a preimage for an unconditioned
+ *   PREPARE (spec R5 — it looks preimages up BY condition), so no valid
+ *   fulfillment can come back, the fill unwinds, and the externalized claim
+ *   is void per R8 (bounded by the designed δ·W in-flight exposure, §3.1).
  */
 export function createConnectorLegBSender(
   connector: unknown,
@@ -415,15 +440,12 @@ export function createConnectorLegBSender(
 ): LegBSender {
   const logger = options.logger ?? {};
   return async (prepare: LegBPrepare): Promise<LegBResult> => {
-    const c = connector as {
-      _packetHandler?: Partial<ConditionCapablePacketHandler>;
-      _config?: { nodeId?: string };
-    };
-    const handler = c._packetHandler;
-    if (!handler || typeof handler.handlePreparePacket !== 'function') {
+    const c = connector as Partial<ConditionCapableConnector>;
+    if (typeof c.sendPacket !== 'function') {
       logger.warn?.('swap.rolling.leg_b_egress_unavailable', {
+        nodeId: options.nodeId,
         reason:
-          'connector exposes no conditioned-PREPARE origination seam (handlePreparePacket); leg B NOT sent — sending it without the shared condition would sever the coupling (rolling-swap §3 R4)',
+          'connector exposes no sendPacket; leg B NOT sent — sending it without the shared condition would sever the coupling (rolling-swap §3 R4)',
       });
       return {
         type: 'reject',
@@ -432,24 +454,15 @@ export function createConnectorLegBSender(
           'leg-B egress unavailable: cannot originate conditioned PREPARE',
       };
     }
-    const sourcePeerId = c._config?.nodeId ?? options.nodeId;
-    let response: Awaited<
-      ReturnType<ConditionCapablePacketHandler['handlePreparePacket']>
-    >;
+    let response: Awaited<ReturnType<ConditionCapableConnector['sendPacket']>>;
     try {
-      response = await (
-        handler as ConditionCapablePacketHandler
-      ).handlePreparePacket(
-        {
-          type: PACKET_TYPE_PREPARE,
-          destination: prepare.destination,
-          amount: prepare.amount,
-          expiresAt: prepare.expiresAt,
-          executionCondition: prepare.executionCondition,
-          data: prepare.data,
-        },
-        sourcePeerId
-      );
+      response = await c.sendPacket({
+        destination: prepare.destination,
+        amount: prepare.amount,
+        expiresAt: prepare.expiresAt,
+        data: prepare.data,
+        executionCondition: prepare.executionCondition,
+      });
     } catch (err) {
       return {
         type: 'reject',
@@ -457,11 +470,26 @@ export function createConnectorLegBSender(
         message: `leg-B send failed: ${err instanceof Error ? err.message : String(err)}`,
       };
     }
-    if (response.type === PACKET_TYPE_FULFILL) {
-      const result: LegBResult = { type: 'fulfill' };
-      if (response.fulfillment) {
-        result.fulfillment = new Uint8Array(response.fulfillment);
+    if (response.type === PACKET_TYPE_FULFILL || response.type === 'fulfill') {
+      const fulfillment = response.fulfillment
+        ? new Uint8Array(response.fulfillment)
+        : undefined;
+      if (
+        !fulfillment ||
+        fulfillment.length !== 32 ||
+        !timingSafeEqualish(sha256(fulfillment), prepare.executionCondition)
+      ) {
+        // Fail closed at the seam: a FULFILL that does not reveal P_i cannot
+        // satisfy leg A (the engine would reject it anyway — this converts a
+        // condition-dropping connector into a loud, benign reject).
+        return {
+          type: 'reject',
+          code: 'F99',
+          message:
+            'leg-B FULFILL did not reveal the execution-condition preimage (connector >=3.30.0 with SendPacketParams.executionCondition is required)',
+        };
       }
+      const result: LegBResult = { type: 'fulfill', fulfillment };
       if (response.data) result.data = new Uint8Array(response.data);
       return result;
     }
@@ -605,6 +633,19 @@ export interface RollingSwapEngineConfig {
    * Default 5s.
    */
   reservationGraceMs?: number;
+  /**
+   * Maker receipt secret key (32-byte secp256k1 — by convention the swap
+   * node's Nostr identity key, so receipts verify against `swapPubkey`).
+   * When set, every ACCEPTED fill's {@link RollingAcceptRecord} carries a
+   * signed {@link StreamReceipt} (spec §7.2 — sdk 2.2.0 `issueSessionReceipt`).
+   * Rejected fills never advance the receipt session (sdk contract).
+   */
+  receiptSecretKey?: Uint8Array;
+  /**
+   * Receipt session store override (tests / persistent operators). Default:
+   * a fresh in-memory `BoundedReceiptSessions` LRU.
+   */
+  receiptSessions?: ReceiptSessionStoreLike;
 }
 
 export const DEFAULT_LEG_B_BUDGET_MS = 30_000;
@@ -633,6 +674,8 @@ export class RollingSwapEngine {
   readonly #legBExpiryMarginMs: number;
   readonly #minLegBTimeMs: number;
   readonly #reservationGraceMs: number;
+  readonly #receiptSecretKey?: Uint8Array;
+  readonly #receiptSessions: ReceiptSessionStoreLike;
 
   constructor(config: RollingSwapEngineConfig) {
     this.#sessions = config.sessions;
@@ -649,6 +692,19 @@ export class RollingSwapEngine {
     this.#minLegBTimeMs = config.minLegBTimeMs ?? DEFAULT_MIN_LEG_B_TIME_MS;
     this.#reservationGraceMs =
       config.reservationGraceMs ?? DEFAULT_RESERVATION_GRACE_MS;
+    if (config.receiptSecretKey !== undefined) {
+      if (
+        !(config.receiptSecretKey instanceof Uint8Array) ||
+        config.receiptSecretKey.length !== 32
+      ) {
+        throw new Error(
+          'RollingSwapEngineConfig.receiptSecretKey must be a 32-byte secp256k1 key'
+        );
+      }
+      this.#receiptSecretKey = config.receiptSecretKey;
+    }
+    this.#receiptSessions =
+      config.receiptSessions ?? new BoundedReceiptSessions();
   }
 
   /** Register a session (RFQ intake seam). See {@link RollingSessionStore}. */
@@ -930,6 +986,29 @@ export class RollingSwapEngine {
         preimage.length === 32 &&
         timingSafeEqualish(sha256(preimage), condition)
       ) {
+        // Spec §7.2 (sdk 2.2.0, toon#84): the receipt is issued ONLY for an
+        // accepted packet, and the session advance is synchronous. A local
+        // signing failure must not lose the fill (the claim is already
+        // committed and the preimage verified) — log loudly and omit.
+        let receipt: StreamReceipt | undefined;
+        if (this.#receiptSecretKey) {
+          try {
+            receipt = issueSessionReceipt({
+              sessions: this.#receiptSessions,
+              streamNonce: payload.streamNonce,
+              deliveredAmount: targetAmount,
+              rate,
+              rateTimestamp,
+              secretKey: this.#receiptSecretKey,
+            });
+          } catch (err) {
+            this.#logger.warn?.('swap.rolling.receipt_issue_failed', {
+              streamNonce: payload.streamNonce,
+              seq: payload.seq,
+              err: err instanceof Error ? err.message : String(err),
+            });
+          }
+        }
         const record: RollingAcceptRecord = {
           proto: ROLLING_PROTOCOL,
           type: 'accept',
@@ -945,6 +1024,7 @@ export class RollingSwapEngine {
           ...(issued.cumulativeAmount !== undefined && {
             cumulativeAmount: issued.cumulativeAmount.toString(),
           }),
+          ...(receipt !== undefined && { receipt }),
         };
         // Issue #49: the sender revealed the preimage, so it now holds a
         // redeemable claim — convert the window reservation into unsettled
