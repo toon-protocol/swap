@@ -130,8 +130,9 @@ export interface MultiChainClaimIssuerConfig {
    * in the FULFILL path so the sender can verify claims against the correct
    * swap node signer address.
    *
-   * TODO(12.7): `startSwapNode()` will populate this from the derived wallet.
-   * Until then, callers must supply the map explicitly.
+   * `startSwapNode()` populates this automatically via `buildSignerAddresses()`.
+   * This field stays optional only for callers constructing
+   * `MultiChainClaimIssuer` directly, outside `startSwapNode()`.
    */
   signerAddresses?: Record<string, string>;
   /**
