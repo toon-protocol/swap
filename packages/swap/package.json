@@ -1,6 +1,6 @@
 {
   "name": "@toon-protocol/swap",
-  "version": "2.0.0",
+  "version": "2.1.0",
   "description": "TOON Swap — multi-chain payment-channel claim issuer for the Token Swap Primitive (Epic 12)",
   "type": "module",
   "main": "./dist/index.js",
