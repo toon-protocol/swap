@@ -25,6 +25,13 @@ const VALID_MNEMONIC =
 const CHAIN = 'evm:8453';
 const STREAM_NONCE = '1f'.repeat(16);
 const CHAIN_RECIPIENT = '0x' + '11'.repeat(20);
+// v2 EIP-712 domain (connector#324 finding #1): the EVM signer now folds a
+// per-chain `verifyingContract` (the deployed RollingSwapChannel address) into
+// the signed digest and fails closed (`SIGNING_FAILED`) without one. Thread a
+// dummy deployment address through `chainProviders[].settlementAddress` so the
+// coupled-fill claim-signing path succeeds. Unit tests never verify the digest
+// on-chain, so any well-formed address works.
+const SETTLEMENT_ADDRESS = '0x5FbDB2315678afecb367f032d93F642f64180aa3';
 
 type PacketHandlerFn = (request: {
   amount: string;
@@ -84,6 +91,16 @@ async function bootNode(overrides?: Partial<SwapNodeConfig>): Promise<{
       },
     ],
     chains: ['evm'],
+    chainProviders: [
+      {
+        chainType: 'evm',
+        chainId: CHAIN,
+        rpcUrl: 'http://localhost:0',
+        registryAddress: '0x' + '22'.repeat(20),
+        tokenAddress: '0x' + '33'.repeat(20),
+        settlementAddress: SETTLEMENT_ADDRESS,
+      },
+    ],
     channels: {
       [CHAIN]: [
         {

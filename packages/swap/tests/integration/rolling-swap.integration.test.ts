@@ -45,6 +45,13 @@ const PAIR = {
 } as const;
 const CHANNEL_ID = '0x' + '31'.repeat(32);
 const CHAIN_RECIPIENT = '0x' + '42'.repeat(20);
+// v2 EIP-712 domain (connector#324 finding #1): the EVM signer folds a per-chain
+// `verifyingContract` (deployed RollingSwapChannel address) into the signed
+// digest and fails closed (`SIGNING_FAILED`) without one. This flow settles
+// nothing on-chain (the daemon does spec-R5 verify-before-reveal on the claim
+// bytes, never an on-chain signature check), so a well-formed dummy address is
+// sufficient to let claim signing — and therefore the coupled fill — succeed.
+const SETTLEMENT_ADDRESS = '0x' + 'cc'.repeat(20);
 const SENDER_ILP = 'g.toon.client.rollingsender';
 const STREAM_NONCE = '7e'.repeat(16);
 const INITIAL_INVENTORY = 10n ** 20n; // 100 ETH (wei)
@@ -216,6 +223,16 @@ async function bootRollingNode(daemon: SenderDaemon): Promise<{
     connector: connector as unknown as SwapNodeConfig['connector'],
     swapPairs: [PAIR],
     chains: ['evm'],
+    chainProviders: [
+      {
+        chainType: 'evm',
+        chainId: CHAIN,
+        rpcUrl: 'http://localhost:0',
+        registryAddress: '0x' + '22'.repeat(20),
+        tokenAddress: '0x' + '33'.repeat(20),
+        settlementAddress: SETTLEMENT_ADDRESS,
+      },
+    ],
     channels: {
       [CHAIN]: [
         {

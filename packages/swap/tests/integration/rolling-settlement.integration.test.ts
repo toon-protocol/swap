@@ -398,6 +398,23 @@ describe('swap#50 — N advances net to ONE settlement per chain (rolling e2e)',
       connector: makerConnector as unknown as SwapNodeConfig['connector'],
       swapPairs: [PAIR],
       chains: ['evm'],
+      // v2 EIP-712 domain (connector#324 finding #1): the swap node signs
+      // chain-B claims that are settled on-chain against the deployed
+      // RollingSwapChannel. The v2 signer folds (chainId, verifyingContract)
+      // into the digest and fails closed without a settlement address, so the
+      // deployed RollingSwapChannel address MUST be threaded per chain here —
+      // it is the exact `verifyingContract` the on-chain contract + client
+      // `buildSwapSettlements` reconstruct the digest against.
+      chainProviders: [
+        {
+          chainType: 'evm',
+          chainId: CHAIN_B,
+          rpcUrl: anvilB.rpcUrl,
+          registryAddress: ROLLING_SWAP_CHANNEL_ADDRESS,
+          tokenAddress: USDC_TOKEN_ADDRESS,
+          settlementAddress: ROLLING_SWAP_CHANNEL_ADDRESS,
+        },
+      ],
       channels: {
         [CHAIN_B]: [
           {

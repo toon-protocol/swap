@@ -57,6 +57,21 @@ export const ANVIL_CHAIN_ID = 31337;
 export const ANVIL_URL = 'http://localhost:18545';
 
 /**
+ * v2 EIP-712 balance-proof `verifyingContract` (connector#324 finding #1).
+ *
+ * The v2 EVM signer folds the settlement contract address + chainId into the
+ * signed digest and FAILS CLOSED (`SIGNING_FAILED`) without one, so the fixture
+ * node must be handed a per-chain settlement address to sign EVM claims at all.
+ *
+ * This is NOT deployed on Anvil — the fixture topology never settles on-chain;
+ * it only proves the swap-composition pipeline off-chain. It deliberately
+ * matches the `channelContractAddress` the AC-8 / AC-9 suites pass to the sdk's
+ * `buildSettlementTx()` so the round-trip signature verification (signer digest
+ * ↔ sdk v2 digest) recovers the swap node's address and passes.
+ */
+export const FIXTURE_SETTLEMENT_ADDRESS = '0x' + 'cc'.repeat(20);
+
+/**
  * Default USDC→ETH swap pair on Anvil.
  * Rate 0.0004: 1 USDC (1e6 micros, scale 6) → 0.0004 ETH (4e14 wei, scale 18).
  */
@@ -184,6 +199,21 @@ export async function buildFixtureSwapNode(
     connector: makeFakeConnector(),
     swapPairs: pairs,
     chains: ['evm'],
+    // v2 EIP-712 domain (connector#324 finding #1): thread the per-chain
+    // settlement contract address so the EVM signer can bind (chainId,
+    // verifyingContract) into the digest instead of failing closed. `rpcUrl`
+    // is never dialed here — the fixture supplies its own connector, so
+    // chainProviders only feed the claim issuer's settlementContracts map.
+    chainProviders: [
+      {
+        chainType: 'evm',
+        chainId: targetChain,
+        rpcUrl: ANVIL_URL,
+        registryAddress: '0x' + '22'.repeat(20),
+        tokenAddress: '0x' + '33'.repeat(20),
+        settlementAddress: FIXTURE_SETTLEMENT_ADDRESS,
+      },
+    ],
     channels: { [targetChain]: channels },
     inventory: { [targetChain]: 10n ** 20n }, // 100 ETH in wei
     relayUrls: ['ws://localhost:0'],
