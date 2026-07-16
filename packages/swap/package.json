@@ -73,7 +73,7 @@
     }
   },
   "devDependencies": {
-    "@toon-protocol/client": "^0.18.0",
+    "@toon-protocol/client": "^0.20.0",
     "@types/node": "^20.0.0",
     "tsup": "^8.0.0",
     "typescript": "^5.3.0",
