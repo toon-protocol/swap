@@ -2,7 +2,9 @@
 
 TOON Protocol multi-chain swap node — @toon-protocol/swap (issues signed target-chain payment-channel claims; EVM/Solana/Mina).
 
-> Extracted from the TOON monorepo with full git history preserved. npm publishing is done by CI (changesets + `pnpm`, authed by the org `NPM_TOKEN` secret). Docker image-publish workflows (where applicable) are a follow-up carved from the monorepo `publish-townhouse-images.yml`.
+In the TOON stack this is the **maker (mill)** side of a rolling swap: it runs beside the connector and signs the leg-B payment-channel claims on the target chain, while the connector handles the client-facing leg-A payments. See toon-meta [`docs/rolling-swap.md`](https://github.com/toon-protocol/toon-meta/blob/main/docs/rolling-swap.md) for the protocol and [`docs/rolling-swap-deploy.md`](https://github.com/toon-protocol/toon-meta/blob/main/docs/rolling-swap-deploy.md) for deployment; for the client side of a swap, start with the toon-client [rig README](https://github.com/toon-protocol/toon-client/blob/main/packages/rig/README.md).
+
+> Extracted from the TOON monorepo with full git history preserved. npm publishing is done by CI (changesets + `pnpm`, authed by the org `NPM_TOKEN` secret).
 
 ## Getting started with Devbox
 
