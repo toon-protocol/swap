@@ -65,6 +65,7 @@ export default tseslint.config(
       'archive/**',
       '.cache/**',
       '.claude/**',
+      '.sandcastle/**',
       'packages/memvid-node/index.d.ts',
     ],
   }
