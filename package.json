@@ -14,7 +14,12 @@
     "format:check": "prettier --check \"packages/*/src/**/*.ts\"",
     "changeset": "changeset",
     "version": "changeset version",
-    "release": "changeset publish"
+    "release": "changeset publish",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "sandcastle": "npx tsx .sandcastle/main.ts",
+    "sandcastle:plan": "npx tsx .sandcastle/plan-dry-run.ts",
+    "sandcastle:implement": "npx tsx .sandcastle/agent-implement-issue.ts",
+    "sandcastle:review": "npx tsx .sandcastle/agent-review-pr.ts"
   },
   "keywords": [
     "nostr",
@@ -56,6 +61,7 @@
     }
   },
   "devDependencies": {
+    "@ai-hero/sandcastle": "0.12.0",
     "@eslint/js": "^9.0.0",
     "@hono/node-server": "^1.13.7",
     "@noble/curves": "^1.8.0",
