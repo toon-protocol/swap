@@ -287,7 +287,7 @@ describe('JsonFileSwapStateStore', () => {
   it('[P1] malformed bigint strings fail load()', () => {
     const path = join(makeTmpDir(), 'state.json');
     const bad = sampleState();
-    bad.inventory['ETH:evm:base:8453'].available = 'not-a-bigint';
+    bad.inventory['ETH:evm:base:8453']!.available = 'not-a-bigint';
     writeFileSync(path, JSON.stringify(bad), 'utf-8');
     const store = new JsonFileSwapStateStore(path);
     expect(() => store.load()).toThrowError(SwapStateStoreError);
@@ -307,10 +307,10 @@ describe('JsonFileSwapStateStore', () => {
     const store = new JsonFileSwapStateStore(path);
     store.save(sampleState());
     const next = sampleState();
-    next.channels['ETH:evm:base:8453:0xchan'].nonce = '43';
+    next.channels['ETH:evm:base:8453:0xchan']!.nonce = '43';
     store.save(next);
     const loaded = store.load()!;
-    expect(loaded.channels['ETH:evm:base:8453:0xchan'].nonce).toBe('43');
+    expect(loaded.channels['ETH:evm:base:8453:0xchan']!.nonce).toBe('43');
     // File on disk is a single complete JSON document.
     expect(() => JSON.parse(readFileSync(path, 'utf-8'))).not.toThrow();
   });
@@ -385,8 +385,8 @@ describe('SwapStatePersister', () => {
     withSeen.persist();
 
     const loaded = store.load()!;
-    expect(loaded.inventory['ETH:evm:base:8453'].available).toBe('993');
-    expect(loaded.inventory['ETH:evm:base:8453'].total).toBe('1000');
+    expect(loaded.inventory['ETH:evm:base:8453']!.available).toBe('993');
+    expect(loaded.inventory['ETH:evm:base:8453']!.total).toBe('1000');
     expect(loaded.channels['ETH:evm:base:8453:chan-a']).toMatchObject({
       channelId: 'chan-a',
       cumulativeAmount: '7',
@@ -646,11 +646,11 @@ describe('issue #46 — crash recovery through MultiChainClaimIssuer', () => {
       swapNode.issuer.issueClaim(issueParams())
     ).rejects.toBeInstanceOf(SwapWalletError);
     const loaded = store.load()!;
-    expect(loaded.inventory['ETH:evm:base:8453'].available).toBe('1000');
-    expect(loaded.channels['ETH:evm:base:8453:chan-a'].nonce).toBe('0');
-    expect(loaded.channels['ETH:evm:base:8453:chan-a'].cumulativeAmount).toBe(
-      '0'
-    );
+    expect(loaded.inventory['ETH:evm:base:8453']!.available).toBe('1000');
+    expect(loaded.channels['ETH:evm:base:8453:chan-a']!.nonce).toBe('0');
+    expect(
+      loaded.channels['ETH:evm:base:8453:chan-a']!.cumulativeAmount
+    ).toBe('0');
   });
 
   it('[P0] crash between debit and FULFILL: restored state is over-reserved (never behind a handed-out claim) and stays monotone', async () => {
@@ -679,8 +679,8 @@ describe('issue #46 — crash recovery through MultiChainClaimIssuer', () => {
     // Disk kept the write-ahead (over-reserved) snapshot: nonce 1, debit 50 —
     // ahead of any claim a counterparty could hold (none was delivered).
     const persisted = realStore.load()!;
-    expect(persisted.channels['ETH:evm:base:8453:chan-a'].nonce).toBe('1');
-    expect(persisted.inventory['ETH:evm:base:8453'].available).toBe('950');
+    expect(persisted.channels['ETH:evm:base:8453:chan-a']!.nonce).toBe('1');
+    expect(persisted.inventory['ETH:evm:base:8453']!.available).toBe('950');
 
     // Recovery: reboot from that snapshot; the next claim continues ABOVE the
     // aborted reservation — monotone, no possible watermark regression.
