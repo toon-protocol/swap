@@ -1,0 +1,77 @@
+{
+  "$schema": "https://toon-protocol.github.io/schemas/gate-baseline.v1.json",
+  "repo": "swap",
+  "capturedAt": "2026-07-22T20:49:40Z",
+  "capturedFromCommit": "a78a6c55fb5327c11c2b14cbbbc7002092423e8f",
+  "capturedFromBranch": "main",
+  "gateShape": {
+    "packageManager": "pnpm@8.15.9",
+    "lint": "eslint .",
+    "typecheck": "pnpm run typecheck",
+    "test": "vitest run",
+    "build": "pnpm -r run build"
+  },
+  "method": "Ran the four gate commands sequentially against a clean `pnpm install --frozen-lockfile`, in the same sandcastle sandbox environment (node v22.23.1, pnpm 8.15.9) the implement/review runners use, timing each command individually with wall-clock before/after timestamps. Reproduce: `pnpm install --frozen-lockfile`, then time `eslint .`, `pnpm run typecheck`, `vitest run`, `pnpm -r run build` in that order on a quiescent runner (no concurrent load).",
+  "gateSpeed": {
+    "description": "CI wall-clock time for the gate the dumb zone (.sandcastle/) runs before opening a PR.",
+    "unit": "milliseconds",
+    "lintMs": 11276,
+    "typecheckMs": 4759,
+    "testMs": 7797,
+    "buildMs": 7265,
+    "gateTotalMs": 31097,
+    "ciWorkflowReference": {
+      "note": "Cross-check data point only, NOT the primary number: .github/workflows/ci.yml runs a narrower shape (lint soft-gated with continue-on-error, no dedicated typecheck step, build+test) on a GitHub-hosted ubuntu-latest runner. The sandcastle gate above (eslint/typecheck/vitest/build) is the shape this baseline tracks.",
+      "workflow": "ci.yml",
+      "runId": 29953900516,
+      "runDurationMs": 53000,
+      "capturedFromCommit": "a78a6c55fb5327c11c2b14cbbbc7002092423e8f"
+    }
+  },
+  "gatePerformance": {
+    "description": "Runner cost & resource efficiency, independent of wall-clock.",
+    "runnerMinutesBillable": {
+      "value": 0,
+      "note": "Per the GitHub Actions run-timing API (`GET /repos/.../actions/runs/{id}/timing`) for run 29953900516, `billable.UBUNTU.total_ms` is 0 — the org runs on free/unlimited GitHub-hosted minutes, so billable runner-minutes is not a meaningful cost signal here. Wall-clock (gateSpeed) is the actionable metric instead."
+    },
+    "dockerImageSize": {
+      "value": null,
+      "note": "Not measured in this capture pass — no Docker daemon is available in the capture sandbox. Reproduce in an environment with Docker: `npx --yes @ai-hero/sandcastle@0.12.0 docker build-image && docker image inspect sandcastle:swap --format '{{.Size}}'`."
+    },
+    "cacheHitRate": {
+      "sample": "pnpm dependency cache (actions/setup-node@v4, cache: pnpm) across the last 5 completed CI runs on main",
+      "hits": 4,
+      "total": 5,
+      "rate": 0.8,
+      "runIds": [29953900516, 29951199501, 29945834035, 29935890668, 29873059433],
+      "missNote": "The one miss (run 29935890668, 'Cache not found for input keys' -> 'pnpm cache is not found') immediately followed a pnpm-lock.yaml change (new @ai-hero/sandcastle devDependency in #70) — an expected cache-key invalidation, not a regression."
+    }
+  },
+  "gateCorrectness": {
+    "description": "Trustworthiness of the gate's verdict: current violation counts, frozen here as the pre-ratchet baseline (no false PASS still holds — every violation below was already surfaced by the gate, none is newly hidden).",
+    "lint": {
+      "tool": "eslint . (flat config)",
+      "errors": 0,
+      "warnings": 342,
+      "byRule": {
+        "@typescript-eslint/no-non-null-assertion": 340,
+        "no-console": 2
+      }
+    },
+    "typecheck": {
+      "tool": "tsc -p tsconfig.json --noEmit",
+      "errors": 42,
+      "note": "All 42 errors are test-side (packages/swap/src/*.test.ts and packages/swap/tests/**); zero production-source (non-test src/*.ts) errors. Tracked debt: swap#69 (opened at 60 errors; down to 42 after swap#74's TS2532 fix slice)."
+    },
+    "test": {
+      "tool": "vitest run",
+      "testFiles": { "passed": 18, "total": 18 },
+      "tests": { "passed": 264, "skipped": 2, "failed": 0, "total": 266 }
+    },
+    "build": {
+      "tool": "pnpm -r run build (tsup)",
+      "status": "pass",
+      "entries": ["src/cli.ts", "src/index.ts", "src/wallet.ts"]
+    }
+  }
+}
