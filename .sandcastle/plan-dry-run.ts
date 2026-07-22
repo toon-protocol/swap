@@ -37,7 +37,17 @@ const planSchema = z.object({
 // main.ts). We do NOT copyToWorktree node_modules (pnpm's symlinked store
 // breaks across the bind-mount).
 const hooks = {
-  sandbox: { onSandboxReady: [{ command: "pnpm install --frozen-lockfile" }] },
+  sandbox: {
+    onSandboxReady: [
+      // Wire `git push` auth deterministically inside the container (see
+      // ./agent-implement-issue.ts). The planner is read-only and never pushes,
+      // but every runner entrypoint installs the credential helper identically
+      // so the sandbox setup is uniform and any future push here is authed.
+      // Guarded on GH_TOKEN so token-less local dev no-ops rather than aborting.
+      { command: 'if [ -n "$GH_TOKEN" ]; then gh auth setup-git; fi' },
+      { command: "pnpm install --frozen-lockfile" },
+    ],
+  },
 };
 
 const plan = await sandcastle.run({

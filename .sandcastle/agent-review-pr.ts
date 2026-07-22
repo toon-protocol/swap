@@ -56,12 +56,45 @@ if (!headRef) {
 }
 
 const hooks = {
-  sandbox: { onSandboxReady: [{ command: "pnpm install --frozen-lockfile" }] },
+  sandbox: {
+    onSandboxReady: [
+      // Wire `git push` auth deterministically inside the container. The engine
+      // (@ai-hero/sandcastle@0.12.0) configures git identity + safe.directory
+      // but NO credential helper, so the review-push step's in-sandbox
+      // `git push` to the PR branch is unauthenticated and only succeeds by
+      // luck. `gh auth setup-git` installs `gh` as git's credential helper
+      // (reads GH_TOKEN at push time, stores no token in any file). Guarded on
+      // GH_TOKEN so token-less local dev no-ops rather than aborting setup. See
+      // ./agent-implement-issue.ts for the full root-cause note.
+      { command: 'if [ -n "$GH_TOKEN" ]; then gh auth setup-git; fi' },
+      { command: "pnpm install --frozen-lockfile" },
+    ],
+  },
 };
+
+// Reads origin's current tip SHA for a branch via the authenticated host `gh`.
+// Returns null when the ref does not exist (or gh errors) — the caller treats a
+// null as "cannot conclude" and does not fail on it.
+function remoteBranchSha(ref: string): string | null {
+  try {
+    return execFileSync(
+      "gh",
+      ["api", `repos/{owner}/{repo}/git/ref/heads/${ref}`, "--jq", ".object.sha"],
+      { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] },
+    ).trim();
+  } catch {
+    return null;
+  }
+}
 
 console.log(
   `\n=== agent:review runner — PR #${prNumber} (head: ${headRef}) ===\n`,
 );
+
+// Set to a non-null message below when the review-push phase reported success
+// but origin's PR branch tip did not advance. Recorded here so the `finally`
+// still closes the sandbox before we fail the job non-zero.
+let reviewPushVerificationError: string | null = null;
 
 const sandbox = await sandcastle.createSandbox({
   branch: headRef,
@@ -87,6 +120,10 @@ try {
     console.log(
       `\nReviewer made ${review.commits.length} commit(s) — pushing to the PR branch.`,
     );
+    // Record origin's PR-branch tip BEFORE the push so we can prove afterwards
+    // that it actually advanced.
+    const remoteShaBefore = remoteBranchSha(headRef);
+
     await sandbox.run({
       name: "push-review",
       maxIterations: 1,
@@ -94,6 +131,27 @@ try {
       promptFile: "./.sandcastle/review-push-prompt.md",
       promptArgs: { BRANCH: headRef },
     });
+
+    // FAIL LOUD. The push-review phase logs COMPLETE from its prompt regardless
+    // of whether the in-sandbox `git push` actually landed, so we must NOT trust
+    // it. Verify from the HOST that origin's PR-branch tip advanced. If the
+    // reviewer produced commits but the remote tip did not move, the push failed
+    // silently — exit non-zero so the Actions job goes red instead of green.
+    // Same class of silent-push failure as store#50.
+    const remoteShaAfter = remoteBranchSha(headRef);
+    if (remoteShaAfter !== null && remoteShaAfter === remoteShaBefore) {
+      reviewPushVerificationError =
+        `\nERROR: the push-review phase reported COMPLETE, but origin's tip for ` +
+        `branch '${headRef}' did not advance (still ${remoteShaAfter}).\n` +
+        `  The reviewer made ${review.commits.length} commit(s), so the ` +
+        `in-sandbox \`git push\` failed silently. Inspect the push-review phase ` +
+        `logs above. The Actions job is failing deliberately so this is not ` +
+        `mistaken for success.`;
+    } else {
+      console.log(
+        `\nVerified: origin/${headRef} advanced to ${remoteShaAfter ?? "(unknown)"}.`,
+      );
+    }
   } else {
     console.log(
       "\nReviewer made no changes — the code was already clean. Nothing to push.",
@@ -101,6 +159,13 @@ try {
   }
 } finally {
   await sandbox.close();
+}
+
+// Fail loud AFTER the sandbox is closed: a silently-failed push must turn the
+// Actions job red, never green.
+if (reviewPushVerificationError) {
+  console.error(reviewPushVerificationError);
+  process.exit(1);
 }
 
 console.log("\nReview complete. The PR was NOT merged — a human still merges.");
