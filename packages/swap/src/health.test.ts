@@ -169,9 +169,9 @@ describe('AC-1 swapPairs field in /health', () => {
         }[];
       };
       expect(body.swapPairs).toHaveLength(1);
-      expect(body.swapPairs[0].from.assetCode).toBe('USDC');
-      expect(body.swapPairs[0].from.chain).toBe('evm:8453');
-      expect(body.swapPairs[0].rate).toBe('1.0');
+      expect(body.swapPairs[0]?.from.assetCode).toBe('USDC');
+      expect(body.swapPairs[0]?.from.chain).toBe('evm:8453');
+      expect(body.swapPairs[0]?.rate).toBe('1.0');
     } finally {
       await instance.stop();
     }

@@ -80,8 +80,8 @@ describe('issue #46 — startSwapNode state persistence', () => {
     try {
       expect(existsSync(statePath)).toBe(true);
       const snap = new JsonFileSwapStateStore(statePath).load()!;
-      expect(snap.inventory['USDC:evm:8453'].available).toBe('1000000');
-      expect(snap.channels['USDC:evm:8453:c-1'].nonce).toBe('0');
+      expect(snap.inventory['USDC:evm:8453']?.available).toBe('1000000');
+      expect(snap.channels['USDC:evm:8453:c-1']?.nonce).toBe('0');
     } finally {
       await instance.stop();
     }
@@ -136,11 +136,11 @@ describe('issue #46 — startSwapNode state persistence', () => {
       // the dynamically-provisioned channel not present in config — and the
       // replay reservations.
       const snap = new JsonFileSwapStateStore(statePath).load()!;
-      expect(snap.channels['USDC:evm:8453:c-1'].nonce).toBe('17');
-      expect(snap.channels['USDC:evm:8453:c-1'].cumulativeAmount).toBe(
+      expect(snap.channels['USDC:evm:8453:c-1']?.nonce).toBe('17');
+      expect(snap.channels['USDC:evm:8453:c-1']?.cumulativeAmount).toBe(
         '750000'
       );
-      expect(snap.channels['USDC:evm:8453:c-dynamic'].nonce).toBe('2');
+      expect(snap.channels['USDC:evm:8453:c-dynamic']?.nonce).toBe('2');
       expect(snap.seenPacketIds).toEqual(['pkt-replayed']);
     } finally {
       await instance.stop();
@@ -167,8 +167,8 @@ describe('issue #46 — startSwapNode state persistence', () => {
     await instance.stop();
     const snap = new JsonFileSwapStateStore(statePath).load()!;
     // Watermark survives a clean stop — releaseAll() zeros memory only.
-    expect(snap.channels['USDC:evm:8453:c-1'].nonce).toBe('9');
-    expect(snap.channels['USDC:evm:8453:c-1'].cumulativeAmount).toBe('99');
+    expect(snap.channels['USDC:evm:8453:c-1']?.nonce).toBe('9');
+    expect(snap.channels['USDC:evm:8453:c-1']?.cumulativeAmount).toBe('99');
   });
 
   it('[P0] corrupt state file fails boot with STATE_LOAD_FAILED (no silent watermark reset)', async () => {

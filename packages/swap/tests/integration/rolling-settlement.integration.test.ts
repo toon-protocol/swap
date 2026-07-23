@@ -63,7 +63,8 @@ import {
   serializeReceiptChain,
   verifyStreamReceipt,
 } from '@toon-protocol/sdk';
-import type { AccumulatedClaim, SwapPair } from '@toon-protocol/sdk';
+import type { AccumulatedClaim } from '@toon-protocol/sdk';
+import type { SwapPair } from '@toon-protocol/core';
 import {
   ingestReceivedClaims,
   JsonFileReceivedClaimStore,
@@ -272,7 +273,7 @@ function makeSenderDaemon(
         store,
       });
       if (result.verified.length !== 1) {
-        const why = result.rejected[0]?.error;
+        const why = result.rejected[0];
         return {
           reject: {
             code: 'F99',

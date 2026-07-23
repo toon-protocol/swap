@@ -8,9 +8,6 @@
     "esModuleInterop": true,
     "skipLibCheck": true,
     "forceConsistentCasingInFileNames": true,
-    "declaration": true,
-    "declarationMap": true,
-    "sourceMap": true,
     "resolveJsonModule": true,
     "isolatedModules": true,
     "noEmit": true,
@@ -18,12 +15,5 @@
     "noImplicitOverride": true,
     "noPropertyAccessFromIndexSignature": true
   },
-  "exclude": [
-    "node_modules",
-    "dist",
-    "coverage",
-    "archive",
-    "packages/rig",
-    "packages/swap/tests/e2e"
-  ]
+  "include": ["**/*.ts"]
 }

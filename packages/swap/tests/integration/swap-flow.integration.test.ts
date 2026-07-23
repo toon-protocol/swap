@@ -23,13 +23,13 @@ import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import {
   parseIlpPeerInfo,
   buildIlpPeerInfoEvent,
-  unwrapSwapPacketFromToon,
 } from '@toon-protocol/core';
 import {
   streamSwap,
   buildSettlementTx,
   SWAP_HANDLER_REJECT_CODES,
   SWAP_HANDLER_REJECT_MESSAGES,
+  unwrapSwapPacketFromToon,
 } from '@toon-protocol/sdk';
 import type { BuildSettlementTxResult } from '@toon-protocol/sdk';
 import { generateSecretKey, getPublicKey } from 'nostr-tools/pure';

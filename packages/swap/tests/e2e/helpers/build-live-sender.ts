@@ -109,10 +109,12 @@ export async function buildLiveSender(
 
   await connector.start();
 
-  // Register peer1 with route to its ILP address
+  // Register peer1 with route to its ILP address. `evmAddress` is already
+  // set via the static `peers` config above (PeerConfig) — the runtime
+  // admin API's PeerRegistrationRequest carries settlement address under
+  // `settlement.evmAddress` instead, not a top-level field.
   await connector.registerPeer({
     id: 'peer1',
-    evmAddress: PEER1_EVM_ADDRESS,
     url: PEER1_BTP_URL,
     authToken: '',
     routes: [{ prefix: 'g.toon.peer1' }],

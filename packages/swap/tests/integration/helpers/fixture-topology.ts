@@ -265,6 +265,9 @@ export async function buildFixtureSender(
         // handler unwraps the seal to recover the real sender. The value
         // passed here doesn't affect the handler's behavior.
         pubkey: '0'.repeat(64),
+        id: '0'.repeat(64),
+        sig: '0'.repeat(128),
+        rawBytes: params.toonData,
       },
       amount: params.amount,
       destination: params.destination,

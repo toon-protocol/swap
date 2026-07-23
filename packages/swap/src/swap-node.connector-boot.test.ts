@@ -64,6 +64,9 @@ function buildConfig(events: string[]): SwapNodeConfig {
       debug: (event) => {
         if (typeof event === 'string') events.push(event);
       },
+      info: (event) => {
+        if (typeof event === 'string') events.push(event);
+      },
       warn: (event) => {
         if (typeof event === 'string') events.push(event);
       },
