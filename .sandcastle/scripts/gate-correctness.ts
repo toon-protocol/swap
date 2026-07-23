@@ -1,8 +1,8 @@
 // gate:correctness — fails the gate only on NEW lint/typecheck violations
-// beyond the frozen `.sandcastle/gate-baseline.json` allowlist (ADR-0001
-// baseline-freeze). Counts coming in at or below the frozen numbers pass;
-// this is a ratchet, not a zero-tolerance gate — burning down the existing
-// debt is a separate follow-up slice (swap#69).
+// beyond the frozen `.sandcastle/gate-baseline.json` allowlist. Counts
+// coming in at or below the frozen numbers pass; this is a ratchet, not a
+// zero-tolerance gate — burning down the existing debt is a separate
+// follow-up slice (swap#69).
 //
 // Usage: npx tsx .sandcastle/scripts/gate-correctness.ts
 //        (wired as `pnpm run gate:correctness`)

@@ -45,6 +45,13 @@ const speedResult = evaluateSpeedRegression(
   baseline.regressionTolerancePct,
 );
 
+// runnerMinutesBillable has no live source here: billable minutes are only
+// knowable after the fact via the GitHub Actions run-timing API (see
+// gate-baseline.json's gatePerformance.runnerMinutesBillable.note), not
+// during job execution. Echoing the frozen baseline back as "current" keeps
+// evaluatePerformanceRegression's shape uniform without fabricating a
+// number — the check stays a no-op (as documented) until that data source
+// is wired up.
 const currentImageSizeRaw = process.env["GATE_DOCKER_IMAGE_SIZE_BYTES"];
 const currentPerformance = {
   runnerMinutesBillable: baseline.gatePerformance.runnerMinutesBillable,

@@ -30,7 +30,12 @@ jobs:
       # absent entirely).
       - run: pnpm run gate:correctness
 
-      - run: pnpm -r test --if-present
+      # Root `pnpm test` (not `pnpm -r test`) so the run picks up
+      # vitest.config.ts's canonical include list, which covers both
+      # packages/*/src/**/*.test.ts and .sandcastle/scripts/**/*.test.ts —
+      # `pnpm -r test` would resolve packages/swap's own vitest.config.ts
+      # instead and silently skip the .sandcastle gate-lib tests.
+      - run: pnpm test
 
   devbox-validate:
     name: Devbox Environment Validation
