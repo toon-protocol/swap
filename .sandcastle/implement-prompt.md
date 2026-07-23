@@ -35,14 +35,13 @@ If applicable, use RGR to complete the task.
 
 # FEEDBACK LOOPS
 
-swap is a pnpm workspace. Before committing, run swap's real gate and make sure every command passes:
+swap is a pnpm workspace. Before committing, run swap's real gate and make sure every command passes (each internally builds + lints + typechecks, in that order — see `.sandcastle/gate-baseline.json`'s `gateShape.note`):
 
-- lint: `eslint .`
-- typecheck: `pnpm run typecheck`
+- correctness (no new lint/typecheck violations beyond the frozen allowlist): `pnpm run gate:correctness`
 - test: `vitest run`
-- build: `pnpm -r run build`
+- no-regression (gate speed/performance vs the frozen baseline): `pnpm run gate:no-regression`
 
-Do not commit until lint, typecheck, test, and build all pass.
+Do not commit until gate:correctness, test, and gate:no-regression all pass.
 
 # COMMIT
 

@@ -22,12 +22,20 @@ jobs:
 
       - run: pnpm install --no-frozen-lockfile
 
-      - run: pnpm lint
-        continue-on-error: true
+      # gate:correctness builds, then runs eslint + typecheck and fails only
+      # on violations beyond the frozen `.sandcastle/gate-baseline.json`
+      # allowlist (swap#77). Replaces the old soft-gated `pnpm lint
+      # continue-on-error: true` (a false-PASS hole — lint errors could never
+      # fail CI) and adds typecheck to CI for the first time (previously
+      # absent entirely).
+      - run: pnpm run gate:correctness
 
-      - run: pnpm -r build
-
-      - run: pnpm -r test --if-present
+      # Root `pnpm test` (not `pnpm -r test`) so the run picks up
+      # vitest.config.ts's canonical include list, which covers both
+      # packages/*/src/**/*.test.ts and .sandcastle/scripts/**/*.test.ts —
+      # `pnpm -r test` would resolve packages/swap's own vitest.config.ts
+      # instead and silently skip the .sandcastle gate-lib tests.
+      - run: pnpm test
 
   devbox-validate:
     name: Devbox Environment Validation

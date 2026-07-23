@@ -1,0 +1,80 @@
+{
+  "$schema": "https://toon-protocol.github.io/schemas/gate-baseline.v1.json",
+  "repo": "swap",
+  "capturedAt": "2026-07-23T14:13:12Z",
+  "capturedFromCommit": "560b7b1dfdf796122ae1c047c2fd154fbef6e682",
+  "capturedFromBranch": "sandcastle/issue-77",
+  "regressionTolerancePct": 25,
+  "gateShape": {
+    "packageManager": "pnpm@8.15.9",
+    "order": ["lint", "build", "typecheck", "test"],
+    "lint": "eslint .",
+    "build": "pnpm -r run build",
+    "typecheck": "pnpm run typecheck",
+    "test": "vitest run",
+    "note": "typecheck runs AFTER build: tsc's resolution of the @toon-protocol/swap self-reference depends on packages/swap/dist existing — running typecheck before build inflates the error count by 7 spurious 'Cannot find module' errors (false-FAIL risk). gate-correctness.ts and gate-no-regression.ts both run in this order."
+  },
+  "method": "Ran the four gate commands sequentially (lint, build, typecheck, test) against a clean `pnpm install --frozen-lockfile`, in the same environment the sandcastle implement/review runners use (node v22, pnpm 8.15.9), timing each command individually with millisecond wall-clock before/after timestamps. Reproduce: `pnpm install --frozen-lockfile`, then time `eslint .`, `pnpm -r run build`, `pnpm run typecheck`, `vitest run` in that order on a quiescent runner (no concurrent load). Includes the .sandcastle/scripts/gate-lib.test.ts suite added by this same change (swap#77), so the test counts below reflect the gate tooling's own tests too.",
+  "gateSpeed": {
+    "description": "CI wall-clock time for the gate the dumb zone (.sandcastle/) runs before opening a PR. Read by gate-no-regression.ts as the frozen numbers to compare live timings against.",
+    "unit": "milliseconds",
+    "lintMs": 11338,
+    "buildMs": 7231,
+    "typecheckMs": 4806,
+    "testMs": 7539,
+    "gateTotalMs": 30914,
+    "ciWorkflowReference": {
+      "note": "Cross-check data point only, NOT the primary number: .github/workflows/ci.yml runs a narrower shape on a GitHub-hosted ubuntu-latest runner. The sandcastle gate above (lint/build/typecheck/test) is the shape this baseline tracks.",
+      "workflow": "ci.yml",
+      "runId": 30013965486,
+      "runDurationMs": 63000,
+      "capturedFromCommit": "560b7b1dfdf796122ae1c047c2fd154fbef6e682"
+    }
+  },
+  "gatePerformance": {
+    "description": "Runner cost & resource efficiency, independent of wall-clock. Read by gate-no-regression.ts.",
+    "runnerMinutesBillable": {
+      "value": 0,
+      "note": "Per the GitHub Actions run-timing API (`GET /repos/.../actions/runs/{id}/timing`) for run 30013965486, `billable.UBUNTU.total_ms` is 0 — the org runs on free/unlimited GitHub-hosted minutes, so billable runner-minutes is not a meaningful cost signal here. gate-no-regression.ts skips this check while the frozen baseline is 0. Wall-clock (gateSpeed) is the actionable metric instead."
+    },
+    "dockerImageSize": {
+      "value": null,
+      "note": "Not measured in this capture pass — no Docker daemon is available in the capture sandbox. gate-no-regression.ts skips the image-size check while this is null. Reproduce in an environment with Docker: `npx --yes @ai-hero/sandcastle@0.12.0 docker build-image && docker image inspect sandcastle:swap --format '{{.Size}}'`. .github/workflows/agent-image.yml now logs the built image's size on every build so a future capture can fill this in."
+    },
+    "cacheHitRate": {
+      "sample": "pnpm dependency cache (actions/setup-node@v4, cache: pnpm) across the last 5 completed CI runs on main",
+      "hits": 5,
+      "total": 5,
+      "rate": 1.0,
+      "runIds": [30013965486, 29956868318, 29953900516, 29951199501, 29945834035],
+      "note": "Informational only — not enforced by gate-no-regression.ts (the AC only calls out wall-clock, runner-minutes, and image size; a 5-run sample is too small to gate on without flagging false FAILs from routine cache-key rotation)."
+    }
+  },
+  "gateCorrectness": {
+    "description": "Trustworthiness of the gate's verdict: current violation counts, frozen here as the pre-ratchet allowlist. gate-correctness.ts fails only when live counts exceed these frozen numbers (no new false PASS); counts coming in lower than the baseline still pass (ratchet-friendly, not zero-tolerance).",
+    "lint": {
+      "tool": "eslint . (flat config)",
+      "errors": 0,
+      "warnings": 352,
+      "byRule": {
+        "@typescript-eslint/no-non-null-assertion": 350,
+        "unused-eslint-disable-directive": 2
+      }
+    },
+    "typecheck": {
+      "tool": "tsc -p tsconfig.json --noEmit (run after build — see gateShape.note)",
+      "errors": 25,
+      "note": "All 25 errors are test-side (packages/swap/src/*.test.ts and packages/swap/tests/**); zero production-source (non-test src/*.ts) errors. Tracked debt: swap#69."
+    },
+    "test": {
+      "tool": "vitest run",
+      "testFiles": { "passed": 19, "total": 19 },
+      "tests": { "passed": 285, "skipped": 2, "failed": 0, "total": 287 }
+    },
+    "build": {
+      "tool": "pnpm -r run build (tsup)",
+      "status": "pass",
+      "entries": ["src/cli.ts", "src/index.ts", "src/wallet.ts"]
+    }
+  }
+}
