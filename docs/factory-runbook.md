@@ -52,8 +52,11 @@ Related:
      2. **build the agent image** (`sandcastle docker build-image`)
      3. **run** `pnpm sandcastle:implement`, which inside the sandbox:
         - **implements** the issue (opus, up to 100 iterations, RED→GREEN→
-          REFACTOR, running swap's gate `eslint . / pnpm run typecheck /
-          vitest run / pnpm -r run build`),
+          REFACTOR, running swap's gate `pnpm run gate:correctness / vitest
+          run / pnpm run gate:no-regression` — correctness fails only on new
+          violations beyond the frozen `.sandcastle/gate-baseline.json`
+          allowlist, no-regression fails on speed/performance regressions vs
+          that same frozen baseline; swap#77),
         - **reviews** the branch (opus, 1 iteration),
         - **opens a PR** against `main` (`Part of #<issue>`, NOT `Closes`).
 

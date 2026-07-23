@@ -47,7 +47,7 @@ Review the code changes on branch `{{BRANCH}}` and improve code clarity, consist
 If you find improvements to make:
 
 1. Make the changes directly on this branch
-2. Run swap's gate to ensure nothing is broken — `eslint .`, `pnpm run typecheck`, `vitest run`, and `pnpm -r run build`
+2. Run swap's gate to ensure nothing is broken — `pnpm run gate:correctness`, `vitest run`, and `pnpm run gate:no-regression`
 3. Commit describing the refinements
 
 If the code is already clean and well-structured, do nothing.

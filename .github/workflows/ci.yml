@@ -22,10 +22,13 @@ jobs:
 
       - run: pnpm install --no-frozen-lockfile
 
-      - run: pnpm lint
-        continue-on-error: true
-
-      - run: pnpm -r build
+      # gate:correctness builds, then runs eslint + typecheck and fails only
+      # on violations beyond the frozen `.sandcastle/gate-baseline.json`
+      # allowlist (swap#77). Replaces the old soft-gated `pnpm lint
+      # continue-on-error: true` (a false-PASS hole — lint errors could never
+      # fail CI) and adds typecheck to CI for the first time (previously
+      # absent entirely).
+      - run: pnpm run gate:correctness
 
       - run: pnpm -r test --if-present
 

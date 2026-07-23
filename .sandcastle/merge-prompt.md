@@ -8,7 +8,7 @@ For each branch:
 
 1. Run `git merge <branch> --no-edit`
 2. If there are merge conflicts, resolve them intelligently by reading both sides and choosing the correct resolution
-3. After resolving conflicts, run swap's gate to verify everything works — `eslint .`, `pnpm run typecheck`, `vitest run`, and `pnpm -r run build`
+3. After resolving conflicts, run swap's gate to verify everything works — `pnpm run gate:correctness`, `vitest run`, and `pnpm run gate:no-regression`
 4. If tests fail, fix the issues before proceeding to the next branch
 
 After all branches are merged, make a single commit summarizing the merge.
