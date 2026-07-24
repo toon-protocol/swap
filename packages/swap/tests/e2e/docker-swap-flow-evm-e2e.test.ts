@@ -208,11 +208,11 @@ describe('Docker Swap-Flow EVM E2E (Story 12.10, Task 2)', () => {
     );
 
     expect(event, 'peer1 should have published a kind:10032 event').not.toBeNull();
-    expect((event as Record<string, unknown>).kind).toBe(10032);
+    expect((event as Record<string, unknown>)['kind']).toBe(10032);
 
     // Parse the kind:10032 content as IlpPeerInfo JSON and validate
     // SwapPair structure, chains, asset code, and asset scale per AC-4.
-    const content = (event as Record<string, unknown>).content;
+    const content = (event as Record<string, unknown>)['content'];
     expect(typeof content).toBe('string');
     const contentStr = content as string;
     expect(contentStr.length).toBeGreaterThan(0);
@@ -238,7 +238,7 @@ describe('Docker Swap-Flow EVM E2E (Story 12.10, Task 2)', () => {
 
     // AC-4: swapPairs list must be present and contain at least one pair
     // where from.chain and to.chain are both among the supported chains
-    const supportedChains = new Set([
+    const supportedChains = new Set<string>([
       DOCKER_CHAIN_EVM,
       DOCKER_CHAIN_SOLANA,
       DOCKER_CHAIN_MINA,

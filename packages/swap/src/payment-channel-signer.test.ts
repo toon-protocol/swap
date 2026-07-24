@@ -180,7 +180,11 @@ describe.skipIf(!hasMinaSigner)(
       // the SDK's `verifyMinaSignature` accepts it against the swap node's REAL
       // Mina public key (derived from the converted private key, not the
       // keccak placeholder `deriveSwapNodeKeys` stores).
-      const minaSigner = await import('mina-signer');
+      // Peer dep — optional. Use a runtime-only specifier so TS doesn't try
+      // to resolve types for a package that may not be installed (matches
+      // the hasMinaSigner probe above).
+      const minaSignerSpecifier = 'mina-signer';
+      const minaSigner = await import(/* @vite-ignore */ minaSignerSpecifier);
       const Client = (minaSigner.default ?? minaSigner) as new (cfg: {
         network: 'mainnet' | 'testnet';
       }) => { derivePublicKey: (sk: string) => string };

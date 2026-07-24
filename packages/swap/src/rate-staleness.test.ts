@@ -340,7 +340,13 @@ function buildWrappedSwapCtx(opts: {
   }
   return createHandlerContext({
     toon: toonBase64,
-    meta: { kind: opts.kind ?? 1059, pubkey: '0'.repeat(64) },
+    meta: {
+      kind: opts.kind ?? 1059,
+      pubkey: '0'.repeat(64),
+      id: '0'.repeat(64),
+      sig: '0'.repeat(128),
+      rawBytes: new Uint8Array(),
+    },
     amount: 1_000_000n,
     destination: 'g.toon.swap.test',
     toonDecoder: () => {

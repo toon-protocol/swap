@@ -123,3 +123,9 @@ ready when the harness is restored. Coverage in the meantime:
   end-to-end tests driving the real sdk 2.x `streamSwap` → gift-wrap →
   swap-handler → claim-issuer → FULFILL metadata → `buildSettlementTx`
   round-trip, asserting `swapSignerAddress` end to end.
+
+The dead `../../../../sdk/...` import also makes `packages/swap/tests/e2e`
+unable to typecheck (the module can never resolve from this repo), so the
+root `tsconfig.json` excludes that directory from `pnpm run typecheck`
+(swap#69). Remove the exclude once the harness — and with it a real
+`sdk`-relative or published test-utils import — is restored.
