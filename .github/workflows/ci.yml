@@ -72,3 +72,24 @@ jobs:
       # runtime-skipping like it does on the plain build job.
       - name: Integration tests (anvil-gated)
         run: devbox run -- bash -c "pnpm --filter @toon-protocol/swap test:integration"
+
+  ci-ok:
+    name: CI OK
+    runs-on: ubuntu-latest
+    needs: [build, devbox-validate]
+    if: always()
+    steps:
+      # Fleet-wide aggregate required check (toon-meta#279): this job is the
+      # single required status for the repo. It must fail unless every gating
+      # job actually SUCCEEDED — a skipped or cancelled gating job must never
+      # read as a pass. Both `build` and `devbox-validate` are expected on
+      # every run; there are no legitimately-skippable jobs in this workflow.
+      - name: Check all gating jobs succeeded
+        run: |
+          echo "build: ${{ needs.build.result }}"
+          echo "devbox-validate: ${{ needs.devbox-validate.result }}"
+          if [ "${{ needs.build.result }}" != "success" ] || [ "${{ needs.devbox-validate.result }}" != "success" ]; then
+            echo "One or more gating jobs did not succeed (failure, cancelled, and skipped all fail)."
+            exit 1
+          fi
+          echo "All gating jobs succeeded."
