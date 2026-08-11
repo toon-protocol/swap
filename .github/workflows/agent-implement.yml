@@ -41,6 +41,15 @@ on:
 # using the GitHub App token generated below (a PR opened by the default
 # GITHUB_TOKEN would NOT trigger ci.yml, so the green gate would never run on
 # the agent's PR). These scopes cover the guard job's read-only gh api calls.
+#
+# `contents: read` is DELIBERATE and stays read (reviewed for toon-meta#248 /
+# swap#92). Write authority comes only from GitHub App tokens — the one the
+# "Generate GitHub App token" step issues, and the fresher one the runner
+# mints at push time (.sandcastle/mint-app-token.ts) — never from this
+# GITHUB_TOKEN. Keeping it read means the ambient job token confers no write
+# at all, so the write surface is exactly the App credentials we hand out
+# deliberately, and the minted one is deleted from the container the moment
+# its `git push` returns.
 permissions:
   contents: read
   issues: read
@@ -128,15 +137,18 @@ jobs:
     # maxIterations: 100 is a runaway-loop guard, not a time budget — an
     # iteration has no fixed duration, so no iteration count can "fit" a wall
     # clock. The wall clock is the real budget, and it is deliberately split:
-    # the runner STEP below gets timeout-minutes: 50 so an overlong run dies
+    # the runner STEP below gets timeout-minutes: 170 so an overlong run dies
     # as an ordinary step FAILURE, leaving the rest of the job budget for the
     # always() forensics steps (redact + upload) — a job-level kill would take
-    # those down with it. The job stays at 60 (NOT raised to connector's 180)
-    # because this repo still pushes with the App token minted at job start,
-    # which expires ONE HOUR in (connector#462): with a longer clock a run
-    # would finish its work and still lose the push. Raise to 180/170 only
-    # when the mid-run token mint is ported here (toon-meta#248).
-    timeout-minutes: 60
+    # those down with it. Raised from 60 to 180 (toon-meta#248 / swap#92,
+    # porting connector#462/#463): the runner now mints its OWN fresh push
+    # credential immediately before each push (.sandcastle/mint-app-token.ts)
+    # instead of pushing with the App token minted at job start, so the
+    # one-hour token expiry that justified the old 60-minute cap no longer
+    # applies. 180/170 is headroom, not a measured need — swap's longest run
+    # to date is 22 min; the number matches connector rather than inventing a
+    # third one.
+    timeout-minutes: 180
     concurrency:
       group: agent-implement-issue-${{ github.event.issue.number }}
       cancel-in-progress: false
@@ -164,6 +176,13 @@ jobs:
       # opened by the default GITHUB_TOKEN) triggers ci.yml, so the green gate
       # runs on the agent's PR. Requires the org/repo secrets APP_ID +
       # APP_PRIVATE_KEY (already used by the existing issue-executor loop).
+      #
+      # This token is the STARTING credential only. It expires one hour after
+      # issue, and pushes can happen at the END of a run that lasts far longer
+      # — which silently destroyed three completed implementations in
+      # connector (connector#462). The runner therefore mints its OWN fresh
+      # token immediately before each push, from APP_ID + APP_PRIVATE_KEY
+      # below. See .sandcastle/mint-app-token.ts (toon-meta#248 / swap#92).
       - name: Generate GitHub App token
         id: app-token
         uses: actions/create-github-app-token@v2
@@ -174,7 +193,9 @@ jobs:
       - name: Run sandcastle implement runner
         # Step-level timeout (toon-meta#278): below the job's, so a wall-clock
         # kill is a step failure and the always() forensics steps still run.
-        timeout-minutes: 50
+        # Raised from 50 to 170 alongside the job's 60->180 (toon-meta#248 /
+        # swap#92) now that the push credential is minted fresh at push time.
+        timeout-minutes: 170
         env:
           SANDCASTLE_ISSUE_NUMBER: ${{ github.event.issue.number }}
           # PR mode (default). To re-enable auto-merge later, uncomment:
@@ -186,6 +207,13 @@ jobs:
           # .sandcastle/sandbox-secrets.ts) — the agent must never hold the
           # credential that approves its own output.
           FACTORY_OPS_TOKEN: ${{ secrets.FACTORY_OPS_TOKEN }}
+          # For minting a fresh push credential mid-run (toon-meta#248 /
+          # swap#92). These stay on the HOST: PASSTHROUGH_KEYS in
+          # .sandcastle/sandbox-secrets.ts lists only CLAUDE_CODE_OAUTH_TOKEN
+          # and GH_TOKEN, so the private key is never forwarded into the
+          # agent's container.
+          APP_ID: ${{ secrets.APP_ID }}
+          APP_PRIVATE_KEY: ${{ secrets.APP_PRIVATE_KEY }}
         run: pnpm sandcastle:implement
 
       # REDACT BEFORE UPLOAD — this repository is PUBLIC.
