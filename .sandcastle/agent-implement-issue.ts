@@ -155,8 +155,6 @@ const FRESH_CREDENTIAL_HELPER =
   `!f() { test "$1" = get && ` +
   `{ echo username=x-access-token; echo "password=$(cat ${TOKEN_PATH})"; }; }; f`;
 
-type Sandbox = Awaited<ReturnType<typeof sandcastle.createSandbox>>;
-
 /**
  * Push `branch` from inside the sandbox using a newly-minted App token.
  *
@@ -169,10 +167,18 @@ type Sandbox = Awaited<ReturnType<typeof sandcastle.createSandbox>>;
  * review phase to do. The final push is never best-effort — it fails loud.
  */
 async function pushBranch(
-  sandbox: Sandbox,
+  sandbox: sandcastle.Sandbox,
   label: string,
   { bestEffort = false }: { bestEffort?: boolean } = {},
 ): Promise<boolean> {
+  // The bestEffort policy in ONE place: warn and give up, or fail the run.
+  const giveUp = (reason: string): false => {
+    const msg = `[${label}] ${reason}`;
+    if (!bestEffort) throw new Error(msg);
+    console.warn(`  WARNING: ${msg}`);
+    return false;
+  };
+
   let token: string;
   try {
     const minted = await mintAppToken();
@@ -181,23 +187,13 @@ async function pushBranch(
     process.env.GH_TOKEN = token;
     console.log(`  [${label}] credential: freshly minted (source=${minted.source})`);
   } catch (err) {
-    const msg = `[${label}] could not obtain a push credential: ${(err as Error).message}`;
-    if (bestEffort) {
-      console.warn(`  WARNING: ${msg}`);
-      return false;
-    }
-    throw new Error(msg);
+    return giveUp(`could not obtain a push credential: ${(err as Error).message}`);
   }
 
   // `umask 077` so the file is 600 from creation — never briefly world-readable.
   const stage = await sandbox.exec(`umask 077 && cat > ${TOKEN_PATH}`, { stdin: token });
   if (stage.exitCode !== 0) {
-    const msg = `[${label}] failed to stage the push credential (exit ${stage.exitCode}).`;
-    if (bestEffort) {
-      console.warn(`  WARNING: ${msg}`);
-      return false;
-    }
-    throw new Error(msg);
+    return giveUp(`failed to stage the push credential (exit ${stage.exitCode}).`);
   }
 
   try {
@@ -207,12 +203,9 @@ async function pushBranch(
       { onLine: (line) => console.log(`  [${label}] ${line}`) },
     );
     if (push.exitCode !== 0) {
-      const msg = `[${label}] git push of '${branch}' failed (exit ${push.exitCode}).\n${push.stderr}`;
-      if (bestEffort) {
-        console.warn(`  WARNING: ${msg}`);
-        return false;
-      }
-      throw new Error(msg);
+      return giveUp(
+        `git push of '${branch}' failed (exit ${push.exitCode}).\n${push.stderr}`,
+      );
     }
     return true;
   } finally {

@@ -43,12 +43,13 @@ on:
 # the agent's PR). These scopes cover the guard job's read-only gh api calls.
 #
 # `contents: read` is DELIBERATE and stays read (reviewed for toon-meta#248 /
-# swap#92). The push path needs write and gets it exclusively from the
-# GitHub App token minted fresh at push time (.sandcastle/mint-app-token.ts),
-# never from this GITHUB_TOKEN. Keeping it read means a bug or a prompt
-# injection inside an agent phase cannot push using the ambient job token:
-# the only write credential in the run is the one the runner mints, hands to
-# a single `git push`, and then deletes.
+# swap#92). Write authority comes only from GitHub App tokens — the one the
+# "Generate GitHub App token" step issues, and the fresher one the runner
+# mints at push time (.sandcastle/mint-app-token.ts) — never from this
+# GITHUB_TOKEN. Keeping it read means the ambient job token confers no write
+# at all, so the write surface is exactly the App credentials we hand out
+# deliberately, and the minted one is deleted from the container the moment
+# its `git push` returns.
 permissions:
   contents: read
   issues: read
