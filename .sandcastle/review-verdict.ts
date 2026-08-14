@@ -462,30 +462,6 @@ function factoryOpsApprovalBody(issue: TargetIssue | null): string {
 }
 
 /**
- * Submit the formal review verdict on a PR AS FACTORY-OPS:
- *   clean    → APPROVE
- *   blocking → REQUEST_CHANGES with the findings, plus the `needs:human` label
- *
- * Either way, `agent:review` — the label that triggered this run — is removed
- * once the verdict lands (toon-meta#355). Unlike `needs:human`, `agent:review`
- * is unambiguously a machine trigger, never a human control point, so no
- * ownership check applies: whoever applied it, a submitted verdict means the
- * review it asked for is done. That also makes re-review symmetrical with the
- * first review — apply the label again — instead of the undocumented
- * remove-then-re-add dance the `labeled`-event trigger otherwise demands.
- *
- * Resolves the approver identity and re-asserts the self-approval guard
- * itself, so no caller can reach the submission without the guard. After
- * submission the created review's state is verified from the API response —
- * anything other than the expected APPROVED/CHANGES_REQUESTED state (i.e. a
- * degraded COMMENTED review) throws.
- *
- * Label writes are pure REST via `gh api` — porcelain `gh pr edit` is broken
- * in repos with a classic Project attached (projectCards GraphQL deprecation).
- * The `needs:human` label logic lives HERE and only here (toon-meta#282 seam:
- * the pre-#282 COMMENT-review path applied it too; that path is gone).
- */
-/**
  * Whether a CLEAN verdict should clear `needs:human` from this PR
  * (toon-meta#352).
  *
@@ -526,6 +502,31 @@ function clearsNeedsHuman(
   }
 }
 
+/**
+ * Submit the formal review verdict on a PR AS FACTORY-OPS:
+ *   clean    → APPROVE, and `needs:human` is cleared if the approver identity
+ *              itself applied it (`clearsNeedsHuman`, toon-meta#352)
+ *   blocking → REQUEST_CHANGES with the findings, plus the `needs:human` label
+ *
+ * Either way, `agent:review` — the label that triggered this run — is removed
+ * once the verdict lands (toon-meta#355). Unlike `needs:human`, `agent:review`
+ * is unambiguously a machine trigger, never a human control point, so no
+ * ownership check applies: whoever applied it, a submitted verdict means the
+ * review it asked for is done. That also makes re-review symmetrical with the
+ * first review — apply the label again — instead of the undocumented
+ * remove-then-re-add dance the `labeled`-event trigger otherwise demands.
+ *
+ * Resolves the approver identity and re-asserts the self-approval guard
+ * itself, so no caller can reach the submission without the guard. After
+ * submission the created review's state is verified from the API response —
+ * anything other than the expected APPROVED/CHANGES_REQUESTED state (i.e. a
+ * degraded COMMENTED review) throws.
+ *
+ * Label writes are pure REST via `gh api` — porcelain `gh pr edit` is broken
+ * in repos with a classic Project attached (projectCards GraphQL deprecation).
+ * The `needs:human` label logic lives HERE and only here (toon-meta#282 seam:
+ * the pre-#282 COMMENT-review path applied it too; that path is gone).
+ */
 export function submitFactoryOpsVerdict(
   prNumber: string,
   verdict: ReviewVerdict,
