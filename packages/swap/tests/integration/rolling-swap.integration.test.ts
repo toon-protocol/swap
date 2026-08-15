@@ -10,22 +10,45 @@
  *     rule 3: `sha256(fulfillment) === executionCondition` or F99 with
  *     nothing recorded;
  *   - the sender daemon (leg-B terminator, toon-client#352's role) implements
- *     spec R5 verify-before-reveal: it checks the advance payload's
- *     recipient, watermark monotonicity (over ACCEPTED packets only — R8:
- *     claims from rejected packets are void), and its rate floor, and only
- *     then reveals the preimage.
+ *     spec R5 verify-before-reveal: it verifies the advance payload's chain
+ *     signature FOR REAL (issue #103) via `@toon-protocol/settlement-digest`'s
+ *     shared v2 recovery primitive — the SAME one every real verifier
+ *     (client, sdk, connector, on-chain RollingSwapChannel) uses, never a
+ *     hand-rolled reimplementation — then checks recipient, watermark
+ *     monotonicity (over ACCEPTED packets only — R8: claims from rejected
+ *     packets are void), and its rate floor, and only then reveals the
+ *     preimage.
  *
  * Scenarios: multi-packet rolling swap (AC-1/AC-5 contract level), maker
- * stall / sender withhold mid-stream (AC-1/AC-2), and legacy gift-wrap
- * coexistence on the same node (zero-condition path unchanged).
+ * stall / sender withhold mid-stream (AC-1/AC-2), legacy gift-wrap
+ * coexistence on the same node (zero-condition path unchanged), and (issue
+ * #103) three signature-verification guards: a tampered claim withholds the
+ * reveal and unwinds, a claim verified under the wrong chain domain is
+ * rejected, and a v1-style raw-packed signature fails v2 verification.
+ *
+ * The guard is known to bite (issue #103 AC-6), not assumed to: reverting
+ * `EvmPaymentChannelSigner.signBalanceProof` to the pre-#101 v1 digest fails
+ * both swap#47 rolling scenarios plus the AC-1/AC-2 case below.
  */
 
 import { describe, it, expect } from 'vitest';
 import { sha256 } from '@noble/hashes/sha2.js';
+import { secp256k1 } from '@noble/curves/secp256k1.js';
 import { getPublicKey } from 'nostr-tools/pure';
 import type { UnsignedEvent } from 'nostr-tools/pure';
 import { encodeEventToToon } from '@toon-protocol/core';
-import { wrapSwapPacket } from '@toon-protocol/sdk';
+import {
+  wrapSwapPacket,
+  // The pre-#101 hand-rolled v1 digest (no chainId/verifyingContract
+  // binding) — still exported by the pinned sdk@2.2.0 dependency. Used ONLY
+  // by the AC-4 negative test below to prove a v1-shaped signature fails v2
+  // verification; the swap node itself has signed v2-only since #101.
+  balanceProofHashEvm as balanceProofHashEvmV1,
+} from '@toon-protocol/sdk';
+import {
+  verifyEvmClaimSignature,
+  recoverEvmSigner,
+} from '@toon-protocol/settlement-digest';
 import { startSwapNode, ROLLING_PROTOCOL } from '@toon-protocol/swap';
 import type {
   LegBPrepare,
@@ -49,6 +72,13 @@ const SENDER_ILP = 'g.toon.client.rollingsender';
 const STREAM_NONCE = '7e'.repeat(16);
 const INITIAL_INVENTORY = 10n ** 20n; // 100 ETH (wei)
 const INVENTORY_KEY = `ETH:${CHAIN}`;
+
+// v2 EIP-712 domain (issue #101) the fixture swap node signs leg-B claims
+// under: the EIP-155 id embedded in CHAIN, and the `chainProviders`
+// channelAddress configured below. The sender daemon verifies against this
+// SAME domain by default.
+const CHAIN_ID = 31337n;
+const CHANNEL_CONTRACT_ADDRESS = '0x' + '33'.repeat(20);
 
 type PacketHandlerFn = (request: {
   amount: string;
@@ -78,11 +108,31 @@ interface SenderDaemon {
   reveal: boolean;
   /** Sender's session floor — R5(d). */
   minExchangeRate: number;
+  /**
+   * One-shot toggle (issue #103 AC-2): when true, the NEXT claim's signature
+   * bytes are flipped before verification — modeling a cross-repo wire break
+   * (wrong digest layout, wrong domain, a stale signer). The flag is consumed
+   * by that single check, so every later packet verifies untouched.
+   */
+  corruptNextSignature: boolean;
 }
 
 type LegBSender = (prepare: LegBPrepare) => Promise<LegBResult>;
 
-function makeSenderDaemon(): SenderDaemon {
+interface SenderDaemonOptions {
+  /**
+   * EIP-712 domain the sender verifies leg-B claims under (issue #103).
+   * Defaults to the fixture swap node's own domain; the AC-3 negative test
+   * overrides these to prove a claim signed under one chain's domain is
+   * rejected under another's.
+   */
+  chainId?: bigint;
+  verifyingContract?: string;
+}
+
+function makeSenderDaemon(opts: SenderDaemonOptions = {}): SenderDaemon {
+  const chainId = opts.chainId ?? CHAIN_ID;
+  const verifyingContract = opts.verifyingContract ?? CHANNEL_CONTRACT_ADDRESS;
   const preimages = new Map<string, Uint8Array>();
   let lastAcceptedNonce = 0n;
   let lastAcceptedCumulative = 0n;
@@ -91,6 +141,7 @@ function makeSenderDaemon(): SenderDaemon {
     advances: [],
     reveal: true,
     minExchangeRate: 0.00035,
+    corruptNextSignature: false,
     mint() {
       const preimage = new Uint8Array(32);
       globalThis.crypto.getRandomValues(preimage);
@@ -104,9 +155,7 @@ function makeSenderDaemon(): SenderDaemon {
       ) as RollingAdvancePayload;
       daemon.advances.push(advance);
 
-      // R5 verification, BEFORE any reveal. (Chain-signature verification is
-      // R5(a) via the sdk settlement verifier — structural checks here; the
-      // real daemon story toon-client#352 wires the full verifier.)
+      // R5 verification, BEFORE any reveal.
       if (
         advance.proto !== ROLLING_PROTOCOL ||
         advance.type !== 'advance' ||
@@ -114,6 +163,62 @@ function makeSenderDaemon(): SenderDaemon {
       ) {
         return { type: 'reject', code: 'F99', message: 'malformed advance' };
       }
+
+      // (a) Chain-signature verification (issue #103) — the claim MUST
+      // recover to the on-chain signer the advance advertises, under the
+      // session's v2 EIP-712 domain (chainId + verifyingContract), using the
+      // SAME shared digest leaf's recovery primitive every real verifier
+      // (client, sdk, connector, on-chain RollingSwapChannel) uses rather
+      // than a hand-rolled reimplementation. A wrong digest layout, a wrong
+      // domain, a v1-shaped signature — anything that fails to recover to
+      // that address is rejected HERE, before any reveal.
+      if (
+        !advance.channelId ||
+        advance.nonce === undefined ||
+        advance.cumulativeAmount === undefined ||
+        !advance.recipient ||
+        !advance.swapSignerAddress
+      ) {
+        return {
+          type: 'reject',
+          code: 'F99',
+          message: 'claim missing settlement metadata',
+        };
+      }
+      // `Buffer.from(_, 'base64')` never throws — it drops invalid
+      // characters — so a garbled claim surfaces as a failed recovery below.
+      const claimBytes = new Uint8Array(Buffer.from(advance.claim, 'base64'));
+      if (daemon.corruptNextSignature) {
+        daemon.corruptNextSignature = false;
+        claimBytes[0] = (claimBytes[0] ?? 0) ^ 0xff;
+      }
+      // A malformed field length or an invalid `v` byte makes the shared
+      // verifier throw — that is a verification failure, not a fixture crash.
+      let sigValid: boolean;
+      try {
+        sigValid = verifyEvmClaimSignature(
+          {
+            channelId: advance.channelId,
+            cumulativeAmount: advance.cumulativeAmount,
+            nonce: advance.nonce,
+            recipient: advance.recipient,
+            chainId,
+            verifyingContract,
+          },
+          claimBytes,
+          advance.swapSignerAddress
+        ).valid;
+      } catch {
+        sigValid = false;
+      }
+      if (!sigValid) {
+        return {
+          type: 'reject',
+          code: 'F99',
+          message: 'signature verification failed',
+        };
+      }
+
       // (b) recipient equals the session chainRecipient (EVM: case-insensitive).
       if (advance.recipient?.toLowerCase() !== CHAIN_RECIPIENT.toLowerCase()) {
         return { type: 'reject', code: 'F99', message: 'recipient mismatch' };
@@ -234,7 +339,7 @@ async function bootRollingNode(daemon: SenderDaemon): Promise<{
         rpcUrl: 'http://127.0.0.1:1',
         registryAddress: '0x' + '11'.repeat(20),
         tokenAddress: '0x' + '22'.repeat(20),
-        channelAddress: '0x' + '33'.repeat(20),
+        channelAddress: CHANNEL_CONTRACT_ADDRESS,
       },
     ],
     relayUrls: ['ws://localhost:0'],
@@ -441,6 +546,140 @@ describe('swap#47 — rolling coupled-leg engine (integration)', () => {
       );
       // And no leg-B traffic was generated for it.
       expect(daemon.advances).toHaveLength(0);
+    } finally {
+      await instance.stop();
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Issue #103 — the sender verifies leg-B claim signatures for real
+// ---------------------------------------------------------------------------
+
+describe('issue #103 — leg-B claim signature verification (integration)', () => {
+  it('AC-1/AC-2: a tampered claim signature fails verification — the sender withholds the reveal and the packet unwinds', async () => {
+    const daemon = makeSenderDaemon();
+    const { instance, handler } = await bootRollingNode(daemon);
+    try {
+      // Packet 1 fills normally — proves the guard does not false-positive
+      // on a genuinely valid v2 signature.
+      expect((await driveFill(handler, daemon, 1, DELTA)).wire).toBe('FULFILL');
+      const availableAfter1 =
+        instance.health().inventoryAvailable[INVENTORY_KEY];
+
+      // Packet 2: the claim's signature bytes are flipped in flight — a
+      // stand-in for the exact class of cross-repo wire break (wrong
+      // digest layout, wrong domain, a stale signer) that shipped in
+      // toon-meta#394. The sender MUST reject before revealing.
+      daemon.corruptNextSignature = true;
+      const tampered = await driveFill(handler, daemon, 2, DELTA);
+      expect(tampered.wire).toBe('REJECT');
+      expect(daemon.advances).toHaveLength(2);
+
+      // Full unwind: nothing stayed reserved for the rejected packet —
+      // same window-release contract as the maker-stall scenario above.
+      expect(instance.health().inventoryAvailable[INVENTORY_KEY]).toBe(
+        availableAfter1
+      );
+      expect(instance.health().inventoryWindow[INVENTORY_KEY]!).toMatchObject({
+        inFlight: '0',
+        unsettled: DELTA_WEI.toString(),
+      });
+
+      // Recovery: a genuinely signed claim on a fresh seq fills normally —
+      // proves the guard is a per-packet check, not a stuck failure mode.
+      expect((await driveFill(handler, daemon, 3, DELTA)).wire).toBe('FULFILL');
+    } finally {
+      await instance.stop();
+    }
+  });
+
+  it('AC-3: a claim signed under the fixture node domain fails verification under a different chain domain', async () => {
+    // The sender expects a DIFFERENT (chainId, verifyingContract) pair than
+    // the one the fixture swap node actually signs under — the exact replay
+    // protection v2's domain separation exists to provide.
+    const daemon = makeSenderDaemon({
+      chainId: 84532n,
+      verifyingContract: '0x' + 'cc'.repeat(20),
+    });
+    const { instance, handler } = await bootRollingNode(daemon);
+    try {
+      const outcome = await driveFill(handler, daemon, 1, DELTA);
+      expect(outcome.wire).toBe('REJECT');
+      // The advance WAS received and parsed — this is a signature-domain
+      // failure, not a malformed/undelivered packet.
+      expect(daemon.advances).toHaveLength(1);
+      expect(instance.health().inventoryWindow[INVENTORY_KEY]!).toMatchObject({
+        inFlight: '0',
+        unsettled: '0',
+      });
+    } finally {
+      await instance.stop();
+    }
+  });
+
+  it('AC-4: a v1-style raw-packed signature (pre-#101 wire format) fails v2 verification — fail-closed pinning', async () => {
+    const daemon = makeSenderDaemon();
+    const { instance } = await bootRollingNode(daemon);
+    try {
+      const evmKeys = instance.swapNodeKeys.evm;
+      if (!evmKeys) throw new Error('fixture swap node derived no EVM key');
+
+      const channelIdBytes = new Uint8Array(
+        Buffer.from(CHANNEL_ID.slice(2), 'hex')
+      );
+      const recipientBytes = new Uint8Array(
+        Buffer.from(CHAIN_RECIPIENT.slice(2), 'hex')
+      );
+      const cumulativeAmount = DELTA_WEI;
+      const nonce = 1n;
+
+      // The pre-#101 hand-rolled v1 digest: no chainId / verifyingContract
+      // binding at all — the exact gap toon-meta#394 identifies as the root
+      // cause. Signed here with the maker's REAL private key, so a v1/v2
+      // mismatch — not a wrong key — is the only variable.
+      const v1Digest = balanceProofHashEvmV1(
+        channelIdBytes,
+        cumulativeAmount,
+        nonce,
+        recipientBytes
+      );
+      const recoveredBytes = secp256k1.sign(v1Digest, evmKeys.privateKey, {
+        prehash: false,
+        format: 'recovered',
+      });
+      const sigObj = secp256k1.Signature.fromBytes(recoveredBytes, 'recovered');
+      const { recovery } = sigObj;
+      if (recovery !== 0 && recovery !== 1) {
+        throw new Error(`unexpected recovery id ${String(recovery)}`);
+      }
+      // Same r||s||v layout EvmPaymentChannelSigner emits — only the digest
+      // underneath it is v1.
+      const v1Sig = new Uint8Array(65);
+      v1Sig.set(sigObj.toBytes('compact'), 0);
+      v1Sig[64] = 27 + recovery;
+
+      // Sanity: the v1 signature DOES recover under the legacy v1 digest —
+      // it is well-formed, simply v1, not malformed (mirrors the epic's own
+      // probe in toon-meta#394).
+      const v1Recovered = recoverEvmSigner(v1Digest, v1Sig);
+      expect(v1Recovered.toLowerCase()).toBe(evmKeys.address.toLowerCase());
+
+      // `version: "2"` exists to make this fail closed: the SAME signature
+      // does not verify against the v2 EIP-712 digest.
+      const { valid } = verifyEvmClaimSignature(
+        {
+          channelId: CHANNEL_ID,
+          cumulativeAmount,
+          nonce,
+          recipient: CHAIN_RECIPIENT,
+          chainId: CHAIN_ID,
+          verifyingContract: CHANNEL_CONTRACT_ADDRESS,
+        },
+        v1Sig,
+        evmKeys.address
+      );
+      expect(valid).toBe(false);
     } finally {
       await instance.stop();
     }
