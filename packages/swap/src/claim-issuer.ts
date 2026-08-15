@@ -68,7 +68,9 @@ function validateClaimIssuerChainRecipient(
 ): boolean {
   if (typeof value !== 'string' || value.length === 0) return false;
   if (chain.startsWith('evm:')) {
-    return CLAIM_ISSUER_EVM_ADDRESS_REGEX.test(value);
+    // issue #112: accept EIP-55 checksummed (mixed-case) addresses, same as
+    // the sdk's toon#200 fix — normalize before testing, don't reject on case.
+    return CLAIM_ISSUER_EVM_ADDRESS_REGEX.test(value.toLowerCase());
   }
   if (chain.startsWith('solana:')) {
     // Shape-only (regex + length) at the claim-issuer boundary. A full
@@ -293,6 +295,12 @@ export class MultiChainClaimIssuer implements ClaimIssuer {
         `chainRecipient is missing or malformed for chain ${targetChain}`
       );
     }
+    // issue #112: normalize to lowercase for EVM, matching the sdk
+    // handler's own findChainRecipient() so a checksummed input signs and
+    // echoes identically to the same address passed already-lowercased.
+    const normalizedChainRecipient = targetChain.startsWith('evm:')
+      ? chainRecipient.toLowerCase()
+      : chainRecipient;
 
     // 2. Acquire the inventory hold SYNCHRONOUSLY (before any await):
     //    legacy = permanent debit; rolling = in-flight window reservation.
@@ -356,7 +364,7 @@ export class MultiChainClaimIssuer implements ClaimIssuer {
         channelId: reservation.channelId,
         cumulativeAmount: reservation.cumulativeAmount,
         nonce: reservation.nonce,
-        recipient: chainRecipient,
+        recipient: normalizedChainRecipient,
       });
     } catch (err) {
       hold.undo();
@@ -414,7 +422,7 @@ export class MultiChainClaimIssuer implements ClaimIssuer {
       // Story 12.9 AC-12: echo the sender-supplied chain-layer payout
       // address, not the Nostr identity key. The sender's AC-7 equality
       // check asserts `metadata.recipient === params.chainRecipient`.
-      result.recipient = chainRecipient;
+      result.recipient = normalizedChainRecipient;
       result.swapSignerAddress = swapSignerAddress;
     }
     return { result };

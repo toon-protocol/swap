@@ -33,21 +33,17 @@
 
 import { describe, it, expect } from 'vitest';
 import { sha256 } from '@noble/hashes/sha2.js';
+import { keccak_256 } from '@noble/hashes/sha3.js';
 import { secp256k1 } from '@noble/curves/secp256k1.js';
 import { getPublicKey } from 'nostr-tools/pure';
 import type { UnsignedEvent } from 'nostr-tools/pure';
 import { encodeEventToToon } from '@toon-protocol/core';
-import {
-  wrapSwapPacket,
-  // The pre-#101 hand-rolled v1 digest (no chainId/verifyingContract
-  // binding) — still exported by the pinned sdk@2.2.0 dependency. Used ONLY
-  // by the AC-4 negative test below to prove a v1-shaped signature fails v2
-  // verification; the swap node itself has signed v2-only since #101.
-  balanceProofHashEvm as balanceProofHashEvmV1,
-} from '@toon-protocol/sdk';
+import { wrapSwapPacket } from '@toon-protocol/sdk';
 import {
   verifyEvmClaimSignature,
   recoverEvmSigner,
+  bigintToBytes32BE,
+  concatBytes,
 } from '@toon-protocol/settlement-digest';
 import { startSwapNode, ROLLING_PROTOCOL } from '@toon-protocol/swap';
 import type {
@@ -555,6 +551,29 @@ describe('swap#47 — rolling coupled-leg engine (integration)', () => {
 // ---------------------------------------------------------------------------
 // Issue #103 — the sender verifies leg-B claim signatures for real
 // ---------------------------------------------------------------------------
+
+// The pre-#101 hand-rolled v1 digest (no chainId/verifyingContract binding)
+// — byte-identical to @toon-protocol/core@2.1.0's `balanceProofHashEvm`,
+// which sdk@2.2.0 re-exported. Neither sdk@3.1.8 nor core@3.4.0 export this
+// shape anymore (both now re-export the v2 digest from
+// @toon-protocol/settlement-digest under the same name — issue #112),
+// so the AC-4 negative test below reconstructs it locally to prove a
+// v1-shaped signature still fails v2 verification.
+function balanceProofHashEvmV1(
+  channelIdBytes: Uint8Array,
+  cumulativeAmount: bigint,
+  nonce: bigint,
+  recipientBytes: Uint8Array
+): Uint8Array {
+  return keccak_256(
+    concatBytes(
+      channelIdBytes,
+      bigintToBytes32BE(cumulativeAmount),
+      bigintToBytes32BE(nonce),
+      recipientBytes
+    )
+  );
+}
 
 describe('issue #103 — leg-B claim signature verification (integration)', () => {
   it('AC-1/AC-2: a tampered claim signature fails verification — the sender withholds the reveal and the packet unwinds', async () => {

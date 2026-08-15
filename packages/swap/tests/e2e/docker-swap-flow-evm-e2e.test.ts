@@ -51,7 +51,7 @@ import {
 /** Sender's 20-byte EVM payout address (lowercase hex with `0x`). AC-3. */
 const EVM_CHAIN_RECIPIENT = SWAP_E2E_EVM_SENDER_ADDRESS.toLowerCase();
 
-/** Invalid chain-recipient value used for AC-5 T00 probe. */
+/** Invalid chain-recipient value used for AC-5 F00-not-T00 probe. */
 const MALFORMED_CHAIN_RECIPIENT = '0xdeadbeef';
 
 // Sender builder extracted to helpers/build-live-sender.ts (shared across all
@@ -269,9 +269,18 @@ describe('Docker Swap-Flow EVM E2E (Story 12.10, Task 2)', () => {
   });
 
   // ---------------------------------------------------------------------
-  // AC-5 — real NIP-59 gift-wrap: malformed chain-recipient → T00
+  // AC-5 — real NIP-59 gift-wrap: malformed chain-recipient → F00
+  // (toon#200/swap#112: the swap handler now classifies this
+  // INVALID_CHAIN_RECIPIENT reject as F01, not T00, so the sender can
+  // self-diagnose instead of treating it as transient. On the wire this
+  // still surfaces as F00: core's REJECT_CODE_MAP has no dedicated
+  // semantic slot for F01, so it deliberately narrows to the
+  // `invalid_request` reason (issue #86) — same as F01 always has — which
+  // the connector's payment-handler adapter re-encodes as F00. The
+  // meaningful change is T00 (transient) -> F00 (permanent), not the exact
+  // wire byte.)
   // ---------------------------------------------------------------------
-  it('AC-5 [P1] malformed chain-recipient rumor sent through real BTP returns T00 (Story 12.9 AC-8)', async (ctx) => {
+  it('AC-5 [P1] malformed chain-recipient rumor sent through real BTP returns F00, not T00 (Story 12.9 AC-8, swap#112)', async (ctx) => {
     if (skipIfNotReady(servicesReady)) return ctx.skip();
     expect(sender, 'Sender must be built in beforeAll').not.toBeNull();
 
@@ -323,9 +332,12 @@ describe('Docker Swap-Flow EVM E2E (Story 12.10, Task 2)', () => {
       timeout: 15000,
     });
 
-    // The swap node should reject with T00 (INVALID_CHAIN_RECIPIENT)
+    // The swap node classifies this F01 internally (INVALID_CHAIN_RECIPIENT
+    // — toon#200 moved it off T00), which the connector's wire adapter
+    // narrows to F00 (see the comment above the `it()` block). Either way
+    // it is NOT T00: the sender sees a permanent, self-diagnosable reject.
     expect(result.accepted).toBe(false);
-    expect(result.code).toMatch(/T00|F00/);
+    expect(result.code).toBe('F00');
   });
 
   // ---------------------------------------------------------------------

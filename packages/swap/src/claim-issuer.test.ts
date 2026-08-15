@@ -798,6 +798,30 @@ describe('Story 12.9 — chain-recipient threading to signBalanceProof', () => {
     expect(result.recipient).not.toBe(SENDER_PUBKEY);
   });
 
+  // issue #112: this boundary's own regex was a byte-for-byte copy of the
+  // sdk's pre-toon#200 lowercase-only EVM check (guardrail 8.5 requires it
+  // stay in sync). A checksummed (EIP-55 mixed-case) chainRecipient reaches
+  // here directly whenever a caller registers a rolling session without
+  // going through the sdk's own createSwapHandler normalization.
+  it('issue #112: checksummed (EIP-55 mixed-case) chainRecipient is accepted and normalized to lowercase', async () => {
+    const checksummed = '0x' + 'aB'.repeat(20);
+    expect(checksummed).not.toBe(checksummed.toLowerCase());
+    const { issuer, signer } = buildIssuer({ withSettlementAddresses: true });
+    const result = await issuer.issueClaim({
+      sourceAmount: 100_000n,
+      targetAmount: 50n,
+      pair: PAIR_USDC_TO_ETH,
+      senderPubkey: SENDER_PUBKEY,
+      chainRecipient: checksummed,
+      rumor: makeRumor(),
+    });
+    const call = signer.signBalanceProof.mock.calls[0];
+    if (!call) throw new Error('expected signBalanceProof to have been called');
+    const arg = call[0] as { recipient: string };
+    expect(arg.recipient).toBe(checksummed.toLowerCase());
+    expect(result.recipient).toBe(checksummed.toLowerCase());
+  });
+
   it('[P1] T-12: signer throw still releases reserve + re-credits inventory (AC-16c, guardrail 8.3)', async () => {
     const { issuer, channelState, inventory } = buildIssuer({
       signBalanceProof: async () => {
