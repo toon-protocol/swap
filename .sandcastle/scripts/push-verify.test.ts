@@ -69,9 +69,9 @@ describe("pollForSha", () => {
 
 describe("parseLsRemoteSha", () => {
   it("extracts the sha from a single-ref `git ls-remote` line", () => {
-    expect(
-      parseLsRemoteSha("1f82028f9c2b3a4d5e6f7a8b9c0d1e2f3a4b5c6d\trefs/heads/main\n"),
-    ).toBe("1f82028f9c2b3a4d5e6f7a8b9c0d1e2f3a4b5c6d");
+    const sha = "1f82028f9c2b3a4d5e6f7a8b9c0d1e2f3a4b5c6d";
+
+    expect(parseLsRemoteSha(`${sha}\trefs/heads/main\n`)).toBe(sha);
   });
 
   it("returns null for empty output (branch does not exist on origin)", () => {

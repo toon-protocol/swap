@@ -138,6 +138,13 @@ console.log(
 // non-zero.
 let reviewPushVerificationError: string | null = null;
 
+// Poll budget for that verification: how long origin gets to report the pushed
+// sha before the runner declares the push silently failed, and how long between
+// reads. Named so the budget and the "within Ns" wording in the failure message
+// below cannot drift apart.
+const PUSH_VERIFY_MAX_WAIT_MS = 60_000;
+const PUSH_VERIFY_DELAY_MS = 5_000;
+
 const sandbox = await sandcastle.createSandbox({
   branch: headRef,
   // Forward CLAUDE_CODE_OAUTH_TOKEN + GH_TOKEN into the container (the engine's
@@ -193,7 +200,7 @@ try {
     const verification = await pollForSha(
       () => readRemoteHead(headRef),
       expectedSha,
-      { maxWaitMs: 60_000, delayMs: 5_000 },
+      { maxWaitMs: PUSH_VERIFY_MAX_WAIT_MS, delayMs: PUSH_VERIFY_DELAY_MS },
     );
     if (verification.matched) {
       console.log(
@@ -204,8 +211,9 @@ try {
       reviewPushVerificationError =
         `\nERROR: the push-review phase reported COMPLETE, but origin's tip for ` +
         `branch '${headRef}' did NOT advance to the pushed sha ${expectedSha} ` +
-        `within 60s (last observed: ${verification.lastSha ?? "(unknown)"}, ` +
-        `after ${verification.attempts} read(s)).\n` +
+        `within ${PUSH_VERIFY_MAX_WAIT_MS / 1_000}s (last observed: ` +
+        `${verification.lastSha ?? "(unknown)"}, after ` +
+        `${verification.attempts} read(s)).\n` +
         `  The reviewer made ${review.commits.length} commit(s), so the ` +
         `in-sandbox \`git push\` failed silently. Inspect the push-review phase ` +
         `logs above. The Actions job is failing deliberately so this is not ` +
