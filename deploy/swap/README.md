@@ -37,7 +37,8 @@ checked into this repo):
 | `btpServerPort` | no | **Required for the proven standalone-maker wiring** — no `connectorUrl`/`connector` set + this present = auto-created embedded `ConnectorNode` with no parent, self-routed. |
 | `statePath` | no | Durable state snapshot path (issue #46) — mount a volume here to persist inventory/watermarks/bindings across restarts. The image pre-creates `/app/state`, owned by the runtime `swap` user (uid `10001`), as the intended mount point — see "Runtime user & filesystem" below. |
 | `chainProviders` | yes for EVM settlement | Array of `{ chainType: "evm", chainId, rpcUrl, registryAddress, tokenAddress, channelAddress, keyId? }` (or the `solana`/`mina` variants — see `SwapNodeChainProvider` in `swap-node.ts`). `channelAddress` (the deployed `RollingSwapChannel`) is **required** for any EVM chain a `swapPair` targets — boot refuses otherwise. `keyId` defaults to `settlementPrivateKey` (or the identity secret key) when omitted. |
-| `settlementPrivateKey` | no | Hex EVM private key for the claim signer / `chainProviders[].keyId` default. In the proven wiring this is the **same BIP-44 account-index-2 key** used as the connector `keyId`. |
+| `settlementPrivateKey` | no | Hex EVM private key for the claim signer / `chainProviders[].keyId` default. In the proven wiring this is the **same BIP-44 account-index-2 key** used as the connector `keyId`. **Issue #126:** when the identity is a mnemonic and this is unset (or a `0xdead…`-style placeholder), the CLI auto-derives it via `deriveSwapNodeKeys` (index-2) — a committed skeleton can ship a placeholder here and rely on the CLI to fill in the real key, whether or not `identityAutogen` is used. |
+| `identityAutogen` | no | **Issue #126.** When `true` (or `SWAP_AUTOGEN_IDENTITY=1`) and no identity is otherwise provided, self-generates a BIP-39 mnemonic and persists it to an identity file (mode 600, default beside `statePath`) so restarts reuse the same identity. No-op if `mnemonic`/`secretKey` is set. |
 | `ilpAddress` | no | Advertised ILP address + self-route prefix. Default `g.toon.swap.<pubkey16>`. |
 | `btpEndpoint` | no | **Public** `wss://host:port` BTP endpoint advertised in kind:10032 — the "direct-dial" reachability path a client uses to reach a deployed maker with no parent connector (toon-meta#402). |
 | `advertisedAsset` | no | `{ assetCode, assetScale }` for kind:10032. Default `{ USD, 6 }`. |
@@ -67,6 +68,8 @@ inject the secret from a mount rather than baking it into the config file.
 | `TOON_NODE_ID` | Overrides the embedded connector `nodeId`. |
 | `SWAP_MAX_RATE_AGE_MS`, `SWAP_MAX_RATE_AGE` | Maker staleness bound(s) (issue #48) — require `SWAP_RATE_URL`. |
 | `SWAP_RATE_URL`, `SWAP_RATE_TIMEOUT_MS` | HTTP JSON rate feed (issue #47 AC-3). |
+| `SWAP_AUTOGEN_IDENTITY` | `1`/`true` (issue #126) — overlay for `identityAutogen`. |
+| `SWAP_IDENTITY_FILE` | Overrides the self-generated identity file path (default: beside `statePath`, or the cwd when `statePath` is unset). |
 
 `peerInfoIlpDestination` / `peerInfoPricePerByte` are config-file-only (no
 env override), matching `btpEndpoint`. (`ilpAddress` is the exception among
@@ -94,7 +97,18 @@ exists in the image):
 
 ## Not covered by this image
 
-Identity generation, DNS/TLS, gas funding, and the connector-side compose
-service that mounts this image on a box are the sibling toon-meta#402
-tickets — this image only needs a config file and (for identity) a mnemonic
-to boot standalone and start advertising.
+DNS/TLS, gas funding, and the connector-side compose service that mounts
+this image on a box are the sibling toon-meta#402 tickets. On-box identity
+generation is now covered by `SWAP_AUTOGEN_IDENTITY`/`identityAutogen`
+(issue #126) — with a `statePath` volume mounted and no `mnemonic`/
+`secretKey` provided, the maker generates + persists its own identity and
+derives its index-2 settlement key on first boot, and reuses it on every
+restart. Without `SWAP_AUTOGEN_IDENTITY`, this image still only needs a
+config file and (for identity) a mnemonic to boot standalone and start
+advertising.
+
+> The relay-box `swap.config.json` skeleton's `_settlementPrivateKey_comment`
+> ("a human must compute that key") is stale as of issue #126 — the CLI now
+> derives it automatically from the resolved identity. Trim/update that
+> comment in the skeleton (connector#983) as a follow-up; not done here
+> (out of repo).
