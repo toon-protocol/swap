@@ -673,6 +673,23 @@ export function parseEvmChainId(chain: string): bigint {
 }
 
 /**
+ * Look up the `chainProviders` entry of a given family for one target chain,
+ * narrowed to that family's variant. Absent when the operator configured no
+ * entry for the chain — required for `evm:*` (see
+ * {@link requireEvmChainProvider}), optional for the other families.
+ */
+function findChainProvider<T extends SwapNodeChainProvider['chainType']>(
+  chainProviders: SwapNodeConfig['chainProviders'],
+  chainType: T,
+  chain: string
+): Extract<SwapNodeChainProvider, { chainType: T }> | undefined {
+  return chainProviders?.find(
+    (p): p is Extract<SwapNodeChainProvider, { chainType: T }> =>
+      p.chainType === chainType && p.chainId === chain
+  );
+}
+
+/**
  * Look up the `chainProviders` entry for an `evm:*` target chain, or throw the
  * `INVALID_CONFIG` refusal naming the chain key and the missing setting.
  *
@@ -684,10 +701,7 @@ function requireEvmChainProvider(
   chainProviders: SwapNodeConfig['chainProviders'],
   chain: string
 ): SwapNodeEvmChainProvider {
-  const provider = chainProviders?.find(
-    (p): p is SwapNodeEvmChainProvider =>
-      p.chainType === 'evm' && p.chainId === chain
-  );
+  const provider = findChainProvider(chainProviders, 'evm', chain);
   if (!provider) {
     throw new SwapNodeStartError(
       'INVALID_CONFIG',
@@ -1023,6 +1037,13 @@ export async function startSwapNode(
   // signer binds into its EIP-712 domain, so what the node advertises can never
   // drift from what its claims are signed under.
   const tokenNetworks: Record<string, string> = {};
+  // Issue #114 — the kind:10032 `preferredTokens` map: the settlement-token
+  // address/mint/id for each chain, sourced from the SAME chainProviders
+  // entry as everything else in this loop (no second lookup to drift from).
+  // Absent for a chain whose chainProviders entry (if any) names no token —
+  // Solana/Mina token config is optional (native asset), unlike EVM's
+  // required `tokenAddress`.
+  const preferredTokens: Record<string, string> = {};
   let sharedSolanaSigner: SolanaPaymentChannelSigner | undefined;
   let sharedMinaSigner: MinaPaymentChannelSigner | undefined;
   for (const chain of distinctTargetChains) {
@@ -1044,6 +1065,7 @@ export async function startSwapNode(
         verifyingContract: provider.channelAddress,
       });
       tokenNetworks[chain] = provider.channelAddress;
+      preferredTokens[chain] = provider.tokenAddress;
     } else if (chain.startsWith('solana:')) {
       if (!swapNodeKeys.solana) {
         throw new SwapNodeStartError(
@@ -1056,6 +1078,14 @@ export async function startSwapNode(
         privateKey: swapNodeKeys.solana.privateKey,
       });
       signers[chain] = sharedSolanaSigner;
+      const solanaProvider = findChainProvider(
+        config.chainProviders,
+        'solana',
+        chain
+      );
+      if (solanaProvider?.tokenMint) {
+        preferredTokens[chain] = solanaProvider.tokenMint;
+      }
     } else if (chain.startsWith('mina:')) {
       if (!swapNodeKeys.mina) {
         throw new SwapNodeStartError(
@@ -1069,6 +1099,14 @@ export async function startSwapNode(
         publicKey: swapNodeKeys.mina.publicKey,
       });
       signers[chain] = sharedMinaSigner;
+      const minaProvider = findChainProvider(
+        config.chainProviders,
+        'mina',
+        chain
+      );
+      if (minaProvider?.tokenId) {
+        preferredTokens[chain] = minaProvider.tokenId;
+      }
     } else {
       throw new SwapNodeStartError(
         'UNSUPPORTED_CHAIN_FAMILY',
@@ -2091,6 +2129,13 @@ export async function startSwapNode(
       // `pair.to.chain`, the same key the claims themselves are signed under.
       settlementAddresses: { ...signerAddresses },
       tokenNetworks: { ...tokenNetworks },
+      // Issue #114 — a stock client's apex `addApex` onboarding hard-refuses
+      // an announce with no `supportedChains` ("announced no supportedChains
+      // — cannot settle"). `distinctTargetChains` is the same chain set
+      // `swapPairs`' to-legs already advertise; `preferredTokens` is built
+      // in the same signer-construction loop above.
+      supportedChains: [...distinctTargetChains],
+      preferredTokens: { ...preferredTokens },
       swapPairs: [...config.swapPairs],
     };
     const ilpInfoEvent = buildIlpPeerInfoEvent(ownIlpInfo, identity.secretKey);
