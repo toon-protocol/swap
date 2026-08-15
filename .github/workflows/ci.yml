@@ -73,6 +73,16 @@ jobs:
       - name: Integration tests (anvil-gated)
         run: devbox run -- bash -c "pnpm --filter @toon-protocol/swap test:integration"
 
+      # swap#104: the Docker cross-chain E2E suites' EVM leg is
+      # self-contained (tests/e2e/global-setup.ts boots its own Anvil +
+      # relay + peer1 in-process, needing only `anvil` on PATH — devbox
+      # provides it here same as the integration step above). Solana/Mina
+      # stay skip-only everywhere (see tests/e2e/README.md); the EVM core
+      # failing to boot under CI is a real regression and fails this step
+      # instead of masking as a pass-via-skip.
+      - name: Docker cross-chain E2E (EVM leg, anvil-gated)
+        run: devbox run -- bash -c "pnpm --filter @toon-protocol/swap test:e2e:docker"
+
   ci-ok:
     name: CI OK
     runs-on: ubuntu-latest

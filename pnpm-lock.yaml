@@ -146,6 +146,9 @@ importers:
       '@types/node':
         specifier: ^20.0.0
         version: 20.19.32
+      '@types/ws':
+        specifier: ^8.18.1
+        version: 8.18.1
       tsup:
         specifier: ^8.0.0
         version: 8.5.1(tsx@4.21.0)(typescript@5.9.3)
@@ -158,6 +161,9 @@ importers:
       vitest:
         specifier: ^1.0.0
         version: 1.6.1(@types/node@20.19.32)
+      ws:
+        specifier: ^8.19.0
+        version: 8.20.0(bufferutil@4.1.0)(utf-8-validate@5.0.10)
 
 packages:
 

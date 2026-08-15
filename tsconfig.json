@@ -23,7 +23,6 @@
     "dist",
     "coverage",
     "archive",
-    "packages/rig",
-    "packages/swap/tests/e2e"
+    "packages/rig"
   ]
 }
