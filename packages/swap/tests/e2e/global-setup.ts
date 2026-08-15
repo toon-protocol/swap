@@ -52,6 +52,16 @@ export default async function globalSetup(): Promise<() => Promise<void>> {
   let relay: LocalRelay | null = null;
   let peer1: PeerNodeHandle | null = null;
 
+  /** Tear down in reverse boot order; every stop is best-effort. */
+  const shutdown = async (): Promise<void> => {
+    await peer1?.stop().catch(() => undefined);
+    await relay?.stop().catch(() => undefined);
+    await anvil?.stop().catch(() => undefined);
+    peer1 = null;
+    relay = null;
+    anvil = null;
+  };
+
   if (isAnvilAvailable()) {
     try {
       anvil = await startAnvil({ port: ANVIL_PORT, chainId: ANVIL_CHAIN_ID });
@@ -78,10 +88,7 @@ export default async function globalSetup(): Promise<() => Promise<void>> {
       // `infra-gate.ts`'s probes are the authority on readiness and will
       // skip (or fail under CI) if peer1 never came up.
       const deadline = Date.now() + 15_000;
-      while (
-        peer1.instance.health().status !== 'ok' &&
-        Date.now() < deadline
-      ) {
+      while (peer1.instance.health().status !== 'ok' && Date.now() < deadline) {
         await new Promise((r) => setTimeout(r, 100));
       }
     } catch (err) {
@@ -89,18 +96,9 @@ export default async function globalSetup(): Promise<() => Promise<void>> {
         '[swap e2e] self-contained EVM infra failed to start — suites will skip:',
         err instanceof Error ? err.message : err
       );
-      await peer1?.stop().catch(() => undefined);
-      await relay?.stop().catch(() => undefined);
-      await anvil?.stop().catch(() => undefined);
-      peer1 = null;
-      relay = null;
-      anvil = null;
+      await shutdown();
     }
   }
 
-  return async () => {
-    await peer1?.stop().catch(() => undefined);
-    await relay?.stop().catch(() => undefined);
-    await anvil?.stop().catch(() => undefined);
-  };
+  return shutdown;
 }

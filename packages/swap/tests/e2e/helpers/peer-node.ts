@@ -58,7 +58,6 @@ export interface StartPeerNodeOptions {
      */
     channelAddress: string;
   };
-  loggerName?: string;
 }
 
 /**
@@ -79,24 +78,28 @@ function seedChannelId(i: number): string {
 export async function startPeerNode(
   opts: StartPeerNodeOptions
 ): Promise<PeerNodeHandle> {
-  const evm = opts.evm;
-  const chain = evm ? `${EVM_CHAIN_PREFIX}${evm.chainId}` : undefined;
+  // Chain string and chain wiring travel together so every field below
+  // narrows off a single optional, rather than re-checking `evm` and `chain`
+  // independently.
+  const evm = opts.evm
+    ? { ...opts.evm, chain: `${EVM_CHAIN_PREFIX}${opts.evm.chainId}` }
+    : undefined;
 
   const config: SwapNodeConfig = {
     mnemonic: opts.mnemonic,
-    swapPairs: chain
+    swapPairs: evm
       ? [
           {
-            from: { assetCode: 'USD', assetScale: 6, chain },
-            to: { assetCode: 'USD', assetScale: 6, chain },
+            from: { assetCode: 'USD', assetScale: 6, chain: evm.chain },
+            to: { assetCode: 'USD', assetScale: 6, chain: evm.chain },
             rate: '1',
           },
         ]
       : [],
     chains: evm ? ['evm'] : [],
-    channels: chain
+    channels: evm
       ? {
-          [chain]: Array.from({ length: SEED_CHANNEL_COUNT }, (_, i) => ({
+          [evm.chain]: Array.from({ length: SEED_CHANNEL_COUNT }, (_, i) => ({
             channelId: seedChannelId(i),
             cumulativeAmount: 0n,
             nonce: 0n,
@@ -104,7 +107,7 @@ export async function startPeerNode(
           })),
         }
       : {},
-    inventory: chain ? { [chain]: 100_000_000_000n } : {},
+    inventory: evm ? { [evm.chain]: 100_000_000_000n } : {},
     logger: {
       debug: () => undefined,
       info: () => undefined,
@@ -118,11 +121,11 @@ export async function startPeerNode(
     btpEndpoint: `ws://127.0.0.1:${opts.btpServerPort}`,
     advertisedAsset: { assetCode: 'USD', assetScale: 6 },
     settlementPrivateKey: opts.evmPrivateKey,
-    chainProviders: evm && chain
+    chainProviders: evm
       ? [
           {
             chainType: 'evm' as const,
-            chainId: chain,
+            chainId: evm.chain,
             rpcUrl: evm.rpcUrl,
             registryAddress: evm.registryAddress,
             tokenAddress: evm.tokenAddress,

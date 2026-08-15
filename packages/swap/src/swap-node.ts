@@ -1374,21 +1374,29 @@ export async function startSwapNode(
   // our own ilp prefix dispatch locally (PacketHandler zeros fees on local
   // delivery — see connector packet-handler.ts:1074-1077). `connectorFeePercentage:
   // 0` is set defensively to zero fees on the child even on non-local hops.
+  //
+  // `nodeId` and `ilpAddress` are derived ONCE here and reused by both
+  // auto-create branches, the rolling leg-B sender, the connector-started log
+  // line, and the kind:10032 advertisement below. They must never diverge: a
+  // self-route prefix that drifts from the advertised `ilpAddress` F02-rejects
+  // every inbound swap packet, and a `nextHop` that drifts from the connector's
+  // own `nodeId` never resolves to local delivery.
+  const nodeId = config.nodeId ?? `toon-swap-${identity.pubkey.slice(0, 16)}`;
+  const ilpAddress =
+    config.ilpAddress ?? `g.toon.swap.${identity.pubkey.slice(0, 16)}`;
+
   let ownsConnector = false;
   let autoCreatedConnector: ConnectorNode | null = null;
   let effectiveConnector: EmbeddableConnectorLike | undefined =
     config.connector;
 
   if (config.connector === undefined && config.connectorUrl !== undefined) {
-    const nodeId = config.nodeId ?? `toon-swap-${identity.pubkey.slice(0, 16)}`;
     // `btpServerPort` is required by ConnectorNode (rejects port=0 / undefined).
     // Default to 3000 to match the parent-link assumption documented in the
     // dev infra fixtures; operators may override via config.btpServerPort.
     const btpServerPort = config.btpServerPort ?? 3000;
     const parentPeerId = config.parentPeerId ?? 'apex';
     const parentAuthToken = config.parentAuthToken ?? '';
-    const ilpAddress =
-      config.ilpAddress ?? `g.toon.swap.${identity.pubkey.slice(0, 16)}`;
     const connectorLogger = createConnectorLogger(
       nodeId,
       (process.env['TOON_CONNECTOR_LOG_LEVEL'] as
@@ -1501,17 +1509,7 @@ export async function startSwapNode(
     // Standalone mode: auto-wire an embedded ConnectorNode with no parent
     // peer. `ConnectorNode` rejects port=0 (OS-assigned), so the explicit
     // `btpServerPort` opt-in is what gates this branch.
-    const nodeId = config.nodeId ?? `toon-swap-${identity.pubkey.slice(0, 16)}`;
     const btpServerPort = config.btpServerPort;
-    // Self-route — without it every inbound packet addressed at our own
-    // `ilpAddress` (the common case: a peer streaming a swap directly to
-    // us with no upstream apex) hits PacketHandler's `routingTable.
-    // getNextHop()` with no matching entry and is F02-rejected as "no
-    // route found" before `setPacketHandler`'s local-delivery dispatch
-    // (§11a below) ever runs. Mirrors the embedded-with-parent branch's
-    // self-route above.
-    const ilpAddress =
-      config.ilpAddress ?? `g.toon.swap.${identity.pubkey.slice(0, 16)}`;
     const connectorLogger = createConnectorLogger(
       nodeId,
       (process.env['TOON_CONNECTOR_LOG_LEVEL'] as
@@ -1545,6 +1543,13 @@ export async function startSwapNode(
         environment: 'development' as const,
         deploymentMode: 'embedded' as const,
         peers: [],
+        // Self-route — without it every inbound packet addressed at our own
+        // `ilpAddress` (the common case: a peer streaming a swap directly to
+        // us with no upstream apex) hits PacketHandler's
+        // `routingTable.getNextHop()` with no matching entry and is
+        // F02-rejected as "no route found" before `setPacketHandler`'s
+        // local-delivery dispatch (§11a below) ever runs. Mirrors the
+        // embedded-with-parent branch's self-route above.
         routes: [{ prefix: ilpAddress, nextHop: nodeId, priority: 100 }],
         localDelivery: { enabled: false },
         ...(resolvedChainProviders &&
@@ -1582,13 +1587,11 @@ export async function startSwapNode(
   // persistence is enabled — the persistent replay set, so rolling replay
   // reservations hit disk synchronously (state-store crash rule 4) under
   // `rolling:${streamNonce}:${seq}` keys, disjoint from gift-wrap ids.
-  const resolvedNodeId =
-    config.nodeId ?? `toon-swap-${identity.pubkey.slice(0, 16)}`;
   const rollingLegBSender: LegBSender =
     config.rollingLegBSender ??
     (effectiveConnector
       ? createConnectorLegBSender(effectiveConnector, {
-          nodeId: resolvedNodeId,
+          nodeId,
           logger: { warn: logger.warn, info: logger.info },
         })
       : async () => ({
@@ -1846,9 +1849,7 @@ export async function startSwapNode(
   if (ownsConnector && autoCreatedConnector) {
     try {
       await autoCreatedConnector.start();
-      logger.debug?.('swap.connector.started', {
-        nodeId: config.nodeId ?? `toon-swap-${identity.pubkey.slice(0, 16)}`,
-      });
+      logger.debug?.('swap.connector.started', { nodeId });
     } catch (err) {
       logger.error?.('swap.connector.start_failed', { err: errSummary(err) });
     }
@@ -2080,8 +2081,7 @@ export async function startSwapNode(
       // `swapPubkey` streamSwap callers discover here and gift-wrap to. Signed
       // below with the matching `identity.secretKey`. (issues #80/#88)
       pubkey: identity.pubkey,
-      ilpAddress:
-        config.ilpAddress ?? `g.toon.swap.${identity.pubkey.slice(0, 16)}`,
+      ilpAddress,
       btpEndpoint: config.btpEndpoint ?? '',
       assetCode: config.advertisedAsset?.assetCode ?? 'USD',
       assetScale: config.advertisedAsset?.assetScale ?? 6,

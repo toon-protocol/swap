@@ -4,8 +4,9 @@
  *
  * The dependency bump (sdk ^0.5 → ^2, connector ^3.10 → ^3.20) had no
  * runtime coverage of the `connectorUrl` auto-create path: the integration
- * fixture injects a fake connector, and the docker E2E harness cannot run in
- * this repo (see docs/sdk-2x-migration.md). This test boots a REAL
+ * fixture injects a fake connector, and the docker E2E harness could not run
+ * in this repo at the time (restored since — swap#104; see
+ * packages/swap/tests/e2e/README.md). This test boots a REAL
  * `ConnectorNode` from the installed `@toon-protocol/connector` and pins the
  * three load-bearing behaviors of the child boot:
  *

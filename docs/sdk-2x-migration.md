@@ -108,24 +108,32 @@ test; no code change here is expected.
 
 ## Docker E2E status
 
-`packages/swap/tests/e2e/*` (the docker swap-flow suites) currently cannot run
-in this repo at all — pre-existing since the monorepo extraction, unrelated to
-this migration. `tests/e2e/helpers/infra-gate.ts` re-exports helpers from
+**Resolved by swap#104 — this section is kept as history.**
+
+At the time of this migration `packages/swap/tests/e2e/*` (the docker
+swap-flow suites) could not run in this repo at all — pre-existing since the
+monorepo extraction, unrelated to this migration.
+`tests/e2e/helpers/infra-gate.ts` re-exported helpers from
 `../../../../sdk/tests/e2e/helpers/docker-e2e-setup.js` (a sibling
 `packages/sdk` that no longer exists here), and the referenced
 `./scripts/sdk-e2e-infra.sh` harness was not carried into either extracted
-repo. The e2e sources were migrated to the 2.x vocabulary anyway so they are
-ready when the harness is restored. Coverage in the meantime:
+repo. That dead import also made the directory untypecheckable, so the root
+`tsconfig.json` excluded it from `pnpm run typecheck` (swap#69). The e2e
+sources were migrated to the 2.x vocabulary anyway so they were ready when the
+harness was restored.
 
-- `pnpm -r test` — 131 unit tests, including the new embedded-connector boot
-  smoke against the real installed connector.
-- `pnpm --filter @toon-protocol/swap test:integration` — 18 in-process
-  end-to-end tests driving the real sdk 2.x `streamSwap` → gift-wrap →
-  swap-handler → claim-issuer → FULFILL metadata → `buildSettlementTx`
-  round-trip, asserting `swapSignerAddress` end to end.
+swap#104 restored it: `infra-gate.ts` is now self-contained (it boots Anvil +
+an in-process Nostr relay + a real `startSwapNode()` peer1 from
+`tests/e2e/global-setup.ts`, needing only `anvil` on PATH), the `tsconfig.json`
+exclude is gone, and `pnpm --filter @toon-protocol/swap test:e2e:docker` runs
+in CI. See `packages/swap/tests/e2e/README.md` for the topology and for how to
+bring up the optional Solana/Mina infra.
 
-The dead `../../../../sdk/...` import also makes `packages/swap/tests/e2e`
-unable to typecheck (the module can never resolve from this repo), so the
-root `tsconfig.json` excludes that directory from `pnpm run typecheck`
-(swap#69). Remove the exclude once the harness — and with it a real
-`sdk`-relative or published test-utils import — is restored.
+Coverage alongside it:
+
+- `pnpm -r test` — unit tests, including the embedded-connector boot smoke
+  against the real installed connector.
+- `pnpm --filter @toon-protocol/swap test:integration` — in-process end-to-end
+  tests driving the real sdk 2.x `streamSwap` → gift-wrap → swap-handler →
+  claim-issuer → FULFILL metadata → `buildSettlementTx` round-trip, asserting
+  `swapSignerAddress` end to end.

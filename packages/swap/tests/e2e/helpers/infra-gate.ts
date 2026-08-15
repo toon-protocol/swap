@@ -47,10 +47,8 @@ import {
 // Endpoints
 // ---------------------------------------------------------------------------
 
-export { ANVIL_RPC };
+export { ANVIL_RPC, PEER1_BTP_URL, PEER1_NOSTR_PUBKEY };
 export const PEER1_RELAY_URL = RELAY_URL;
-export { PEER1_BTP_URL };
-export { PEER1_NOSTR_PUBKEY };
 export const PEER1_EVM_ADDRESS = MAKER_EVM_ADDRESS;
 
 /**
@@ -95,7 +93,8 @@ export function createViemClient() {
 // for the full account allocation: #0 is peer1's settlement key)
 // ---------------------------------------------------------------------------
 
-export const SWAP_E2E_EVM_SENDER_PRIVATE_KEY = SENDER_EVM_PRIVATE_KEY as `0x${string}`;
+export const SWAP_E2E_EVM_SENDER_PRIVATE_KEY =
+  SENDER_EVM_PRIVATE_KEY as `0x${string}`;
 export const SWAP_E2E_EVM_SENDER_ADDRESS = SENDER_EVM_ADDRESS as `0x${string}`;
 
 /**
@@ -278,7 +277,9 @@ export function checkAllServicesReady(): Promise<boolean> {
  * peer, so this is an alias for the same core-readiness check rather than a
  * second boot.
  */
-export async function waitForPeer2Bootstrap(_timeoutMs: number): Promise<boolean> {
+export async function waitForPeer2Bootstrap(
+  _timeoutMs: number
+): Promise<boolean> {
   return checkAllServicesReady();
 }
 
@@ -316,7 +317,10 @@ export async function waitForMinaHealth(timeoutMs: number): Promise<boolean> {
   return probeMinaGraphql(MINA_GRAPHQL, timeoutMs);
 }
 
-export async function acquireMinaAccount(): Promise<{ pk: string; sk: string } | null> {
+export async function acquireMinaAccount(): Promise<{
+  pk: string;
+  sk: string;
+} | null> {
   if (!MINA_ACCOUNTS_MANAGER) return null;
   try {
     const res = await fetch(`${MINA_ACCOUNTS_MANAGER}/acquire-account`, {
