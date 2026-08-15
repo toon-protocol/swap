@@ -50,6 +50,7 @@ import { execFileSync } from "node:child_process";
 import * as sandcastle from "@ai-hero/sandcastle";
 import { docker } from "@ai-hero/sandcastle/sandboxes/docker";
 import { sandboxSecrets } from "./sandbox-secrets.ts";
+import { pollForSha } from "./scripts/push-verify.ts";
 import {
   assertApproverIsNotAuthor,
   getPrAuthorLogin,
@@ -146,7 +147,8 @@ console.log(
 );
 
 // Set to a non-null message below when the review-push phase reported success
-// but origin's PR branch tip did not advance. Recorded here so the `finally`
+// but origin's PR branch tip never advanced to the pushed sha, even after
+// polling with retry/backoff (issue #108). Recorded here so the `finally`
 // still closes the sandbox before we fail the job non-zero.
 let reviewPushVerificationError: string | null = null;
 
@@ -174,9 +176,6 @@ try {
     console.log(
       `\nReviewer made ${review.commits.length} commit(s) — pushing to the PR branch.`,
     );
-    // Record origin's PR-branch tip BEFORE the push so we can prove afterwards
-    // that it actually advanced.
-    const remoteShaBefore = remoteBranchSha(headRef);
 
     // DETERMINISTIC (no agent) — see toon-meta#235. This was an agent run
     // (review-push-prompt.md) whose only job was `git push origin <branch>`.
@@ -191,25 +190,36 @@ try {
       );
     }
 
-    // FAIL LOUD. The push-review phase logs COMPLETE from its prompt regardless
-    // of whether the in-sandbox `git push` actually landed, so we must NOT trust
-    // it. Verify from the HOST that origin's PR-branch tip advanced. If the
-    // reviewer produced commits but the remote tip did not move, the push failed
-    // silently — exit non-zero so the Actions job goes red instead of green.
-    // Same class of silent-push failure as store#50.
-    const remoteShaAfter = remoteBranchSha(headRef);
-    if (remoteShaAfter !== null && remoteShaAfter === remoteShaBefore) {
+    // The sha actually pushed is the sandbox's local HEAD — read it from
+    // inside the sandbox rather than trusting the push-review phase's own
+    // COMPLETE log (issue #108: that log fires regardless of whether the
+    // in-sandbox `git push` actually landed).
+    const expectedSha = (await sandbox.exec("git rev-parse HEAD")).stdout.trim();
+
+    // FAIL LOUD, but not on a false negative. A single immediate read of
+    // origin's ref can race the push that just landed — GitHub's API can
+    // still answer with the PRE-push tip for a moment (issue #108: two
+    // consecutive CLEAN verdicts on swap#107 were discarded this way, and
+    // because every review pass makes its own commit, the false failure
+    // recurs forever). Poll with retry/backoff for the EXACT sha that was
+    // pushed, not merely "did the tip move at all", before concluding the
+    // push failed.
+    const verification = await pollForSha(() => remoteBranchSha(headRef), expectedSha);
+    if (verification.matched) {
+      console.log(
+        `\nVerified: origin/${headRef} advanced to ${verification.lastSha} ` +
+          `(${verification.attempts} read(s)).`,
+      );
+    } else {
       reviewPushVerificationError =
         `\nERROR: the push-review phase reported COMPLETE, but origin's tip for ` +
-        `branch '${headRef}' did not advance (still ${remoteShaAfter}).\n` +
+        `branch '${headRef}' never advanced to the pushed sha ${expectedSha} ` +
+        `(last seen: ${verification.lastSha ?? "(unknown)"}, after ` +
+        `${verification.attempts} read(s) with retry/backoff).\n` +
         `  The reviewer made ${review.commits.length} commit(s), so the ` +
         `in-sandbox \`git push\` failed silently. Inspect the push-review phase ` +
         `logs above. The Actions job is failing deliberately so this is not ` +
         `mistaken for success.`;
-    } else {
-      console.log(
-        `\nVerified: origin/${headRef} advanced to ${remoteShaAfter ?? "(unknown)"}.`,
-      );
     }
   } else {
     console.log("\nReviewer made no changes — nothing to push.");
