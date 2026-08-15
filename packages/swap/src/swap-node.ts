@@ -63,6 +63,7 @@ import type { SettlementEvent } from './settlement-event.js';
 import { SwapInventory } from './inventory.js';
 import { SwapChannelState } from './channel-state.js';
 import type { ChannelEntry } from './channel-state.js';
+import { createEvmChannelOnChainReader } from './evm-channel-reader.js';
 import {
   EvmPaymentChannelSigner,
   MinaPaymentChannelSigner,
@@ -483,6 +484,14 @@ export interface SwapNodeConfig {
      * production ~24s window. NOT part of the public contract.
      */
     peerInfoPublishRetry?: { maxAttempts?: number; delayMs?: number };
+    /**
+     * @internal — issue #113 test hook. Called exactly once with the
+     * constructed `SwapChannelState`, immediately after it (and its
+     * `chainProviders`-derived `onChainReader`, if any) is built. Lets
+     * tests exercise the real wiring end-to-end without a full connector/
+     * BTP round-trip. NOT part of the public contract.
+     */
+    onChannelStateBuilt?: (channelState: SwapChannelState) => void;
   };
 }
 
@@ -1258,13 +1267,27 @@ export async function startSwapNode(
       };
     }
   }
+  // Issue #113 — wire an on-chain reader whenever an EVM chainProviders
+  // entry is configured, so a bound-but-unavailable channel can be
+  // safety-checked for rebind (no separate opt-in knob: this is the
+  // rebind PRECONDITION, not a policy an operator should be able to
+  // disable — see `channel-state.ts`'s docblock).
+  const evmChannelReaderProviders = (config.chainProviders ?? []).filter(
+    (p): p is SwapNodeEvmChainProvider => p.chainType === 'evm'
+  );
+  const channelOnChainReader =
+    evmChannelReaderProviders.length > 0
+      ? createEvmChannelOnChainReader(evmChannelReaderProviders)
+      : undefined;
   const channelState = new SwapChannelState({
     channels: channelInit,
     logger: { warn: logger.warn },
     // Restored sticky bindings keep each sender pinned to the channel its
     // existing balance proofs were issued against (dangling ones dropped).
     ...(persistedState && { bindings: persistedState.bindings }),
+    ...(channelOnChainReader && { onChainReader: channelOnChainReader }),
   });
+  config.__testHooks?.onChannelStateBuilt?.(channelState);
 
   // 6b. Issue #46 — persister + persistent replay set.
   //

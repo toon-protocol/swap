@@ -323,10 +323,15 @@ export class MultiChainClaimIssuer implements ClaimIssuer {
     //    legacy = permanent debit; rolling = in-flight window reservation.
     const hold = acquireHold();
 
-    // 3. Reserve channel state SYNCHRONOUSLY. On failure, reverse the hold.
+    // 3. Reserve channel state. The common paths (existing sticky binding;
+    //    first-use bind to an unbound channel) resolve synchronously with
+    //    no await, same as before issue #113 — only the fallback path (no
+    //    unbound channel left, so a bound channel must clear an on-chain
+    //    redemption check before it can be rebound) actually awaits an RPC
+    //    read. On failure, reverse the hold.
     let reservation: Reservation;
     try {
-      reservation = this.channelState.reserve({
+      reservation = await this.channelState.reserve({
         assetCode: targetAsset,
         chain: targetChain,
         senderPubkey,
@@ -339,8 +344,11 @@ export class MultiChainClaimIssuer implements ClaimIssuer {
 
     // 3b. Issue #46 — WRITE-AHEAD persist. The reservation (nonce +
     //     cumulative watermark + inventory hold) MUST be durable before the
-    //     signed claim can leave the process. Synchronous, so no other
-    //     issueClaim can interleave between reserve and persist. On failure:
+    //     signed claim can leave the process. The persist call itself is
+    //     synchronous and snapshots the WHOLE live state, so even when a
+    //     concurrent issueClaim interleaves at the `reserve()` await above
+    //     (issue #113's rebind path), disk is never behind the watermark this
+    //     claim is about to be signed against. On failure:
     //     roll back hold + reservation and refuse the claim — handing out a
     //     claim ahead of the stored watermark is the exact desync this
     //     hook exists to prevent.
