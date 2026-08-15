@@ -18,7 +18,11 @@
  */
 
 import { startSwapNode } from '../../../src/swap-node.js';
-import type { SwapNodeConfig, SwapNodeInstance } from '../../../src/swap-node.js';
+import type {
+  SwapNodeConfig,
+  SwapNodeInstance,
+} from '../../../src/swap-node.js';
+import { EVM_CHAIN_PREFIX } from './topology.js';
 
 export interface PeerNodeHandle {
   instance: SwapNodeInstance;
@@ -57,8 +61,6 @@ export interface StartPeerNodeOptions {
   loggerName?: string;
 }
 
-const DOCKER_CHAIN_EVM_PREFIX = 'evm:base:';
-
 /**
  * Synthetic channelIds seeding `channels[chain]`. `SwapChannelState.
  * resolveChannel()` binds each DISTINCT sender pubkey to its own unbound
@@ -78,7 +80,7 @@ export async function startPeerNode(
   opts: StartPeerNodeOptions
 ): Promise<PeerNodeHandle> {
   const evm = opts.evm;
-  const chain = evm ? `${DOCKER_CHAIN_EVM_PREFIX}${evm.chainId}` : undefined;
+  const chain = evm ? `${EVM_CHAIN_PREFIX}${evm.chainId}` : undefined;
 
   const config: SwapNodeConfig = {
     mnemonic: opts.mnemonic,
@@ -103,7 +105,12 @@ export async function startPeerNode(
         }
       : {},
     inventory: chain ? { [chain]: 100_000_000_000n } : {},
-    logger: { debug: () => undefined, info: () => undefined, warn: console.warn, error: console.error },
+    logger: {
+      debug: () => undefined,
+      info: () => undefined,
+      warn: console.warn,
+      error: console.error,
+    },
     relayUrls: opts.relayUrls,
     blsPort: opts.blsPort,
     btpServerPort: opts.btpServerPort,

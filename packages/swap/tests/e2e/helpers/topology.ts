@@ -32,6 +32,14 @@ export const ANVIL_PORT = 18545;
 export const ANVIL_CHAIN_ID = 31337;
 export const ANVIL_RPC = `http://127.0.0.1:${ANVIL_PORT}`;
 
+/**
+ * Prefix of the EVM chain string peer1 advertises and the suites gate on.
+ * Shared so `peer-node.ts` (which builds peer1's swapPairs) and
+ * `infra-gate.ts` (which builds `DOCKER_CHAIN_EVM`) can never disagree —
+ * a mismatch would make every EVM pair silently unroutable.
+ */
+export const EVM_CHAIN_PREFIX = 'evm:base:';
+
 /** In-process vanilla Nostr relay (local-nostr-relay.ts). */
 export const RELAY_PORT = 18901;
 export const RELAY_URL = `ws://127.0.0.1:${RELAY_PORT}`;

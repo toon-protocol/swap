@@ -31,8 +31,7 @@ compose() {
 
 case "${1:-}" in
   up)
-    compose up -d
-    echo "Waiting for solana-test-validator + mina-lightnet health checks..."
+    echo "Starting solana-test-validator + mina-lightnet, waiting for health checks..."
     compose up -d --wait
     cat <<EOF
 

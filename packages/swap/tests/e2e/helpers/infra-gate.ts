@@ -23,6 +23,7 @@
  */
 
 import { createPublicClient, http, type Chain } from 'viem';
+import WebSocket from 'ws';
 
 import {
   USDC_TOKEN_ADDRESS,
@@ -35,6 +36,7 @@ import {
 import {
   ANVIL_CHAIN_ID,
   ANVIL_RPC,
+  EVM_CHAIN_PREFIX,
   RELAY_URL,
   PEER1_BTP_URL,
   PEER1_BLS_URL,
@@ -113,7 +115,7 @@ export async function publicModeSettlementKey(
 // Chain-string constants (peer1's advertised swap pairs — see peer-node.ts)
 // ---------------------------------------------------------------------------
 
-export const DOCKER_CHAIN_EVM = `evm:base:${CHAIN_ID}` as const;
+export const DOCKER_CHAIN_EVM = `${EVM_CHAIN_PREFIX}${CHAIN_ID}` as const;
 export const DOCKER_CHAIN_SOLANA = 'solana:devnet' as const;
 export const DOCKER_CHAIN_MINA = 'mina:devnet' as const;
 
@@ -138,65 +140,67 @@ export const DOCKER_PAIR_MATRIX: readonly {
 // ---------------------------------------------------------------------------
 
 /**
- * `solana-test-validator`'s JSON-RPC endpoint is POST-only (a bare GET 404s
- * regardless of validator health, PR #106 review finding #4) — probe with
- * the smallest real request it accepts, `getHealth`.
+ * POST a JSON body and decode the response, or `null` for any failure
+ * (transport error, timeout, non-2xx, undecodable body). Every chain probe
+ * below is a POST-only endpoint — a bare GET 404s regardless of health
+ * (PR #106 review finding #4).
  */
-async function probeSolanaRpc(url: string, timeoutMs: number): Promise<boolean> {
+async function postJson<T>(
+  url: string,
+  body: unknown,
+  timeoutMs: number
+): Promise<T | null> {
   try {
     const res = await fetch(url, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'getHealth', params: [] }),
+      body: JSON.stringify(body),
       signal: AbortSignal.timeout(timeoutMs),
     });
-    if (!res.ok) return false;
-    const json = (await res.json()) as { result?: string };
-    return json.result === 'ok';
+    if (!res.ok) return null;
+    return (await res.json()) as T;
   } catch {
-    return false;
+    return null;
   }
 }
 
-/**
- * Mina GraphQL is a POST-only query endpoint (a bare GET 404s regardless of
- * lightnet health, PR #106 review finding #4) — probe with the smallest
- * real query it accepts, `{ syncStatus }`.
- */
-async function probeMinaGraphql(url: string, timeoutMs: number): Promise<boolean> {
-  try {
-    const res = await fetch(url, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ query: '{ syncStatus }' }),
-      signal: AbortSignal.timeout(timeoutMs),
-    });
-    if (!res.ok) return false;
-    const json = (await res.json()) as { data?: { syncStatus?: string } };
-    return typeof json.data?.syncStatus === 'string';
-  } catch {
-    return false;
-  }
+/** `getHealth` — the smallest real request solana-test-validator accepts. */
+async function probeSolanaRpc(
+  url: string,
+  timeoutMs: number
+): Promise<boolean> {
+  const json = await postJson<{ result?: string }>(
+    url,
+    { jsonrpc: '2.0', id: 1, method: 'getHealth', params: [] },
+    timeoutMs
+  );
+  return json?.result === 'ok';
+}
+
+/** `{ syncStatus }` — the smallest real query a Mina lightnet accepts. */
+async function probeMinaGraphql(
+  url: string,
+  timeoutMs: number
+): Promise<boolean> {
+  const json = await postJson<{ data?: { syncStatus?: string } }>(
+    url,
+    { query: '{ syncStatus }' },
+    timeoutMs
+  );
+  return typeof json?.data?.syncStatus === 'string';
 }
 
 async function probeAnvil(timeoutMs: number): Promise<boolean> {
-  try {
-    const res = await fetch(ANVIL_RPC, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'eth_chainId', params: [] }),
-      signal: AbortSignal.timeout(timeoutMs),
-    });
-    if (!res.ok) return false;
-    const json = (await res.json()) as { result?: string };
-    return parseInt(json.result ?? '0x0', 16) === ANVIL_CHAIN_ID;
-  } catch {
-    return false;
-  }
+  const json = await postJson<{ result?: string }>(
+    ANVIL_RPC,
+    { jsonrpc: '2.0', id: 1, method: 'eth_chainId', params: [] },
+    timeoutMs
+  );
+  if (!json) return false;
+  return parseInt(json.result ?? '0x0', 16) === ANVIL_CHAIN_ID;
 }
 
-async function probeRelay(timeoutMs: number): Promise<boolean> {
-  const { default: WebSocket } = await import('ws');
+function probeRelay(timeoutMs: number): Promise<boolean> {
   return new Promise<boolean>((resolve) => {
     let settled = false;
     const ws = new WebSocket(PEER1_RELAY_URL);

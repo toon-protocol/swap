@@ -74,11 +74,14 @@ export default async function globalSetup(): Promise<() => Promise<void>> {
 
       // Wait for peer1's BLS `/health` to report boot-complete before
       // resolving — the test process's first `checkAllServicesReady()` call
-      // should never race an in-flight boot.
+      // should never race an in-flight boot. On timeout, fall through anyway:
+      // `infra-gate.ts`'s probes are the authority on readiness and will
+      // skip (or fail under CI) if peer1 never came up.
       const deadline = Date.now() + 15_000;
-      for (;;) {
-        if (peer1.instance.health().status === 'ok') break;
-        if (Date.now() > deadline) break;
+      while (
+        peer1.instance.health().status !== 'ok' &&
+        Date.now() < deadline
+      ) {
         await new Promise((r) => setTimeout(r, 100));
       }
     } catch (err) {
