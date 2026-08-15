@@ -41,6 +41,8 @@ export type {
   ReserveParams,
   Reservation,
   ReleaseLogger,
+  // Issue #113 — the `SwapChannelStateInit.onChainReader` seam.
+  ChannelOnChainReader,
 } from './channel-state.js';
 
 // Claim issuer (Story 12.4)
