@@ -50,7 +50,7 @@ import { execFileSync } from "node:child_process";
 import * as sandcastle from "@ai-hero/sandcastle";
 import { docker } from "@ai-hero/sandcastle/sandboxes/docker";
 import { sandboxSecrets } from "./sandbox-secrets.ts";
-import { pollForSha } from "./scripts/push-verify.ts";
+import { pollForSha, readRemoteHead } from "./scripts/push-verify.ts";
 import {
   assertApproverIsNotAuthor,
   getPrAuthorLogin,
@@ -127,22 +127,6 @@ const hooks = {
   },
 };
 
-// Reads origin's current tip SHA for a branch via the authenticated host `gh`.
-// Returns null when the ref does not exist (or gh errors). A null never equals
-// the pushed sha, so the caller keeps polling; if every read in the budget comes
-// back null the push is reported as unverified rather than assumed good.
-function remoteBranchSha(ref: string): string | null {
-  try {
-    return execFileSync(
-      "gh",
-      ["api", `repos/{owner}/{repo}/git/ref/heads/${ref}`, "--jq", ".object.sha"],
-      { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] },
-    ).trim();
-  } catch {
-    return null;
-  }
-}
-
 console.log(
   `\n=== agent:review runner — PR #${prNumber} (head: ${headRef}) ===\n`,
 );
@@ -203,10 +187,13 @@ try {
     // consecutive CLEAN verdicts on swap#107 were discarded this way, and
     // because every review pass makes its own commit, the false failure
     // recurs forever). Re-read until origin catches up before concluding the
-    // push failed.
+    // push failed — via readRemoteHead()'s `git ls-remote` (issue #121,
+    // porting toon-meta#398): unlike the REST ref endpoint, it isn't served
+    // from a lagging read replica, so polling it actually converges.
     const verification = await pollForSha(
-      () => remoteBranchSha(headRef),
+      () => readRemoteHead(headRef),
       expectedSha,
+      { maxWaitMs: 60_000, delayMs: 5_000 },
     );
     if (verification.matched) {
       console.log(
@@ -216,9 +203,9 @@ try {
     } else {
       reviewPushVerificationError =
         `\nERROR: the push-review phase reported COMPLETE, but origin's tip for ` +
-        `branch '${headRef}' never advanced to the pushed sha ${expectedSha} ` +
-        `(last seen: ${verification.lastSha ?? "(unknown)"}, after ` +
-        `${verification.attempts} read(s) over the poll budget).\n` +
+        `branch '${headRef}' did NOT advance to the pushed sha ${expectedSha} ` +
+        `within 60s (last observed: ${verification.lastSha ?? "(unknown)"}, ` +
+        `after ${verification.attempts} read(s)).\n` +
         `  The reviewer made ${review.commits.length} commit(s), so the ` +
         `in-sandbox \`git push\` failed silently. Inspect the push-review phase ` +
         `logs above. The Actions job is failing deliberately so this is not ` +

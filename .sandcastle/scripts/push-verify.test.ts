@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { pollForSha } from "./push-verify.ts";
+import { parseLsRemoteSha, pollForSha } from "./push-verify.ts";
 
 describe("pollForSha", () => {
   it("matches on the first read without sleeping", async () => {
@@ -64,5 +64,18 @@ describe("pollForSha", () => {
 
     expect(result.matched).toBe(false);
     expect(result.lastSha).toBe(null);
+  });
+});
+
+describe("parseLsRemoteSha", () => {
+  it("extracts the sha from a single-ref `git ls-remote` line", () => {
+    expect(
+      parseLsRemoteSha("1f82028f9c2b3a4d5e6f7a8b9c0d1e2f3a4b5c6d\trefs/heads/main\n"),
+    ).toBe("1f82028f9c2b3a4d5e6f7a8b9c0d1e2f3a4b5c6d");
+  });
+
+  it("returns null for empty output (branch does not exist on origin)", () => {
+    expect(parseLsRemoteSha("")).toBe(null);
+    expect(parseLsRemoteSha("\n")).toBe(null);
   });
 });
