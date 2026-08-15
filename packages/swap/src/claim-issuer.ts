@@ -70,7 +70,9 @@ function validateClaimIssuerChainRecipient(
   if (chain.startsWith('evm:')) {
     // issue #112: accept EIP-55 checksummed (mixed-case) addresses, same as
     // the sdk's toon#200 fix — normalize before testing, don't reject on case.
-    return CLAIM_ISSUER_EVM_ADDRESS_REGEX.test(value.toLowerCase());
+    return CLAIM_ISSUER_EVM_ADDRESS_REGEX.test(
+      normalizeClaimIssuerChainRecipient(value, chain)
+    );
   }
   if (chain.startsWith('solana:')) {
     // Shape-only (regex + length) at the claim-issuer boundary. A full
@@ -85,6 +87,21 @@ function validateClaimIssuerChainRecipient(
   // Unknown chain: permit non-empty; the signer lookup below will surface
   // UNSUPPORTED_CHAIN before any signing actually happens.
   return value.length > 0;
+}
+
+/**
+ * Issue #112 — canonical form of an accepted `chainRecipient`: EVM addresses
+ * are case-insensitive, so they are lowercased before they are signed over
+ * and echoed back, exactly as the sdk handler's own `findChainRecipient()`
+ * does. Every other chain's address is case-significant and passes through
+ * untouched. Kept beside {@link validateClaimIssuerChainRecipient} so the
+ * accept rule and the canonical form can never drift apart.
+ */
+function normalizeClaimIssuerChainRecipient(
+  value: string,
+  chain: string
+): string {
+  return chain.startsWith('evm:') ? value.toLowerCase() : value;
 }
 
 /**
@@ -295,12 +312,12 @@ export class MultiChainClaimIssuer implements ClaimIssuer {
         `chainRecipient is missing or malformed for chain ${targetChain}`
       );
     }
-    // issue #112: normalize to lowercase for EVM, matching the sdk
-    // handler's own findChainRecipient() so a checksummed input signs and
-    // echoes identically to the same address passed already-lowercased.
-    const normalizedChainRecipient = targetChain.startsWith('evm:')
-      ? chainRecipient.toLowerCase()
-      : chainRecipient;
+    // issue #112: a checksummed input must sign and echo identically to the
+    // same address passed already-lowercased.
+    const normalizedChainRecipient = normalizeClaimIssuerChainRecipient(
+      chainRecipient,
+      targetChain
+    );
 
     // 2. Acquire the inventory hold SYNCHRONOUSLY (before any await):
     //    legacy = permanent debit; rolling = in-flight window reservation.
@@ -420,8 +437,10 @@ export class MultiChainClaimIssuer implements ClaimIssuer {
       result.nonce = reservation.nonce;
       result.cumulativeAmount = reservation.cumulativeAmount;
       // Story 12.9 AC-12: echo the sender-supplied chain-layer payout
-      // address, not the Nostr identity key. The sender's AC-7 equality
-      // check asserts `metadata.recipient === params.chainRecipient`.
+      // address, not the Nostr identity key. The sender's AC-7 check asserts
+      // `metadata.recipient` equals its own `params.chainRecipient` —
+      // case-insensitively on EVM (sdk >= 3.1.8, issue #112), which is what
+      // makes echoing the normalized form safe.
       result.recipient = normalizedChainRecipient;
       result.swapSignerAddress = swapSignerAddress;
     }

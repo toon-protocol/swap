@@ -804,7 +804,9 @@ describe('Story 12.9 — chain-recipient threading to signBalanceProof', () => {
   // here directly whenever a caller registers a rolling session without
   // going through the sdk's own createSwapHandler normalization.
   it('issue #112: checksummed (EIP-55 mixed-case) chainRecipient is accepted and normalized to lowercase', async () => {
-    const checksummed = '0x' + 'aB'.repeat(20);
+    // The EIP-55 checksum of `0xabab…ab` — mixed-case, so the pre-fix
+    // lowercase-only regex refused it outright.
+    const checksummed = '0xABaBaBaBABabABabAbAbABAbABabababaBaBABaB';
     expect(checksummed).not.toBe(checksummed.toLowerCase());
     const { issuer, signer } = buildIssuer({ withSettlementAddresses: true });
     const result = await issuer.issueClaim({
