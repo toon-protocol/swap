@@ -573,3 +573,388 @@ describe('issue #124 — CLI peerInfoIlpDestination / peerInfoPricePerByte', () 
     await expect(mod.main(['--config', cfgPath])).rejects.toThrow();
   });
 });
+
+// ---------------------------------------------------------------------------
+// Issue #126 — self-generate + persist maker identity on boot, auto-derive
+// the index-2 settlement key.
+// ---------------------------------------------------------------------------
+
+describe('issue #126 — settlement-key placeholder detection', () => {
+  it('[P1] needsSettlementKeyDerivation is true when unset', async () => {
+    const { needsSettlementKeyDerivation } = await import('./cli.js');
+    expect(needsSettlementKeyDerivation(undefined)).toBe(true);
+  });
+
+  it('[P1] needsSettlementKeyDerivation is true for a 0xdead…-style placeholder (case-insensitive)', async () => {
+    const { needsSettlementKeyDerivation } = await import('./cli.js');
+    expect(needsSettlementKeyDerivation(`0x${'dead'.repeat(16)}`)).toBe(true);
+    expect(needsSettlementKeyDerivation(`0x${'DEAD'.repeat(16)}`)).toBe(true);
+    expect(needsSettlementKeyDerivation(`0x${'DeAd'.repeat(16)}`)).toBe(true);
+  });
+
+  it('[P1] needsSettlementKeyDerivation is false for a real-looking key', async () => {
+    const { needsSettlementKeyDerivation } = await import('./cli.js');
+    expect(needsSettlementKeyDerivation(`0x${'11'.repeat(32)}`)).toBe(false);
+  });
+});
+
+describe('issue #126 — resolveIdentityConfig: index-2 settlementPrivateKey derivation', () => {
+  // Universally known zero-entropy BIP-39 vector (same golden vector wallet.test.ts pins).
+  const ZERO_MNEMONIC =
+    'abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about';
+
+  it('[P1] derives settlementPrivateKey from the mnemonic when unset, recovering the deriveSwapNodeKeys index-2 address and matching settlementAddresses', async () => {
+    const { resolveIdentityConfig } = await import('./cli.js');
+    const { deriveSwapNodeKeys } = await import('./wallet.js');
+    const { buildSignerAddresses } = await import('./swap-node.js');
+
+    const resolved = await resolveIdentityConfig(
+      {
+        mnemonic: ZERO_MNEMONIC,
+        swapPairs: [],
+        chains: ['evm'],
+        channels: {},
+        inventory: {},
+        relayUrls: [],
+      },
+      {}
+    );
+
+    expect(resolved.settlementPrivateKey).toMatch(/^0x[0-9a-fA-F]{64}$/);
+
+    const keys = await deriveSwapNodeKeys({
+      mnemonic: ZERO_MNEMONIC,
+      chains: ['evm'],
+    });
+    if (!keys.evm) throw new Error('expected an EVM key to be derived');
+    const expectedHex = `0x${Buffer.from(keys.evm.privateKey).toString('hex')}`;
+    expect(resolved.settlementPrivateKey).toBe(expectedHex);
+
+    const settlementAddresses = buildSignerAddresses(
+      [
+        {
+          from: { assetCode: 'USDC', assetScale: 6, chain: 'evm:8453' },
+          to: { assetCode: 'USDC', assetScale: 6, chain: 'evm:8453' },
+          rate: '1.0',
+        },
+      ],
+      keys
+    );
+    expect(settlementAddresses['evm:8453']).toBe(
+      keys.evm.address.toLowerCase()
+    );
+  });
+
+  it('[P1] replaces a 0xdead…-style placeholder settlementPrivateKey with the derived index-2 key', async () => {
+    const { resolveIdentityConfig } = await import('./cli.js');
+    const placeholder = `0x${'dead'.repeat(16)}`;
+    const resolved = await resolveIdentityConfig(
+      {
+        mnemonic: ZERO_MNEMONIC,
+        settlementPrivateKey: placeholder,
+        swapPairs: [],
+        chains: ['evm'],
+        channels: {},
+        inventory: {},
+        relayUrls: [],
+      },
+      {}
+    );
+    expect(resolved.settlementPrivateKey).not.toBe(placeholder);
+    expect(resolved.settlementPrivateKey).toMatch(/^0x[0-9a-fA-F]{64}$/);
+  });
+
+  it('[P1] leaves an operator-supplied non-placeholder settlementPrivateKey untouched', async () => {
+    const { resolveIdentityConfig } = await import('./cli.js');
+    const operatorKey = `0x${'11'.repeat(32)}`;
+    const resolved = await resolveIdentityConfig(
+      {
+        mnemonic: ZERO_MNEMONIC,
+        settlementPrivateKey: operatorKey,
+        swapPairs: [],
+        chains: ['evm'],
+        channels: {},
+        inventory: {},
+        relayUrls: [],
+      },
+      {}
+    );
+    expect(resolved.settlementPrivateKey).toBe(operatorKey);
+  });
+
+  it('[P2] a secretKey-only config (no mnemonic) is left untouched — no derivation attempted', async () => {
+    const { resolveIdentityConfig } = await import('./cli.js');
+    const resolved = await resolveIdentityConfig(
+      {
+        secretKey: new Uint8Array(32).fill(7),
+        swapPairs: [],
+        chains: ['evm'],
+        channels: {},
+        inventory: {},
+        relayUrls: [],
+      },
+      {}
+    );
+    expect(resolved.settlementPrivateKey).toBeUndefined();
+  });
+});
+
+describe('issue #126 — SWAP_AUTOGEN_IDENTITY self-generated + persisted identity', () => {
+  async function withEnv<T>(
+    overrides: Record<string, string | undefined>,
+    fn: () => Promise<T>
+  ): Promise<T> {
+    const prev: Record<string, string | undefined> = {};
+    for (const k of Object.keys(overrides)) prev[k] = process.env[k];
+    try {
+      for (const [k, v] of Object.entries(overrides)) {
+        if (v === undefined) {
+          // eslint-disable-next-line @typescript-eslint/no-dynamic-delete
+          delete process.env[k];
+        } else process.env[k] = v;
+      }
+      return await fn();
+    } finally {
+      for (const [k, v] of Object.entries(prev)) {
+        if (v === undefined) {
+          // eslint-disable-next-line @typescript-eslint/no-dynamic-delete
+          delete process.env[k];
+        } else process.env[k] = v;
+      }
+    }
+  }
+
+  it('[P1] generates + persists a mnemonic (mode 600) when autogen is on and no identity is provided', async () => {
+    const { resolveIdentityConfig } = await import('./cli.js');
+    const { statSync, rmSync } = await import('node:fs');
+    const dir = mkdtempSync(join(tmpdir(), 'swap-cli-autogen-'));
+    try {
+      const identityFile = join(dir, 'identity.json');
+      const resolved = await withEnv({ SWAP_IDENTITY_FILE: identityFile }, () =>
+        resolveIdentityConfig(
+          {
+            swapPairs: [],
+            chains: ['evm'],
+            channels: {},
+            inventory: {},
+            relayUrls: [],
+          },
+          { identityAutogen: true }
+        )
+      );
+      expect(existsSync(identityFile)).toBe(true);
+      if (typeof resolved.mnemonic !== 'string') {
+        throw new Error('expected a mnemonic to be resolved');
+      }
+      expect(resolved.mnemonic.split(' ').length).toBeGreaterThanOrEqual(12);
+      expect(resolved.settlementPrivateKey).toMatch(/^0x[0-9a-fA-F]{64}$/);
+      const mode = statSync(identityFile).mode & 0o777;
+      expect(mode).toBe(0o600);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('[P1] a second boot against the same identity file LOADS the persisted mnemonic (idempotent, no regeneration)', async () => {
+    const { resolveIdentityConfig } = await import('./cli.js');
+    const { rmSync } = await import('node:fs');
+    const dir = mkdtempSync(join(tmpdir(), 'swap-cli-autogen-'));
+    const identityFile = join(dir, 'identity.json');
+    try {
+      const first = await withEnv({ SWAP_IDENTITY_FILE: identityFile }, () =>
+        resolveIdentityConfig(
+          {
+            swapPairs: [],
+            chains: ['evm'],
+            channels: {},
+            inventory: {},
+            relayUrls: [],
+          },
+          { identityAutogen: true }
+        )
+      );
+      const second = await withEnv({ SWAP_IDENTITY_FILE: identityFile }, () =>
+        resolveIdentityConfig(
+          {
+            swapPairs: [],
+            chains: ['evm'],
+            channels: {},
+            inventory: {},
+            relayUrls: [],
+          },
+          { identityAutogen: true }
+        )
+      );
+      expect(second.mnemonic).toBe(first.mnemonic);
+      expect(second.settlementPrivateKey).toBe(first.settlementPrivateKey);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('[P1] identity file defaults beside statePath when SWAP_IDENTITY_FILE is not set', async () => {
+    const { resolveIdentityConfig } = await import('./cli.js');
+    const { rmSync } = await import('node:fs');
+    const dir = mkdtempSync(join(tmpdir(), 'swap-cli-autogen-'));
+    try {
+      const statePath = join(dir, 'state.json');
+      // SWAP_IDENTITY_FILE explicitly cleared: this asserts the DEFAULT path.
+      await withEnv({ SWAP_IDENTITY_FILE: undefined }, () =>
+        resolveIdentityConfig(
+          {
+            swapPairs: [],
+            chains: ['evm'],
+            channels: {},
+            inventory: {},
+            relayUrls: [],
+            statePath,
+          },
+          { identityAutogen: true }
+        )
+      );
+      expect(existsSync(join(dir, 'identity.json'))).toBe(true);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('[P2] autogen is a no-op when a mnemonic is already provided — no identity file created', async () => {
+    const { resolveIdentityConfig } = await import('./cli.js');
+    const { rmSync } = await import('node:fs');
+    const dir = mkdtempSync(join(tmpdir(), 'swap-cli-autogen-'));
+    try {
+      const statePath = join(dir, 'state.json');
+      await withEnv({ SWAP_IDENTITY_FILE: undefined }, () =>
+        resolveIdentityConfig(
+          {
+            mnemonic:
+              'abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about',
+            swapPairs: [],
+            chains: ['evm'],
+            channels: {},
+            inventory: {},
+            relayUrls: [],
+            statePath,
+          },
+          { identityAutogen: true }
+        )
+      );
+      expect(existsSync(join(dir, 'identity.json'))).toBe(false);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('[P1] logs the index-0 pubkey + index-2 settlement address but NEVER the mnemonic or the derived private key', async () => {
+    const { resolveIdentityConfig } = await import('./cli.js');
+    const { rmSync } = await import('node:fs');
+    const dir = mkdtempSync(join(tmpdir(), 'swap-cli-autogen-'));
+    const lines: string[] = [];
+    const realLog = console.log;
+    console.log = (...args: unknown[]): void => {
+      lines.push(args.map((a) => String(a)).join(' '));
+    };
+    try {
+      const resolved = await withEnv(
+        { SWAP_IDENTITY_FILE: join(dir, 'identity.json') },
+        () =>
+          resolveIdentityConfig(
+            {
+              swapPairs: [],
+              chains: ['evm'],
+              channels: {},
+              inventory: {},
+              relayUrls: [],
+            },
+            { identityAutogen: true }
+          )
+      );
+      console.log = realLog;
+      const output = lines.join('\n');
+      expect(output).toMatch(
+        /identity pubkey \(Nostr, index-0\): [0-9a-f]{64}/
+      );
+      expect(output).toMatch(
+        /settlement address \(EVM, index-2\): 0x[0-9a-fA-F]{40}/
+      );
+      if (typeof resolved.mnemonic !== 'string') {
+        throw new Error('expected a mnemonic to be resolved');
+      }
+      expect(output).not.toContain(resolved.mnemonic);
+      // Not even a two-word fragment of it (a bare word could collide with a
+      // hex run in the pubkey; a spaced pair cannot).
+      expect(output).not.toContain(
+        resolved.mnemonic.split(' ').slice(0, 2).join(' ')
+      );
+      const settlementKey = String(resolved.settlementPrivateKey);
+      expect(output).not.toContain(settlementKey);
+      expect(output).not.toContain(settlementKey.slice(2)); // un-prefixed
+    } finally {
+      console.log = realLog;
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('[P1] end-to-end: boots the committed skeleton (0xdead placeholder, no identity) with only SWAP_AUTOGEN_IDENTITY=1', async () => {
+    const mod = (await import('./cli.js')) as {
+      main: (argv: string[]) => Promise<{
+        identity: { pubkey: string };
+        swapNodeKeys: { evm?: { address: string } };
+        stop: () => Promise<void>;
+      }>;
+    };
+    const skeletonPath = resolve(
+      __dirname,
+      '..',
+      'fixtures',
+      'swap.config.autogen-skeleton.json'
+    );
+    const dir = mkdtempSync(join(tmpdir(), 'swap-cli-autogen-e2e-'));
+    const { rmSync } = await import('node:fs');
+    try {
+      // "only SWAP_AUTOGEN_IDENTITY=1": every other identity input is
+      // explicitly cleared so an ambient env var cannot mask the autogen path.
+      const instance = await withEnv(
+        {
+          SWAP_AUTOGEN_IDENTITY: '1',
+          SWAP_STATE_PATH: join(dir, 'state.json'),
+          SWAP_IDENTITY_FILE: undefined,
+          SWAP_MNEMONIC: undefined,
+          SWAP_SECRET_KEY_HEX: undefined,
+        },
+        () => mod.main(['--config', skeletonPath])
+      );
+      try {
+        expect(instance.identity.pubkey).toMatch(/^[0-9a-f]{64}$/);
+        expect(instance.swapNodeKeys.evm?.address).toMatch(
+          /^0x[0-9a-fA-F]{40}$/
+        );
+        expect(existsSync(join(dir, 'identity.json'))).toBe(true);
+      } finally {
+        await instance.stop();
+      }
+
+      // Second boot against the SAME state dir reuses the SAME identity.
+      const instance2 = await withEnv(
+        {
+          SWAP_AUTOGEN_IDENTITY: '1',
+          SWAP_STATE_PATH: join(dir, 'state.json'),
+          SWAP_IDENTITY_FILE: undefined,
+          SWAP_MNEMONIC: undefined,
+          SWAP_SECRET_KEY_HEX: undefined,
+        },
+        () => mod.main(['--config', skeletonPath])
+      );
+      try {
+        expect(instance2.identity.pubkey).toBe(instance.identity.pubkey);
+        expect(instance2.swapNodeKeys.evm?.address).toBe(
+          instance.swapNodeKeys.evm?.address
+        );
+      } finally {
+        await instance2.stop();
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});

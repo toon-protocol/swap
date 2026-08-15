@@ -37,6 +37,21 @@
  *                            "rates"). Timestamped ("at") responses arm the
  *                            SWAP_MAX_RATE_AGE staleness guard.
  *   SWAP_RATE_TIMEOUT_MS   — per-request feed timeout (default 1500)
+ *   SWAP_AUTOGEN_IDENTITY  — "1"/"true" (issue #126): when no identity is
+ *                            otherwise provided (no mnemonic/secretKey in
+ *                            the config file, no SWAP_MNEMONIC/
+ *                            SWAP_SECRET_KEY_HEX env), generate a fresh
+ *                            BIP-39 mnemonic and persist it to an identity
+ *                            file (default `<dir of statePath>/identity.json`,
+ *                            mode 600; override with SWAP_IDENTITY_FILE).
+ *                            A later boot against the same file LOADS the
+ *                            persisted mnemonic instead of regenerating —
+ *                            idempotent, since funds are tied to the
+ *                            identity. A no-op when an identity is already
+ *                            provided. Config-file equivalent:
+ *                            `identityAutogen: true`.
+ *   SWAP_IDENTITY_FILE     — overrides the identity-file path used by
+ *                            SWAP_AUTOGEN_IDENTITY (default: see above).
  *
  * NOTE on maxRateAge (swap#48): the staleness bound applies to the maker's
  * own rate-feed ticks, so it REQUIRES a `rateProvider` returning timestamped
@@ -51,16 +66,25 @@
  * `connector`, or the auto-created standalone one) instead of the legacy
  * unpaid Nostr WS publish a TOON relay drops. See
  * `SwapNodeConfig.peerInfoIlpDestination`.
+ *
+ * `settlementPrivateKey` auto-derivation (issue #126): whenever the resolved
+ * identity is a mnemonic — auto-generated or operator-provided — and
+ * `settlementPrivateKey` is unset (or a `0xdead…`-style placeholder), the CLI
+ * fills it with the BIP-44 account-index-2 EVM key. See
+ * `resolveIdentityConfig()` below.
  */
 
 import { parseArgs } from 'node:util';
-import { readFileSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { dirname, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
+
+import { fromMnemonic, generateMnemonic } from '@toon-protocol/sdk';
 
 import { startSwapNode } from './swap-node.js';
 import type { SwapNodeConfig, SwapNodeInstance } from './swap-node.js';
 import { createHttpRateProvider } from './rate-provider.js';
+import { deriveSwapNodeKeys } from './wallet.js';
 
 interface CliRawConfig {
   mnemonic?: string;
@@ -122,6 +146,9 @@ interface CliRawConfig {
   // validateConfig() enforces the shape AND the rateProvider requirement
   // (see the maxRateAge NOTE in the header).
   maxRateAge?: unknown;
+  // Issue #126 — config-file equivalent of SWAP_AUTOGEN_IDENTITY. Consumed
+  // entirely by resolveIdentityConfig(); never forwarded to SwapNodeConfig.
+  identityAutogen?: boolean;
 }
 
 function toBigInt(v: unknown): bigint {
@@ -330,6 +357,133 @@ function applyEnvOverlay(cfg: SwapNodeConfig): SwapNodeConfig {
   return out;
 }
 
+// ---------------------------------------------------------------------------
+// Issue #126 — self-generate + persist maker identity on boot, auto-derive
+// the index-2 settlement key.
+// ---------------------------------------------------------------------------
+
+/**
+ * A `0xdead…`-style placeholder settlementPrivateKey: a syntactically valid
+ * 32-byte hex key made up entirely of repeated `dead` nibbles, the shape a
+ * committed config skeleton ships so it passes format validation while
+ * still being an obvious non-key. Detected case-insensitively.
+ */
+const PLACEHOLDER_SETTLEMENT_KEY_RE = /^0x(?:dead)+$/i;
+
+/**
+ * @internal — exported for unit testability (issue #126). True when
+ * `settlementPrivateKey` needs to be (re-)derived from the mnemonic: unset,
+ * or a `0xdead…`-style placeholder.
+ */
+export function needsSettlementKeyDerivation(
+  value: string | undefined
+): boolean {
+  return value === undefined || PLACEHOLDER_SETTLEMENT_KEY_RE.test(value);
+}
+
+function isAutogenEnabled(raw: CliRawConfig): boolean {
+  const env = process.env['SWAP_AUTOGEN_IDENTITY'];
+  if (env === '1' || env === 'true') return true;
+  return raw.identityAutogen === true;
+}
+
+/** Default: beside `statePath` (or the cwd when unset); overridable. */
+function resolveIdentityFilePath(cfg: SwapNodeConfig): string {
+  const override = process.env['SWAP_IDENTITY_FILE'];
+  if (override) return resolve(override);
+  const base = cfg.statePath ? dirname(cfg.statePath) : process.cwd();
+  return resolve(base, 'identity.json');
+}
+
+/**
+ * Load the mnemonic persisted at `identityFilePath`, or generate + persist a
+ * fresh one (mode 600) when no identity file exists yet. Idempotent across
+ * restarts — a persisted identity is NEVER regenerated, since funds are
+ * tied to it.
+ */
+function loadOrCreatePersistedMnemonic(identityFilePath: string): string {
+  if (existsSync(identityFilePath)) {
+    const persisted = JSON.parse(readFileSync(identityFilePath, 'utf-8')) as {
+      mnemonic?: unknown;
+    };
+    if (
+      typeof persisted.mnemonic !== 'string' ||
+      persisted.mnemonic.length === 0
+    ) {
+      throw new Error(
+        `Identity file ${identityFilePath} does not contain a valid "mnemonic" string`
+      );
+    }
+    return persisted.mnemonic;
+  }
+  const mnemonic = generateMnemonic();
+  mkdirSync(dirname(identityFilePath), { recursive: true });
+  writeFileSync(identityFilePath, JSON.stringify({ mnemonic }, null, 2), {
+    encoding: 'utf-8',
+    mode: 0o600,
+  });
+  return mnemonic;
+}
+
+/**
+ * @internal — exported for unit testability (issue #126). Resolves the
+ * swap node's identity for boot:
+ *  1. Self-generates + persists a mnemonic (idempotent) when autogen is
+ *     enabled and no identity was otherwise provided.
+ *  2. Auto-derives the BIP-44 account-index-2 EVM key into
+ *     `settlementPrivateKey` whenever the resolved identity is a mnemonic
+ *     and `settlementPrivateKey` is unset/a placeholder — this is the same
+ *     key `buildSignerAddresses()` advertises via `settlementAddresses` and
+ *     signs leg-B v2 EIP-712 claims with, so this applies regardless of
+ *     whether the mnemonic came from step 1 or was operator-provided.
+ *  3. Logs the resolved index-0 Nostr pubkey + index-2 EVM settlement
+ *     address once (never the secret).
+ */
+export async function resolveIdentityConfig(
+  config: SwapNodeConfig,
+  raw: CliRawConfig
+): Promise<SwapNodeConfig> {
+  const out = { ...config };
+
+  if (
+    isAutogenEnabled(raw) &&
+    out.mnemonic === undefined &&
+    out.secretKey === undefined
+  ) {
+    out.mnemonic = loadOrCreatePersistedMnemonic(resolveIdentityFilePath(out));
+  }
+
+  if (out.mnemonic === undefined) {
+    return out;
+  }
+
+  const swapNodeKeys = await deriveSwapNodeKeys({
+    mnemonic: out.mnemonic,
+    chains: ['evm'],
+  });
+
+  if (
+    needsSettlementKeyDerivation(out.settlementPrivateKey) &&
+    swapNodeKeys.evm
+  ) {
+    out.settlementPrivateKey = `0x${Buffer.from(
+      swapNodeKeys.evm.privateKey
+    ).toString('hex')}`;
+  }
+
+  const identity = fromMnemonic(out.mnemonic);
+  console.log(
+    `[swap-node] identity pubkey (Nostr, index-0): ${identity.pubkey}`
+  );
+  if (swapNodeKeys.evm) {
+    console.log(
+      `[swap-node] settlement address (EVM, index-2): ${swapNodeKeys.evm.address}`
+    );
+  }
+
+  return out;
+}
+
 /**
  * Error thrown when `main()` is invoked with `--help`. Callers (tests) can
  * distinguish this from genuine failures; the top-level entrypoint catches
@@ -364,7 +518,8 @@ export async function main(argv: string[]): Promise<SwapNodeInstance> {
   const rawText = readFileSync(configPath, 'utf-8');
   const raw = JSON.parse(rawText) as CliRawConfig;
   const parsed = parseRawConfig(raw);
-  const config = applyEnvOverlay(parsed);
+  const overlaid = applyEnvOverlay(parsed);
+  const config = await resolveIdentityConfig(overlaid, raw);
 
   const instance = await startSwapNode(config);
 
