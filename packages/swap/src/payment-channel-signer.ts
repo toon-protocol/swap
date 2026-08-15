@@ -10,8 +10,10 @@ import { secp256k1 } from '@noble/curves/secp256k1.js';
 import { ed25519 } from '@noble/curves/ed25519.js';
 import { sha256 } from '@noble/hashes/sha2.js';
 
-// Story 12.6 AC-6: balance-proof hashes moved to @toon-protocol/sdk so the
-// swap-node-side signer and the sender-side verifier share a single source of truth.
+// Story 12.6 AC-6: the Solana/Mina balance-proof hashes moved to
+// @toon-protocol/sdk so the swap-node-side signer and the sender-side verifier
+// share a single source of truth. (The EVM digest now comes from the
+// settlement-digest leaf imported below — issue #101.)
 import {
   balanceProofHashSolana,
   balanceProofFieldsMina,

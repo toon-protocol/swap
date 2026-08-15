@@ -32,6 +32,7 @@ import {
   unwrapSwapPacketFromToon,
 } from '@toon-protocol/sdk';
 import type { BuildSettlementTxResult } from '@toon-protocol/sdk';
+import { verifyEvmClaimSignature } from '@toon-protocol/settlement-digest';
 import { generateSecretKey, getPublicKey } from 'nostr-tools/pure';
 import { nip44 } from 'nostr-tools';
 
@@ -636,12 +637,54 @@ describe('AC-8 [P0] streamSwap → buildSettlementTx schema round-trip (T-8A)', 
       // "Cross-repo dependencies"); this test's SHAPE/AC-8 contract (claims
       // need no adaptation to build a settlement tx) is unaffected. Real v2
       // signature validity is proven by the golden-vector conformance test
-      // and the domain-mismatch test in src/eip712-balance-proof.test.ts.
+      // and the domain-mismatch test in src/eip712-balance-proof.test.ts,
+      // plus the v2 check on this suite's OWN claims immediately below.
+      //
+      // That check is what `verifySignatures: false` would otherwise cost
+      // this suite: it verifies against the SAME domain the fixture node
+      // was configured with — chainId parsed from the chain key, and
+      // `chainProviders[].channelAddress` as the verifyingContract — so the
+      // config→signer-domain wiring is asserted end-to-end, not assumed.
+      const evmKeys = swapNode.swapNodeKeys.evm;
+      if (!evmKeys) throw new Error('fixture swap node derived no EVM key');
+      const winner = result.claims.at(-1);
+      if (!winner) throw new Error('streamSwap returned no claims');
+      const { channelId, cumulativeAmount, nonce, recipient } = winner;
+      if (
+        channelId === undefined ||
+        cumulativeAmount === undefined ||
+        nonce === undefined ||
+        recipient === undefined
+      ) {
+        throw new Error('winning claim is missing EVM settlement metadata');
+      }
+      const claimDomain = {
+        channelId,
+        cumulativeAmount,
+        nonce,
+        recipient,
+        chainId: ANVIL_CHAIN_ID,
+        verifyingContract: channelContractAddress,
+      };
+      expect(
+        verifyEvmClaimSignature(claimDomain, winner.claimBytes, evmKeys.address)
+          .valid,
+      ).toBe(true);
+      // ...and NOT under a different deployment's domain — the replay
+      // protection v2 exists to provide, asserted on a real issued claim.
+      expect(
+        verifyEvmClaimSignature(
+          { ...claimDomain, verifyingContract: '0x' + 'cc'.repeat(20) },
+          winner.claimBytes,
+          evmKeys.address,
+        ).valid,
+      ).toBe(false);
+
       const settlement: BuildSettlementTxResult = buildSettlementTx({
         claims: result.claims,
         signers: {
           [chain]: {
-            address: swapNode.swapNodeKeys.evm!.address.toLowerCase(),
+            address: evmKeys.address.toLowerCase(),
             contractAddress: channelContractAddress,
             chainId: ANVIL_CHAIN_ID,
           },
@@ -658,7 +701,7 @@ describe('AC-8 [P0] streamSwap → buildSettlementTx schema round-trip (T-8A)', 
       expect(bundle.unsignedTxBytes.length).toBeGreaterThan(0);
       expect(bundle.recipient).toBe(FIXTURE_EVM_RECIPIENT);
       expect(bundle.swapSignerAddress.toLowerCase()).toBe(
-        swapNode.swapNodeKeys.evm!.address.toLowerCase(),
+        evmKeys.address.toLowerCase(),
       );
       // Winner should be highest-nonce claim (all 10 merged into one bundle).
       expect(bundle.claimsMerged).toBe(10);

@@ -891,7 +891,7 @@ export function validateConfig(config: SwapNodeConfig): void {
         'INVALID_CONFIG',
         // parseEvmChainId's own message already quotes the chain key, so
         // naming it again here would just duplicate it.
-        `SwapNodeConfig: pair.to.chain ${err instanceof Error ? err.message : String(err)}`
+        `SwapNodeConfig: invalid pair.to.chain — ${err instanceof Error ? err.message : String(err)}`
       );
     }
     requireEvmChainProvider(config.chainProviders, chain);
