@@ -34,7 +34,7 @@ wiring (`scratchpad/t6/maker.mjs`):
 | `windowBudget` | no | Issue #49 per-chain in-flight window ceiling. |
 | `blsPort` | no | `/health` HTTP port. |
 | `btpServerPort` | no | **Required for the proven standalone-maker wiring** — no `connectorUrl`/`connector` set + this present = auto-created embedded `ConnectorNode` with no parent, self-routed. |
-| `statePath` | no | Durable state snapshot path (issue #46) — mount a volume here to persist inventory/watermarks/bindings across restarts. |
+| `statePath` | no | Durable state snapshot path (issue #46) — mount a volume here to persist inventory/watermarks/bindings across restarts. The image pre-creates `/app/state`, owned by the runtime `swap` user (uid `10001`), as the intended mount point — see "Runtime user & filesystem" below. |
 | `chainProviders` | yes for EVM settlement | Array of `{ chainType: "evm", chainId, rpcUrl, registryAddress, tokenAddress, channelAddress, keyId? }` (or the `solana`/`mina` variants — see `SwapNodeChainProvider` in `swap-node.ts`). `channelAddress` (the deployed `RollingSwapChannel`) is **required** for any EVM chain a `swapPair` targets — boot refuses otherwise. `keyId` defaults to `settlementPrivateKey` (or the identity secret key) when omitted. |
 | `settlementPrivateKey` | no | Hex EVM private key for the claim signer / `chainProviders[].keyId` default. In the proven wiring this is the **same BIP-44 account-index-2 key** used as the connector `keyId`. |
 | `ilpAddress` | no | Advertised ILP address + self-route prefix. Default `g.toon.swap.<pubkey16>`. |
@@ -75,6 +75,19 @@ env override), matching `ilpAddress`/`btpEndpoint`.
   maker.mjs wiring uses `3400`): BTP WebSocket server, `EXPOSE`/`-p` this to
   make the maker directly dialable.
 - `blsPort`: `/health` HTTP.
+
+## Runtime user & filesystem
+
+The container runs as a non-root `swap` user, uid/gid `10001`. Two paths are
+pre-created in the image and chowned to that uid so a bind mount or a fresh
+named volume mounted onto them isn't root-owned (Docker only propagates an
+image path's ownership into a *new* named volume when the path already
+exists in the image):
+
+- `/app/config` — read-only config file mount point (see above).
+- `/app/state` — `statePath` mount point. connector#983's compose mounts a
+  named `swap_node_state` volume here; without the pre-created/chowned
+  directory the maker's state snapshot write fails with `EACCES`.
 
 ## Not covered by this image
 
