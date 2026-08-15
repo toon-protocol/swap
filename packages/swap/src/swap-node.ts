@@ -63,6 +63,7 @@ import type { SettlementEvent } from './settlement-event.js';
 import { SwapInventory } from './inventory.js';
 import { SwapChannelState } from './channel-state.js';
 import type { ChannelEntry } from './channel-state.js';
+import { createEvmChannelOnChainReader } from './evm-channel-reader.js';
 import {
   EvmPaymentChannelSigner,
   MinaPaymentChannelSigner,
@@ -256,18 +257,6 @@ export interface SwapNodeConfig {
   swapPairs: readonly SwapPair[];
   chains: readonly SwapNodeChainKind[];
   channels: Record<string, readonly ChannelEntry[]>;
-  /**
-   * Issue #113 — opt-in idle-timeout (ms) after which the sender⇄channel
-   * sticky binding (see `channel-state.ts`) may reclaim a bound channel for
-   * a fresh sender, once no unbound channel remains for its `(asset, chain)`
-   * pool AND the bound channel has seen no `reserve()`/`release()` activity
-   * for at least this long. Unset (default) preserves the pre-#113
-   * "sticky forever" behavior — needed because a released client mints a
-   * FRESH ephemeral sender pubkey per swap request, which a permanently
-   * sticky binding treats as an unbindable new peer on every request after
-   * the first.
-   */
-  channelBindingIdleMs?: number;
   inventory: Record<string, bigint>;
   /**
    * Issue #49 — per-chain in-flight window ceiling for the ROLLING path
@@ -495,6 +484,14 @@ export interface SwapNodeConfig {
      * production ~24s window. NOT part of the public contract.
      */
     peerInfoPublishRetry?: { maxAttempts?: number; delayMs?: number };
+    /**
+     * @internal — issue #113 test hook. Called exactly once with the
+     * constructed `SwapChannelState`, immediately after it (and its
+     * `chainProviders`-derived `onChainReader`, if any) is built. Lets
+     * tests exercise the real wiring end-to-end without a full connector/
+     * BTP round-trip. NOT part of the public contract.
+     */
+    onChannelStateBuilt?: (channelState: SwapChannelState) => void;
   };
 }
 
@@ -845,18 +842,6 @@ export function validateConfig(config: SwapNodeConfig): void {
         "SwapNodeConfig.maxRateAge requires a rateProvider: the staleness bound applies to the age of the maker's own rate-feed ticks, so a static pair.rate gives the guard nothing to measure. Supply a rateProvider that returns { rate, at } timestamped quotes."
       );
     }
-  }
-
-  if (
-    config.channelBindingIdleMs !== undefined &&
-    (typeof config.channelBindingIdleMs !== 'number' ||
-      !Number.isFinite(config.channelBindingIdleMs) ||
-      config.channelBindingIdleMs <= 0)
-  ) {
-    throw new SwapNodeStartError(
-      'INVALID_CONFIG',
-      'SwapNodeConfig.channelBindingIdleMs MUST be a positive finite number'
-    );
   }
 
   if (config.rolling !== undefined) {
@@ -1244,17 +1229,27 @@ export async function startSwapNode(
       };
     }
   }
+  // Issue #113 — wire an on-chain reader whenever an EVM chainProviders
+  // entry is configured, so a bound-but-unavailable channel can be
+  // safety-checked for rebind (no separate opt-in knob: this is the
+  // rebind PRECONDITION, not a policy an operator should be able to
+  // disable — see `channel-state.ts`'s docblock).
+  const evmChannelReaderProviders = (config.chainProviders ?? []).filter(
+    (p): p is SwapNodeEvmChainProvider => p.chainType === 'evm'
+  );
+  const channelOnChainReader =
+    evmChannelReaderProviders.length > 0
+      ? createEvmChannelOnChainReader(evmChannelReaderProviders)
+      : undefined;
   const channelState = new SwapChannelState({
     channels: channelInit,
     logger: { warn: logger.warn },
     // Restored sticky bindings keep each sender pinned to the channel its
     // existing balance proofs were issued against (dangling ones dropped).
     ...(persistedState && { bindings: persistedState.bindings }),
-    // Issue #113 — opt-in idle-reclaim of a sticky binding.
-    ...(config.channelBindingIdleMs !== undefined && {
-      bindingIdleTtlMs: config.channelBindingIdleMs,
-    }),
+    ...(channelOnChainReader && { onChainReader: channelOnChainReader }),
   });
+  config.__testHooks?.onChannelStateBuilt?.(channelState);
 
   // 6b. Issue #46 — persister + persistent replay set.
   //

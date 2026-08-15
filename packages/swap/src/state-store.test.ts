@@ -363,12 +363,12 @@ describe('PersistentSeenPacketIds', () => {
 // ---------------------------------------------------------------------------
 
 describe('SwapStatePersister', () => {
-  it('[P0] persists live inventory + channel watermarks + bindings + replay set', () => {
+  it('[P0] persists live inventory + channel watermarks + bindings + replay set', async () => {
     const path = join(makeTmpDir(), 'state.json');
     const store = new JsonFileSwapStateStore(path);
     const { inventory, channelState, persister } = makeLiveSwapNode(store);
     // Drive some state: a reservation binds the sender and advances watermark.
-    channelState.reserve({
+    await channelState.reserve({
       assetCode: 'ETH',
       chain: 'evm:base:8453',
       senderPubkey: SENDER_PUBKEY,
@@ -451,7 +451,7 @@ describe('SwapStatePersister', () => {
 // ---------------------------------------------------------------------------
 
 describe('SwapChannelState binding rehydration', () => {
-  it('[P0] restored bindings keep a sender pinned to its pre-restart channel', () => {
+  it('[P0] restored bindings keep a sender pinned to its pre-restart channel', async () => {
     const channels = {
       'ETH:evm:base:8453:chan-a': {
         channelId: 'chan-a',
@@ -473,7 +473,7 @@ describe('SwapChannelState binding rehydration', () => {
         [`ETH:evm:base:8453:${SENDER_PUBKEY}`]: 'ETH:evm:base:8453:chan-b',
       },
     });
-    const r = restored.reserve({
+    const r = await restored.reserve({
       assetCode: 'ETH',
       chain: 'evm:base:8453',
       senderPubkey: SENDER_PUBKEY,
@@ -482,7 +482,7 @@ describe('SwapChannelState binding rehydration', () => {
     expect(r.channelId).toBe('chan-b');
     expect(r.nonce).toBe(1n);
     // A NEW sender cannot steal the restored-bound channel.
-    const r2 = restored.reserve({
+    const r2 = await restored.reserve({
       assetCode: 'ETH',
       chain: 'evm:base:8453',
       senderPubkey: OTHER_SENDER,
@@ -491,7 +491,7 @@ describe('SwapChannelState binding rehydration', () => {
     expect(r2.channelId).toBe('chan-a');
   });
 
-  it('[P2] dangling bindings (channel key absent) are dropped on rehydration', () => {
+  it('[P2] dangling bindings (channel key absent) are dropped on rehydration', async () => {
     const state = new SwapChannelState({
       channels: {
         'ETH:evm:base:8453:chan-a': {
@@ -506,7 +506,7 @@ describe('SwapChannelState binding rehydration', () => {
       },
     });
     // Sender re-binds to an available channel instead of failing forever.
-    const r = state.reserve({
+    const r = await state.reserve({
       assetCode: 'ETH',
       chain: 'evm:base:8453',
       senderPubkey: SENDER_PUBKEY,
@@ -515,7 +515,7 @@ describe('SwapChannelState binding rehydration', () => {
     expect(r.channelId).toBe('chan-a');
   });
 
-  it('[P1] snapshot() → constructor roundtrip reproduces watermarks + bindings', () => {
+  it('[P1] snapshot() → constructor roundtrip reproduces watermarks + bindings', async () => {
     const state = new SwapChannelState({
       channels: {
         'ETH:evm:base:8453:chan-a': {
@@ -526,7 +526,7 @@ describe('SwapChannelState binding rehydration', () => {
         },
       },
     });
-    state.reserve({
+    await state.reserve({
       assetCode: 'ETH',
       chain: 'evm:base:8453',
       senderPubkey: SENDER_PUBKEY,
@@ -538,7 +538,7 @@ describe('SwapChannelState binding rehydration', () => {
       bindings: snap.bindings,
     });
     expect(clone.snapshot()).toEqual(snap);
-    const r = clone.reserve({
+    const r = await clone.reserve({
       assetCode: 'ETH',
       chain: 'evm:base:8453',
       senderPubkey: SENDER_PUBKEY,

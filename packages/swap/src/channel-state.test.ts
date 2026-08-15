@@ -6,6 +6,7 @@
 import { describe, it, expect } from 'vitest';
 
 import { SwapChannelState } from './channel-state.js';
+import type { ChannelOnChainReader } from './channel-state.js';
 import { SwapWalletError } from './errors.js';
 
 const KEY = {
@@ -28,23 +29,26 @@ function makeProvisioned() {
 }
 
 describe('SwapChannelState — per-channel nonce + cumulativeAmount (Story 12.4 AC-7)', () => {
-  it('[P0] reserve increments nonce by 1 and adds cumulativeDelta atomically', () => {
+  it('[P0] reserve increments nonce by 1 and adds cumulativeDelta atomically', async () => {
     const cs = makeProvisioned();
 
-    const r1 = cs.reserve({ ...KEY, cumulativeDelta: 10n });
+    const r1 = await cs.reserve({ ...KEY, cumulativeDelta: 10n });
     expect(r1.channelId).toBe('0xchan');
     expect(r1.nonce).toBe(1n);
     expect(r1.cumulativeAmount).toBe(10n);
 
-    const r2 = cs.reserve({ ...KEY, cumulativeDelta: 5n });
+    const r2 = await cs.reserve({ ...KEY, cumulativeDelta: 5n });
     expect(r2.nonce).toBe(2n);
     expect(r2.cumulativeAmount).toBe(15n);
   });
 
-  it("[P0] reserve on missing channel throws SwapWalletError('UNSUPPORTED_CHAIN')", () => {
+  it("[P0] reserve on missing channel throws SwapWalletError('UNSUPPORTED_CHAIN')", async () => {
     const cs = new SwapChannelState({ channels: {} });
+    await expect(cs.reserve({ ...KEY, cumulativeDelta: 1n })).rejects.toBeInstanceOf(
+      SwapWalletError
+    );
     try {
-      cs.reserve({ ...KEY, cumulativeDelta: 1n });
+      await cs.reserve({ ...KEY, cumulativeDelta: 1n });
       throw new Error('expected throw');
     } catch (err) {
       expect(err).toBeInstanceOf(SwapWalletError);
@@ -52,9 +56,9 @@ describe('SwapChannelState — per-channel nonce + cumulativeAmount (Story 12.4 
     }
   });
 
-  it('[P1] release reverses the last reservation (nonce -1, cumulativeAmount -delta)', () => {
+  it('[P1] release reverses the last reservation (nonce -1, cumulativeAmount -delta)', async () => {
     const cs = makeProvisioned();
-    cs.reserve({ ...KEY, cumulativeDelta: 10n });
+    await cs.reserve({ ...KEY, cumulativeDelta: 10n });
     cs.release({ ...KEY, cumulativeDelta: 10n });
     const entry = cs.get(KEY);
     expect(entry!.nonce).toBe(0n);
@@ -90,9 +94,9 @@ describe('SwapChannelState — per-channel nonce + cumulativeAmount (Story 12.4 
     expect(cs.get(KEY)).toBeNull();
   });
 
-  it('[P2] get() returns a copy — mutating it does not affect internal state', () => {
+  it('[P2] get() returns a copy — mutating it does not affect internal state', async () => {
     const cs = makeProvisioned();
-    cs.reserve({ ...KEY, cumulativeDelta: 10n });
+    await cs.reserve({ ...KEY, cumulativeDelta: 10n });
     const snap = cs.get(KEY)!;
     snap.cumulativeAmount = 9999n;
     snap.nonce = 42n;
@@ -115,9 +119,9 @@ describe('SwapChannelState — per-channel nonce + cumulativeAmount (Story 12.4 
     expect(entry.cumulativeAmount).toBe(0n);
   });
 
-  it('[P1] release is a no-op when cumulativeDelta exceeds accumulated cumulativeAmount', () => {
+  it('[P1] release is a no-op when cumulativeDelta exceeds accumulated cumulativeAmount', async () => {
     const cs = makeProvisioned();
-    cs.reserve({ ...KEY, cumulativeDelta: 3n });
+    await cs.reserve({ ...KEY, cumulativeDelta: 3n });
     // Try to release a bigger delta than was reserved.
     cs.release({ ...KEY, cumulativeDelta: 100n });
     const entry = cs.get(KEY)!;
@@ -126,7 +130,7 @@ describe('SwapChannelState — per-channel nonce + cumulativeAmount (Story 12.4 
     expect(entry.nonce).toBe(1n);
   });
 
-  it('[P2] custom clock is used for updatedAt on reserve and release', () => {
+  it('[P2] custom clock is used for updatedAt on reserve and release', async () => {
     let now = 100;
     const cs = new SwapChannelState({
       channels: {
@@ -141,7 +145,7 @@ describe('SwapChannelState — per-channel nonce + cumulativeAmount (Story 12.4 
     });
 
     now = 500;
-    cs.reserve({ ...KEY, cumulativeDelta: 5n });
+    await cs.reserve({ ...KEY, cumulativeDelta: 5n });
     expect(cs.get(KEY)!.updatedAt).toBe(500);
 
     now = 900;
@@ -193,7 +197,7 @@ describe('SwapChannelState — per-channel nonce + cumulativeAmount (Story 12.4 
   // story's "Modified files" section for `channel-state.test.ts`.
   // -------------------------------------------------------------------------
 
-  it('[P1] releaseAll() resets every tracked channel to nonce=0 and cumulativeAmount=0', () => {
+  it('[P1] releaseAll() resets every tracked channel to nonce=0 and cumulativeAmount=0', async () => {
     const otherKey = {
       assetCode: 'USDC',
       chain: 'evm:8453',
@@ -217,9 +221,9 @@ describe('SwapChannelState — per-channel nonce + cumulativeAmount (Story 12.4 
     });
 
     // Build up non-zero state on both channels.
-    cs.reserve({ ...KEY, cumulativeDelta: 10n });
-    cs.reserve({ ...KEY, cumulativeDelta: 5n });
-    cs.reserve({ ...otherKey, cumulativeDelta: 99n });
+    await cs.reserve({ ...KEY, cumulativeDelta: 10n });
+    await cs.reserve({ ...KEY, cumulativeDelta: 5n });
+    await cs.reserve({ ...otherKey, cumulativeDelta: 99n });
 
     cs.releaseAll();
 
@@ -231,9 +235,9 @@ describe('SwapChannelState — per-channel nonce + cumulativeAmount (Story 12.4 
     expect(e2.cumulativeAmount).toBe(0n);
   });
 
-  it('[P2] releaseAll() preserves channelId on reset entries', () => {
+  it('[P2] releaseAll() preserves channelId on reset entries', async () => {
     const cs = makeProvisioned();
-    cs.reserve({ ...KEY, cumulativeDelta: 42n });
+    await cs.reserve({ ...KEY, cumulativeDelta: 42n });
     cs.releaseAll();
     expect(cs.get(KEY)!.channelId).toBe('0xchan');
   });
@@ -243,9 +247,9 @@ describe('SwapChannelState — per-channel nonce + cumulativeAmount (Story 12.4 
     expect(() => cs.releaseAll()).not.toThrow();
   });
 
-  it('[P2] releaseAll() is idempotent — calling twice leaves zeroed state', () => {
+  it('[P2] releaseAll() is idempotent — calling twice leaves zeroed state', async () => {
     const cs = makeProvisioned();
-    cs.reserve({ ...KEY, cumulativeDelta: 7n });
+    await cs.reserve({ ...KEY, cumulativeDelta: 7n });
     cs.releaseAll();
     cs.releaseAll();
     const e = cs.get(KEY)!;
@@ -253,7 +257,7 @@ describe('SwapChannelState — per-channel nonce + cumulativeAmount (Story 12.4 
     expect(e.cumulativeAmount).toBe(0n);
   });
 
-  it('[P2] releaseAll() stamps updatedAt from the injected clock', () => {
+  it('[P2] releaseAll() stamps updatedAt from the injected clock', async () => {
     let now = 100;
     const cs = new SwapChannelState({
       channels: {
@@ -267,7 +271,7 @@ describe('SwapChannelState — per-channel nonce + cumulativeAmount (Story 12.4 
       clock: () => now,
     });
     now = 500;
-    cs.reserve({ ...KEY, cumulativeDelta: 5n });
+    await cs.reserve({ ...KEY, cumulativeDelta: 5n });
     now = 7777;
     cs.releaseAll();
     expect(cs.get(KEY)!.updatedAt).toBe(7777);
@@ -302,15 +306,15 @@ describe('Story 12.8 AC-12 — sender→channel sticky binding', () => {
     });
   }
 
-  it('[P0] two senders bind to distinct channels (first-available policy)', () => {
+  it('[P0] two senders bind to distinct channels (first-available policy)', async () => {
     const cs = makeTwoChannelPool();
-    const rA = cs.reserve({
+    const rA = await cs.reserve({
       assetCode: 'ETH',
       chain: 'evm:31337',
       senderPubkey: SENDER_A,
       cumulativeDelta: 10n,
     });
-    const rB = cs.reserve({
+    const rB = await cs.reserve({
       assetCode: 'ETH',
       chain: 'evm:31337',
       senderPubkey: SENDER_B,
@@ -319,21 +323,21 @@ describe('Story 12.8 AC-12 — sender→channel sticky binding', () => {
     expect(rA.channelId).not.toBe(rB.channelId);
   });
 
-  it('[P0] same sender repeated reserves stay bound to the same channel', () => {
+  it('[P0] same sender repeated reserves stay bound to the same channel', async () => {
     const cs = makeTwoChannelPool();
-    const r1 = cs.reserve({
+    const r1 = await cs.reserve({
       assetCode: 'ETH',
       chain: 'evm:31337',
       senderPubkey: SENDER_A,
       cumulativeDelta: 1n,
     });
-    const r2 = cs.reserve({
+    const r2 = await cs.reserve({
       assetCode: 'ETH',
       chain: 'evm:31337',
       senderPubkey: SENDER_A,
       cumulativeDelta: 2n,
     });
-    const r3 = cs.reserve({
+    const r3 = await cs.reserve({
       assetCode: 'ETH',
       chain: 'evm:31337',
       senderPubkey: SENDER_A,
@@ -345,15 +349,15 @@ describe('Story 12.8 AC-12 — sender→channel sticky binding', () => {
     expect(r3.cumulativeAmount).toBe(6n);
   });
 
-  it('[P1] getBindings() snapshot reflects both sticky assignments after AC-7-style flow', () => {
+  it('[P1] getBindings() snapshot reflects both sticky assignments after AC-7-style flow', async () => {
     const cs = makeTwoChannelPool();
-    cs.reserve({
+    await cs.reserve({
       assetCode: 'ETH',
       chain: 'evm:31337',
       senderPubkey: SENDER_A,
       cumulativeDelta: 1n,
     });
-    cs.reserve({
+    await cs.reserve({
       assetCode: 'ETH',
       chain: 'evm:31337',
       senderPubkey: SENDER_B,
@@ -369,9 +373,9 @@ describe('Story 12.8 AC-12 — sender→channel sticky binding', () => {
     expect(Object.keys(cs.getBindings())).toHaveLength(2);
   });
 
-  it('[P1] releaseAll() clears sticky bindings (shutdown-scoped)', () => {
+  it('[P1] releaseAll() clears sticky bindings (shutdown-scoped)', async () => {
     const cs = makeTwoChannelPool();
-    cs.reserve({
+    await cs.reserve({
       assetCode: 'ETH',
       chain: 'evm:31337',
       senderPubkey: SENDER_A,
@@ -382,60 +386,73 @@ describe('Story 12.8 AC-12 — sender→channel sticky binding', () => {
     expect(Object.keys(cs.getBindings())).toHaveLength(0);
   });
 
-  it('[P1] third sender with only two provisioned channels → throws UNSUPPORTED_CHAIN', () => {
+  it('[P1] third sender with only two provisioned channels → throws UNSUPPORTED_CHAIN', async () => {
     const cs = makeTwoChannelPool();
-    cs.reserve({
+    await cs.reserve({
       assetCode: 'ETH',
       chain: 'evm:31337',
       senderPubkey: SENDER_A,
       cumulativeDelta: 1n,
     });
-    cs.reserve({
+    await cs.reserve({
       assetCode: 'ETH',
       chain: 'evm:31337',
       senderPubkey: SENDER_B,
       cumulativeDelta: 1n,
     });
     const SENDER_C = 'c'.repeat(64);
-    expect(() =>
+    await expect(
       cs.reserve({
         assetCode: 'ETH',
         chain: 'evm:31337',
         senderPubkey: SENDER_C,
         cumulativeDelta: 1n,
       })
-    ).toThrow(SwapWalletError);
+    ).rejects.toThrow(SwapWalletError);
   });
 });
 
 // ---------------------------------------------------------------------------
-// Issue #113 — idle-based sticky-binding reclaim
+// Issue #113 — on-chain-safety-checked sticky-binding rebind
 // ---------------------------------------------------------------------------
 //
 // A released client daemon mints a FRESH ephemeral sender pubkey per
 // `POST /swap` — every request looks like a brand-new sender to the
 // AC-12 "first UNBOUND channel" policy above. With only one channel
 // provisioned (the common single-channel deployment), the second request's
-// sender can never bind, and `reserve()` throws UNSUPPORTED_CHAIN forever
-// (persisted bindings survive a restart too — only deleting the state file
-// "fixes" it). `bindingIdleTtlMs` lets an operator opt into reclaiming a
-// bound channel from whichever sender has been idle the longest, but ONLY
-// once no unbound channel exists AND the oldest binding has actually gone
-// idle — so an active multi-sender AC-12 deployment is unaffected.
-describe('Issue #113 — idle-based sticky-binding reclaim', () => {
+// sender could never bind, and `reserve()` threw UNSUPPORTED_CHAIN forever.
+//
+// The FIRST fix attempt (an idle-timeout reclaim) was rejected on review:
+// `RollingSwapChannel`'s `cumulativePaid`/`nonce` are per-CHANNEL, so
+// stealing a channel from an idle-but-unredeemed sender lets the new
+// sender's redeem sweep the old sender's unclaimed delta and StaleNonce-void
+// the old claim — idleness does not imply redemption. The safety condition
+// is on-chain: a bound channel may be rebound only when the chain's live
+// `cumulativePaid` is >= this state's own off-chain `cumulativeAmount`
+// watermark for it (i.e. every issued claim has already been redeemed or
+// superseded).
+describe('Issue #113 — on-chain-safety-checked sticky-binding rebind', () => {
   const SENDER_A = 'a'.repeat(64);
   const SENDER_B = 'b'.repeat(64);
+  const SENDER_C = 'c'.repeat(64);
 
-  it.each([[0], [-1], [Number.NaN], [Infinity]])(
-    '[P2] constructor rejects a non-positive-finite bindingIdleTtlMs (%j)',
-    (bad) => {
-      expect(
-        () => new SwapChannelState({ channels: {}, bindingIdleTtlMs: bad })
-      ).toThrow();
-    }
-  );
+  /** A reader whose answers are supplied per-channelId by the test. */
+  function makeReader(
+    answers: Record<string, bigint | Error>
+  ): ChannelOnChainReader {
+    return {
+      async getCumulativePaid({ channelId }) {
+        const answer = answers[channelId];
+        if (answer === undefined) {
+          throw new Error(`no canned answer for ${channelId}`);
+        }
+        if (answer instanceof Error) throw answer;
+        return answer;
+      },
+    };
+  }
 
-  function makeOneChannelPool(bindingIdleTtlMs: number, clock: () => number) {
+  function makeOneChannelPool(onChainReader?: ChannelOnChainReader) {
     return new SwapChannelState({
       channels: {
         'ETH:evm:31337:0xchan-1': {
@@ -445,24 +462,21 @@ describe('Issue #113 — idle-based sticky-binding reclaim', () => {
           updatedAt: 0,
         },
       },
-      bindingIdleTtlMs,
-      clock,
+      ...(onChainReader && { onChainReader }),
     });
   }
 
-  it('[P0] a fresh sender reclaims the sole channel once the prior binding has been idle past bindingIdleTtlMs', () => {
-    let now = 0;
-    const cs = makeOneChannelPool(1000, () => now);
+  it('[P0] a fresh sender rebinds the sole channel once its prior claim is fully redeemed on-chain', async () => {
+    const cs = makeOneChannelPool(makeReader({ '0xchan-1': 1n }));
 
-    const r1 = cs.reserve({
+    const r1 = await cs.reserve({
       assetCode: 'ETH',
       chain: 'evm:31337',
       senderPubkey: SENDER_A,
       cumulativeDelta: 1n,
     });
 
-    now = 1000; // exactly at the idle threshold
-    const r2 = cs.reserve({
+    const r2 = await cs.reserve({
       assetCode: 'ETH',
       chain: 'evm:31337',
       senderPubkey: SENDER_B,
@@ -471,9 +485,8 @@ describe('Issue #113 — idle-based sticky-binding reclaim', () => {
 
     expect(r2.channelId).toBe(r1.channelId);
     // The channel's running nonce/cumulativeAmount watermark is NOT reset on
-    // reclaim — it is a single on-chain channel's monotonic ledger, and the
-    // balance-proof `recipient` (not the sticky-binding sender) determines
-    // who a claim pays.
+    // rebind — it is a single on-chain channel's monotonic ledger, and the
+    // rebind precondition guarantees no unredeemed value belongs to A.
     expect(r2.nonce).toBe(2n);
     expect(r2.cumulativeAmount).toBe(3n);
 
@@ -484,60 +497,110 @@ describe('Issue #113 — idle-based sticky-binding reclaim', () => {
     );
   });
 
-  it("[P0] a fresh sender does NOT reclaim the channel before bindingIdleTtlMs has elapsed (an active sender's binding is never stolen)", () => {
-    let now = 0;
-    const cs = makeOneChannelPool(1000, () => now);
+  it('[P0] REGRESSION (PR #119 finding #1): an unredeemed claim refuses the rebind — A does not lose funds to B', async () => {
+    // A holds an unredeemed (cumulativeAmount=1) claim; on-chain shows 0
+    // paid out so far (A has not yet, or only partially, redeemed).
+    const cs = makeOneChannelPool(makeReader({ '0xchan-1': 0n }));
 
-    cs.reserve({
+    await cs.reserve({
       assetCode: 'ETH',
       chain: 'evm:31337',
       senderPubkey: SENDER_A,
       cumulativeDelta: 1n,
     });
 
-    now = 999; // one ms short of the idle threshold
-    expect(() =>
+    await expect(
       cs.reserve({
         assetCode: 'ETH',
         chain: 'evm:31337',
         senderPubkey: SENDER_B,
         cumulativeDelta: 1n,
       })
-    ).toThrow(SwapWalletError);
+    ).rejects.toThrow(SwapWalletError);
+
+    // A's binding — and its unredeemed watermark — is untouched.
+    const bindings = cs.getBindings();
+    expect(bindings['ETH:evm:31337:' + SENDER_A]).toBe(
+      'ETH:evm:31337:0xchan-1'
+    );
+    expect(bindings['ETH:evm:31337:' + SENDER_B]).toBeUndefined();
   });
 
-  it('[P1] without bindingIdleTtlMs configured, behavior is unchanged (throws regardless of elapsed time)', () => {
-    let now = 0;
-    const cs = new SwapChannelState({
-      channels: {
-        'ETH:evm:31337:0xchan-1': {
-          channelId: '0xchan-1',
-          cumulativeAmount: 0n,
-          nonce: 0n,
-          updatedAt: 0,
-        },
-      },
-      clock: () => now,
+  it('[P0] a partially-redeemed claim (on-chain < off-chain watermark) also refuses the rebind', async () => {
+    const cs = makeOneChannelPool(makeReader({ '0xchan-1': 6n }));
+    await cs.reserve({
+      assetCode: 'ETH',
+      chain: 'evm:31337',
+      senderPubkey: SENDER_A,
+      cumulativeDelta: 10n, // off-chain watermark now 10n; on-chain only 6n paid
     });
-    cs.reserve({
+    await expect(
+      cs.reserve({
+        assetCode: 'ETH',
+        chain: 'evm:31337',
+        senderPubkey: SENDER_B,
+        cumulativeDelta: 1n,
+      })
+    ).rejects.toThrow(SwapWalletError);
+  });
+
+  it('[P1] the UNSUPPORTED_CHAIN error names the channel and its unredeemed delta', async () => {
+    const cs = makeOneChannelPool(makeReader({ '0xchan-1': 4n }));
+    await cs.reserve({
+      assetCode: 'ETH',
+      chain: 'evm:31337',
+      senderPubkey: SENDER_A,
+      cumulativeDelta: 10n,
+    });
+    await expect(
+      cs.reserve({
+        assetCode: 'ETH',
+        chain: 'evm:31337',
+        senderPubkey: SENDER_B,
+        cumulativeDelta: 1n,
+      })
+    ).rejects.toThrow(/0xchan-1.*6 unredeemed/);
+  });
+
+  it('[P1] without an onChainReader configured, behavior is unchanged (always throws — the pre-#113 default)', async () => {
+    const cs = makeOneChannelPool();
+    await cs.reserve({
       assetCode: 'ETH',
       chain: 'evm:31337',
       senderPubkey: SENDER_A,
       cumulativeDelta: 1n,
     });
-    now = 1_000_000_000;
-    expect(() =>
+    await expect(
       cs.reserve({
         assetCode: 'ETH',
         chain: 'evm:31337',
         senderPubkey: SENDER_B,
         cumulativeDelta: 1n,
       })
-    ).toThrow(SwapWalletError);
+    ).rejects.toThrow(SwapWalletError);
   });
 
-  it('[P1] reclaim picks the LEAST-recently-active bound channel among multiple idle candidates', () => {
-    let now = 0;
+  it('[P1] an on-chain read failure fails closed for that candidate (no rebind, actionable error)', async () => {
+    const cs = makeOneChannelPool(
+      makeReader({ '0xchan-1': new Error('rpc timeout') })
+    );
+    await cs.reserve({
+      assetCode: 'ETH',
+      chain: 'evm:31337',
+      senderPubkey: SENDER_A,
+      cumulativeDelta: 1n,
+    });
+    await expect(
+      cs.reserve({
+        assetCode: 'ETH',
+        chain: 'evm:31337',
+        senderPubkey: SENDER_B,
+        cumulativeDelta: 1n,
+      })
+    ).rejects.toThrow(/on-chain read failed/);
+  });
+
+  it('[P1] among two bound candidates, only the fully-redeemed one is rebound', async () => {
     const cs = new SwapChannelState({
       channels: {
         'ETH:evm:31337:0xchan-1': {
@@ -553,41 +616,78 @@ describe('Issue #113 — idle-based sticky-binding reclaim', () => {
           updatedAt: 0,
         },
       },
-      bindingIdleTtlMs: 1000,
-      clock: () => now,
+      onChainReader: makeReader({
+        '0xchan-1': 0n, // A: unredeemed — unsafe
+        '0xchan-2': 5n, // B: fully redeemed — safe
+      }),
     });
 
-    // SENDER_A binds first (at t=0); SENDER_B binds second (at t=500).
-    const rA = cs.reserve({
+    const rA = await cs.reserve({
       assetCode: 'ETH',
       chain: 'evm:31337',
       senderPubkey: SENDER_A,
       cumulativeDelta: 1n,
     });
-    now = 500;
-    cs.reserve({
+    const rB = await cs.reserve({
       assetCode: 'ETH',
       chain: 'evm:31337',
       senderPubkey: SENDER_B,
-      cumulativeDelta: 1n,
+      cumulativeDelta: 5n,
     });
+    expect(rA.channelId).not.toBe(rB.channelId);
 
-    // At t=1500 both are idle-eligible (>=1000ms since their last activity),
-    // but SENDER_A has been idle longest — it should be reclaimed first.
-    now = 1500;
-    const SENDER_C = 'c'.repeat(64);
-    const rC = cs.reserve({
+    const rC = await cs.reserve({
       assetCode: 'ETH',
       chain: 'evm:31337',
       senderPubkey: SENDER_C,
       cumulativeDelta: 1n,
     });
-    expect(rC.channelId).toBe(rA.channelId);
-
+    // Only chan-2 (B's, fully redeemed) is safe to steal.
+    expect(rC.channelId).toBe(rB.channelId);
     const bindings = cs.getBindings();
-    expect(bindings['ETH:evm:31337:' + SENDER_A]).toBeUndefined();
-    expect(bindings['ETH:evm:31337:' + SENDER_B]).toBe(
+    expect(bindings['ETH:evm:31337:' + SENDER_A]).toBe(
+      'ETH:evm:31337:0xchan-1'
+    );
+    expect(bindings['ETH:evm:31337:' + SENDER_B]).toBeUndefined();
+    expect(bindings['ETH:evm:31337:' + SENDER_C]).toBe(
       'ETH:evm:31337:0xchan-2'
     );
+  });
+
+  it('[P1] the RPC read is never cached — a stale-favorable answer on retry is honored (fresh read every attempt)', async () => {
+    let call = 0;
+    const cs = makeOneChannelPool({
+      async getCumulativePaid() {
+        call += 1;
+        // First read (during A's later reserve, if any) says unredeemed;
+        // this test only checks that each reserve() triggers its own read.
+        return call === 1 ? 0n : 5n;
+      },
+    });
+    await cs.reserve({
+      assetCode: 'ETH',
+      chain: 'evm:31337',
+      senderPubkey: SENDER_A,
+      cumulativeDelta: 5n,
+    });
+    // First rebind attempt reads 0n (unsafe) → refused.
+    await expect(
+      cs.reserve({
+        assetCode: 'ETH',
+        chain: 'evm:31337',
+        senderPubkey: SENDER_B,
+        cumulativeDelta: 1n,
+      })
+    ).rejects.toThrow(SwapWalletError);
+    expect(call).toBe(1);
+    // Second attempt re-reads fresh (now 5n, safe) → succeeds.
+    const r = await cs.reserve({
+      assetCode: 'ETH',
+      chain: 'evm:31337',
+      senderPubkey: SENDER_B,
+      cumulativeDelta: 1n,
+    });
+    expect(call).toBe(2);
+    expect(r.channelId).toBe('0xchan-1');
   });
 });

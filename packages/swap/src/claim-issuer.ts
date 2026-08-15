@@ -298,10 +298,15 @@ export class MultiChainClaimIssuer implements ClaimIssuer {
     //    legacy = permanent debit; rolling = in-flight window reservation.
     const hold = acquireHold();
 
-    // 3. Reserve channel state SYNCHRONOUSLY. On failure, reverse the hold.
+    // 3. Reserve channel state. The common paths (existing sticky binding;
+    //    first-use bind to an unbound channel) resolve synchronously with
+    //    no await, same as before issue #113 — only the fallback path (no
+    //    unbound channel left, so a bound channel must clear an on-chain
+    //    redemption check before it can be rebound) actually awaits an RPC
+    //    read. On failure, reverse the hold.
     let reservation: Reservation;
     try {
-      reservation = this.channelState.reserve({
+      reservation = await this.channelState.reserve({
         assetCode: targetAsset,
         chain: targetChain,
         senderPubkey,

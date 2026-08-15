@@ -26,16 +26,31 @@
  * looks like a brand-new sender; with the (common) single-channel
  * deployment, the second request can never bind and `reserve()` throws
  * UNSUPPORTED_CHAIN forever (the binding is persisted — issue #46 — so not
- * even a restart clears it). `bindingIdleTtlMs` (opt-in, unset by default —
- * existing deployments are unaffected) lets an operator declare a binding
- * "closed" after it has seen no `reserve()`/`release()` activity for that
- * long: once no UNBOUND channel exists for the pool, `resolveChannel`
- * reclaims the LEAST-recently-active bound channel that has crossed the
- * idle threshold instead of throwing. The channel's nonce/cumulativeAmount
- * watermark is untouched by a reclaim — it is one on-chain channel's
- * monotonic ledger, and the balance-proof `recipient` (not the sticky
- * binding) decides who a claim actually pays. An actively-used binding
- * (idle time under the threshold) is never stolen.
+ * even a restart clears it).
+ *
+ * The FIRST attempt at a fix (idle-timeout reclaim, since replaced) was
+ * rejected on review: rolling claims are redeem-later by design, and
+ * `RollingSwapChannel`'s `cumulativePaid`/`nonce` are per-CHANNEL, not
+ * per-recipient — stealing a channel from an idle-but-unredeemed sender
+ * lets the new sender's redeem sweep the old sender's unclaimed delta and
+ * `StaleNonce`-void the old claim. Idleness does not imply redemption.
+ *
+ * The safety condition is on-chain, not temporal: an optional
+ * {@link ChannelOnChainReader} (constructor `onChainReader`, wired by
+ * `startSwapNode()` from `SwapNodeConfig.chainProviders` — no config knob,
+ * on whenever an EVM chain provider is configured) lets `reserve()` rebind
+ * a bound-but-unavailable channel to a fresh sender ONLY when the chain's
+ * live `cumulativePaid` for that channel is `>=` the off-chain
+ * `cumulativeAmount` watermark this state holds — i.e. every claim issued
+ * against it so far has already been redeemed or superseded on-chain, so
+ * nothing of value is stranded. On rebind the nonce/cumulativeAmount
+ * watermark is left exactly as-is (never reset): it is one on-chain
+ * channel's monotonic ledger, and the rebind precondition guarantees that
+ * ledger carries no unredeemed value belonging to the previous sender — the
+ * next claim's delta over that baseline pays only the new recipient. When
+ * no bound channel satisfies the precondition (or no reader is configured
+ * for the chain), `reserve()` fails closed with an actionable error naming
+ * the candidate channel(s) and why each was refused.
  *
  * State is held in memory for microtask-atomic `reserve`/`release`;
  * durability is provided by `SwapStatePersister` (`state-store.ts`, issue
@@ -58,6 +73,25 @@ export interface ReleaseLogger {
   warn?: (...a: unknown[]) => void;
 }
 
+/**
+ * Issue #113 — read-only accessor for a channel's LIVE on-chain settled
+ * watermark, used ONLY to decide whether a bound-but-inactive channel is
+ * safe to rebind to a new sender (see the class docblock). Implementations
+ * MUST read the chain fresh on every call — a cached/stale answer that
+ * understates the on-chain watermark is safe (fails closed, refuses a
+ * rebind that was actually fine), but a cached answer that OVERSTATES it
+ * could approve a rebind that stripped an unredeemed claim from its
+ * rightful recipient, which is exactly the bug this interface exists to
+ * prevent.
+ */
+export interface ChannelOnChainReader {
+  getCumulativePaid(params: {
+    assetCode: string;
+    chain: string;
+    channelId: string;
+  }): Promise<bigint>;
+}
+
 export interface SwapChannelStateInit {
   channels: Record<string, ChannelEntry>;
   clock?: () => number;
@@ -73,14 +107,13 @@ export interface SwapChannelStateInit {
    */
   bindings?: Record<string, string>;
   /**
-   * Issue #113 — opt-in idle-timeout (ms) for reclaiming a sticky binding.
-   * Unset (default) preserves the pre-#113 "sticky forever" behavior byte
-   * for byte. When set, `resolveChannel`'s first-use fallback may steal the
-   * least-recently-active bound channel for a fresh sender once no unbound
-   * channel remains AND that binding has been idle at least this long —
-   * see the class docblock.
+   * Issue #113 — optional on-chain reader enabling safety-checked rebind of
+   * a bound-but-unavailable channel once no unbound channel remains for a
+   * fresh sender's `(asset, chain)` pool. Absent (default) preserves the
+   * pre-#113 "sticky forever" behavior — `reserve()` fails closed exactly
+   * as before. See the class docblock for the safety condition.
    */
-  bindingIdleTtlMs?: number;
+  onChainReader?: ChannelOnChainReader;
 }
 
 export interface ReserveParams {
@@ -104,6 +137,11 @@ function bindingKey(p: {
   return `${p.assetCode}:${p.chain}:${p.senderPubkey}`;
 }
 
+/** Result of a rebind attempt — see {@link SwapChannelState.reclaimUnredeemedSafeChannel}. */
+type ReclaimResult =
+  | { entry: ChannelEntry; refusals: never[] }
+  | { entry: null; refusals: string[] };
+
 export class SwapChannelState {
   /** channelKey() → ChannelEntry */
   private readonly channels = new Map<string, ChannelEntry>();
@@ -119,23 +157,21 @@ export class SwapChannelState {
   private readonly senderBinding = new Map<string, string>();
   /** Set of channels currently bound to a sender (tracked by stored map-key). */
   private readonly boundChannels = new Set<string>();
+  /**
+   * Issue #113 — stored keys currently mid-flight through an on-chain
+   * rebind check. Guards two concurrent `reserve()` calls (distinct
+   * senders racing the same idle pool) from both reading the same
+   * candidate as safe and double-assigning it.
+   */
+  private readonly reclaiming = new Set<string>();
   private readonly clock: () => number;
   private readonly logger?: ReleaseLogger;
-  /** Issue #113 — opt-in idle-timeout (ms) for reclaiming a sticky binding. Unset = disabled. */
-  private readonly bindingIdleTtlMs?: number;
+  private readonly onChainReader?: ChannelOnChainReader;
 
   constructor(init?: SwapChannelStateInit) {
     this.clock = init?.clock ?? Date.now;
     this.logger = init?.logger;
-    if (
-      init?.bindingIdleTtlMs !== undefined &&
-      (!Number.isFinite(init.bindingIdleTtlMs) || init.bindingIdleTtlMs <= 0)
-    ) {
-      throw new Error(
-        'SwapChannelState bindingIdleTtlMs must be a positive number'
-      );
-    }
-    this.bindingIdleTtlMs = init?.bindingIdleTtlMs;
+    this.onChainReader = init?.onChainReader;
     if (init) {
       for (const [k, v] of Object.entries(init.channels)) {
         this.channels.set(k, { ...v });
@@ -177,11 +213,10 @@ export class SwapChannelState {
   }
 
   /**
-   * Resolve the channel for a given sender, establishing a sticky binding
-   * on first use. Returns `null` if no unbound channel is available for
-   * this `(asset, chain)` AND (issue #113) no bound channel qualifies for
-   * idle reclaim. First-use selection is "first unbound channel" — NOT
-   * capacity-aware (see the class docblock, issue #49).
+   * Resolve the channel for a given sender using ONLY synchronous state: an
+   * existing sticky binding, or the first UNBOUND channel in the `(asset,
+   * chain)` pool. Returns `null` when neither applies — `reserve()` then
+   * falls back to the async on-chain-checked rebind (issue #113).
    *
    * @internal — exposed for AC-12 test introspection via the swap node.
    */
@@ -211,59 +246,117 @@ export class SwapChannelState {
       this.boundChannels.add(storedKey);
       return entry;
     }
-    // Issue #113 — no unbound channel left; fall back to idle reclaim (a
-    // no-op unless the operator opted into `bindingIdleTtlMs`).
-    return this.reclaimIdleBinding(prefix, bk);
+    return null;
   }
 
   /**
-   * Issue #113 — rebind the LEAST-recently-active bound channel in the
-   * `${assetCode}:${chain}:` pool named by `prefix` to the sender keyed by
-   * `bk`, provided it has actually gone idle for `bindingIdleTtlMs`.
+   * Issue #113 — attempt to rebind a bound-but-unavailable channel in the
+   * `${assetCode}:${chain}:` pool to `senderPubkey`, when no unbound
+   * channel exists. A candidate is safe to rebind only when its LIVE
+   * on-chain `cumulativePaid` (read fresh via `onChainReader`, never
+   * cached) is `>=` this state's own off-chain `cumulativeAmount`
+   * watermark for it — i.e. every claim issued against it has already been
+   * redeemed or superseded, so no value is stranded. Candidates are tried
+   * in map-iteration order; the first safe one wins. Unsafe/unreadable
+   * candidates are recorded in `refusals` so `reserve()` can surface an
+   * actionable error.
    *
-   * Returns `null` — leaving the pool untouched — when `bindingIdleTtlMs`
-   * is unset (opt-in; the pre-#113 "sticky forever" default) or when no
-   * bound channel has been idle that long. That second guard is what keeps
-   * a genuinely active multi-sender pool (AC-12) intact: every bound
-   * channel's `updatedAt` stays fresh as long as its sender keeps
-   * reserving/releasing.
+   * The nonce/cumulativeAmount watermark is NOT reset on a successful
+   * rebind — see the class docblock for why that is safe.
    */
-  private reclaimIdleBinding(prefix: string, bk: string): ChannelEntry | null {
-    if (this.bindingIdleTtlMs === undefined) return null;
-    const now = this.clock();
-    let oldest: { storedKey: string; entry: ChannelEntry } | undefined;
+  private async reclaimUnredeemedSafeChannel(p: {
+    assetCode: string;
+    chain: string;
+    senderPubkey: string;
+  }): Promise<ReclaimResult> {
+    if (!this.onChainReader) return { entry: null, refusals: [] };
+    const prefix = `${p.assetCode}:${p.chain}:`;
+    const bk = bindingKey(p);
+    const candidates: { storedKey: string; entry: ChannelEntry }[] = [];
     for (const [storedKey, entry] of this.channels) {
       if (!storedKey.startsWith(prefix)) continue;
       if (!this.boundChannels.has(storedKey)) continue;
-      if (now - entry.updatedAt < this.bindingIdleTtlMs) continue;
-      if (!oldest || entry.updatedAt < oldest.entry.updatedAt) {
-        oldest = { storedKey, entry };
-      }
+      if (this.reclaiming.has(storedKey)) continue;
+      candidates.push({ storedKey, entry });
     }
-    if (!oldest) return null;
-    for (const [idleBk, storedKey] of this.senderBinding) {
-      if (storedKey === oldest.storedKey) {
-        this.senderBinding.delete(idleBk);
+    if (candidates.length === 0) return { entry: null, refusals: [] };
+    for (const c of candidates) this.reclaiming.add(c.storedKey);
+    try {
+      const refusals: string[] = [];
+      for (const { storedKey, entry } of candidates) {
+        let onChainCumulativePaid: bigint;
+        try {
+          onChainCumulativePaid = await this.onChainReader.getCumulativePaid({
+            assetCode: p.assetCode,
+            chain: p.chain,
+            channelId: entry.channelId,
+          });
+        } catch (err) {
+          const detail = err instanceof Error ? err.message : String(err);
+          this.logger?.warn?.('swap.channelState.reclaim.read_failed', {
+            channelId: entry.channelId,
+            chain: p.chain,
+            err,
+          });
+          refusals.push(
+            `${entry.channelId}: on-chain read failed (${detail})`
+          );
+          continue; // fail closed for this candidate; try the next
+        }
+        // The off-chain watermark (or the binding itself) may have moved
+        // while this read was in flight — re-check LIVE state, not the
+        // pre-await snapshot, before trusting the read.
+        const current = this.channels.get(storedKey);
+        if (!current || !this.boundChannels.has(storedKey)) continue;
+        if (onChainCumulativePaid < current.cumulativeAmount) {
+          refusals.push(
+            `${entry.channelId}: ${(
+              current.cumulativeAmount - onChainCumulativePaid
+            ).toString()} unredeemed`
+          );
+          continue;
+        }
+        this.rebind(bk, storedKey);
+        return { entry: current, refusals: [] };
+      }
+      return { entry: null, refusals };
+    } finally {
+      for (const c of candidates) this.reclaiming.delete(c.storedKey);
+    }
+  }
+
+  /** Move `storedKey`'s binding from whichever sender holds it (if any) to `bk`. */
+  private rebind(bk: string, storedKey: string): void {
+    for (const [existingBk, sk] of this.senderBinding) {
+      if (sk === storedKey) {
+        this.senderBinding.delete(existingBk);
         break;
       }
     }
-    this.senderBinding.set(bk, oldest.storedKey);
-    // The channel stays in `boundChannels` — it is still bound, just to a
-    // different sender now.
-    return oldest.entry;
+    this.senderBinding.set(bk, storedKey);
   }
 
   /**
    * Increment nonce by 1, add `cumulativeDelta` to cumulativeAmount,
-   * return the new values. Synchronous → microtask atomic.
+   * return the new values.
+   *
+   * The common paths (existing binding; first-use bind to an unbound
+   * channel) resolve and mutate synchronously, same as before #113. Only
+   * the fallback — no unbound channel left, so a bound channel must be
+   * safety-checked on-chain before it can be rebound — awaits an RPC read;
+   * see {@link reclaimUnredeemedSafeChannel}.
    */
-  reserve(p: ReserveParams): Reservation {
-    const entry = this.resolveChannel(p);
+  async reserve(p: ReserveParams): Promise<Reservation> {
+    let entry = this.resolveChannel(p);
     if (!entry) {
-      throw new SwapWalletError(
-        'UNSUPPORTED_CHAIN',
-        `No channel provisioned for sender on ${p.chain}`
-      );
+      const reclaimed = await this.reclaimUnredeemedSafeChannel(p);
+      entry = reclaimed.entry;
+      if (!entry) {
+        throw new SwapWalletError(
+          'UNSUPPORTED_CHAIN',
+          buildNoChannelMessage(p.chain, reclaimed.refusals)
+        );
+      }
     }
     entry.nonce += 1n;
     entry.cumulativeAmount += p.cumulativeDelta;
@@ -277,7 +370,9 @@ export class SwapChannelState {
 
   /**
    * Best-effort reversal of the last reservation. No-op if it would
-   * drive nonce or cumulativeAmount negative.
+   * drive nonce or cumulativeAmount negative. Never attempts a rebind —
+   * release only ever targets a channel `reserve()` already bound earlier
+   * in the same request.
    */
   release(p: ReserveParams): void {
     const entry = this.resolveChannel(p);
@@ -363,4 +458,16 @@ export class SwapChannelState {
     this.senderBinding.clear();
     this.boundChannels.clear();
   }
+}
+
+/** Issue #113 — actionable UNSUPPORTED_CHAIN message for a failed reserve(). */
+function buildNoChannelMessage(chain: string, refusals: string[]): string {
+  const base = `No channel provisioned for sender on ${chain}`;
+  if (refusals.length === 0) return base;
+  return (
+    `${base} — ${refusals.length} bound channel(s) are not safe to rebind ` +
+    `(${refusals.join('; ')}). Wait for the sender to redeem, ` +
+    `cooperativeClose the channel, or provision another channel in ` +
+    `config.channels.`
+  );
 }

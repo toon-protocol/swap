@@ -1146,15 +1146,16 @@ describe('MultiChainClaimIssuer — issueRollingClaim / commit / rollback (issue
 });
 
 // ---------------------------------------------------------------------------
-// Issue #113 — idle-based sticky-binding reclaim, exercised through the
-// LEGACY issueClaim path (mirrors a `POST /swap` client daemon that mints a
-// fresh ephemeral senderPubkey per request against a single provisioned
-// channel — see channel-state.test.ts for the SwapChannelState-level cases).
+// Issue #113 — on-chain-safety-checked sticky-binding rebind, exercised
+// through the LEGACY issueClaim path (mirrors a `POST /swap` client daemon
+// that mints a fresh ephemeral senderPubkey per request against a single
+// provisioned channel — see channel-state.test.ts for the
+// SwapChannelState-level cases, including the PR #119 finding #1
+// regression).
 // ---------------------------------------------------------------------------
 
-describe('Issue #113 — idle-based sticky-binding reclaim (claim-issuer integration)', () => {
-  it("[P0] a second ephemeral sender's issueClaim succeeds once the first sender's binding has gone idle", async () => {
-    let now = 0;
+describe('Issue #113 — on-chain-safety-checked sticky-binding rebind (claim-issuer integration)', () => {
+  it("[P0] a second ephemeral sender's issueClaim succeeds once the first sender's claim is fully redeemed on-chain", async () => {
     const inventory = new SwapInventory({
       balances: { 'ETH:evm:base:8453': { available: 1_000n, total: 1_000n } },
     });
@@ -1167,8 +1168,10 @@ describe('Issue #113 — idle-based sticky-binding reclaim (claim-issuer integra
           updatedAt: 0,
         },
       },
-      bindingIdleTtlMs: 1000,
-      clock: () => now,
+      onChainReader: {
+        // The first sender's 50n claim has already been redeemed on-chain.
+        getCumulativePaid: async () => 50n,
+      },
     });
     const signer = makeMockSigner('evm');
     const issuer = new MultiChainClaimIssuer({
@@ -1191,10 +1194,9 @@ describe('Issue #113 — idle-based sticky-binding reclaim (claim-issuer integra
       rumor: makeRumor(),
     });
 
-    now = 1000; // the first stream has gone idle past the threshold
-
-    // Pre-#113 this throws SwapWalletError('UNSUPPORTED_CHAIN', 'No channel
-    // provisioned for sender ...') — the reported defect.
+    // Pre-#113 (and pre-PR#119-review) this throws SwapWalletError
+    // ('UNSUPPORTED_CHAIN', 'No channel provisioned for sender ...') — the
+    // reported defect.
     const result = await issuer.issueClaim({
       sourceAmount: 100_000n,
       targetAmount: 20n,
@@ -1210,9 +1212,71 @@ describe('Issue #113 — idle-based sticky-binding reclaim (claim-issuer integra
       chain: 'evm:base:8453',
       senderPubkey: SENDER_2,
     });
-    // Same on-chain channel, ledger continues (not reset) across the reclaim.
+    // Same on-chain channel, ledger continues (not reset) across the rebind.
     expect(entry?.channelId).toBe('0xchan-1');
     expect(entry?.nonce).toBe(2n);
     expect(entry?.cumulativeAmount).toBe(70n);
+  });
+
+  it('[P0] REGRESSION (PR #119 finding #1): a second ephemeral sender is refused while the first claim is unredeemed on-chain', async () => {
+    const inventory = new SwapInventory({
+      balances: { 'ETH:evm:base:8453': { available: 1_000n, total: 1_000n } },
+    });
+    const channelState = new SwapChannelState({
+      channels: {
+        'ETH:evm:base:8453:0xchan-1': {
+          channelId: '0xchan-1',
+          cumulativeAmount: 0n,
+          nonce: 0n,
+          updatedAt: 0,
+        },
+      },
+      onChainReader: {
+        // The first sender's 50n claim has NOT been redeemed yet.
+        getCumulativePaid: async () => 0n,
+      },
+    });
+    const signer = makeMockSigner('evm');
+    const issuer = new MultiChainClaimIssuer({
+      inventory,
+      signers: { 'evm:base:8453': signer },
+      channelState,
+    });
+
+    const SENDER_1 = 'a'.repeat(64);
+    const SENDER_2 = 'b'.repeat(64);
+
+    await issuer.issueClaim({
+      sourceAmount: 100_000n,
+      targetAmount: 50n,
+      pair: PAIR_USDC_TO_ETH,
+      senderPubkey: SENDER_1,
+      chainRecipient: FIXTURE_EVM_RECIPIENT,
+      rumor: makeRumor(),
+    });
+
+    await expect(
+      issuer.issueClaim({
+        sourceAmount: 100_000n,
+        targetAmount: 20n,
+        pair: PAIR_USDC_TO_ETH,
+        senderPubkey: SENDER_2,
+        chainRecipient: FIXTURE_EVM_RECIPIENT,
+        rumor: makeRumor(),
+      })
+    ).rejects.toMatchObject({
+      name: 'SwapWalletError',
+      code: 'UNSUPPORTED_CHAIN',
+    });
+
+    // SENDER_2's failed attempt debited nothing and left SENDER_1's
+    // unredeemed watermark untouched.
+    expect(inventory.get('ETH', 'evm:base:8453')?.available).toBe(950n);
+    const entry = channelState.get({
+      assetCode: 'ETH',
+      chain: 'evm:base:8453',
+      senderPubkey: SENDER_1,
+    });
+    expect(entry?.cumulativeAmount).toBe(50n);
   });
 });
