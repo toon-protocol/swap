@@ -10,10 +10,11 @@ import { secp256k1 } from '@noble/curves/secp256k1.js';
 import { ed25519 } from '@noble/curves/ed25519.js';
 import { sha256 } from '@noble/hashes/sha2.js';
 
-// Story 12.6 AC-6: balance-proof hashes moved to @toon-protocol/sdk so the
-// swap-node-side signer and the sender-side verifier share a single source of truth.
+// Story 12.6 AC-6: the Solana/Mina balance-proof hashes moved to
+// @toon-protocol/sdk so the swap-node-side signer and the sender-side verifier
+// share a single source of truth. (The EVM digest now comes from the
+// settlement-digest leaf imported below — issue #101.)
 import {
-  balanceProofHashEvm,
   balanceProofHashSolana,
   balanceProofFieldsMina,
   base58Encode,
@@ -21,6 +22,12 @@ import {
   concatBytes,
   hexToBytes,
 } from '@toon-protocol/sdk';
+
+// Issue #101: the EVM balance-proof digest comes from the shared, dependency-light
+// leaf (@noble-only, no core/sdk/connector major bump needed) so the swap node
+// signs the SAME v2 EIP-712 domain-separated digest every client, the sdk, the
+// connector and the on-chain RollingSwapChannel verify against.
+import { balanceProofHashEvm } from '@toon-protocol/settlement-digest';
 
 import type { SwapNodeChainKind } from './wallet.js';
 import { SwapWalletError } from './errors.js';
@@ -45,12 +52,26 @@ export interface PaymentChannelSigner {
 export interface EvmPaymentChannelSignerConfig {
   chain: string;
   privateKey: Uint8Array;
+  /**
+   * EIP-155 chainId this signer's EIP-712 domain is bound to — parsed from
+   * the chain key at the call site (issue #101), never configured
+   * separately, so the signed chainId can never disagree with the key a
+   * claim is filed under.
+   */
+  chainId: bigint;
+  /**
+   * Deployed `RollingSwapChannel` address for {@link chainId} — the EIP-712
+   * `verifyingContract`. `0x` + 40 hex chars (20 bytes).
+   */
+  verifyingContract: string;
 }
 
 export class EvmPaymentChannelSigner implements PaymentChannelSigner {
   public readonly chain: string;
   public readonly chainKind: SwapNodeChainKind = 'evm';
   private readonly privateKey: Uint8Array;
+  private readonly chainId: bigint;
+  private readonly verifyingContractBytes: Uint8Array;
 
   constructor(cfg: EvmPaymentChannelSignerConfig) {
     if (
@@ -66,8 +87,31 @@ export class EvmPaymentChannelSigner implements PaymentChannelSigner {
         })`
       );
     }
+    if (typeof cfg.chainId !== 'bigint' || cfg.chainId <= 0n) {
+      throw new SwapWalletError(
+        'SIGNING_FAILED',
+        `EVM signer requires a positive bigint chainId (got ${String(cfg.chainId)})`
+      );
+    }
+    let verifyingContractBytes: Uint8Array;
+    try {
+      verifyingContractBytes = hexToBytes(cfg.verifyingContract);
+    } catch (err) {
+      throw new SwapWalletError(
+        'SIGNING_FAILED',
+        `EVM signer requires a hex verifyingContract address: ${err instanceof Error ? err.message : String(err)}`
+      );
+    }
+    if (verifyingContractBytes.length !== 20) {
+      throw new SwapWalletError(
+        'SIGNING_FAILED',
+        `EVM signer requires a 20-byte verifyingContract address (got ${verifyingContractBytes.length} bytes)`
+      );
+    }
     this.chain = cfg.chain;
     this.privateKey = cfg.privateKey;
+    this.chainId = cfg.chainId;
+    this.verifyingContractBytes = verifyingContractBytes;
   }
 
   async signBalanceProof(
@@ -86,7 +130,9 @@ export class EvmPaymentChannelSigner implements PaymentChannelSigner {
         channelBytes,
         params.cumulativeAmount,
         params.nonce,
-        recipientBytes
+        recipientBytes,
+        this.chainId,
+        this.verifyingContractBytes
       );
 
       // Produce an Ethereum-style signature: r (32) || s (32) || v (1),

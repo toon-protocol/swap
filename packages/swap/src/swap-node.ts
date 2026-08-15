@@ -162,6 +162,14 @@ export interface SwapNodeEvmChainProvider {
   registryAddress: string;
   /** Settlement token (USDC, M2M, …) contract address. */
   tokenAddress: string;
+  /**
+   * Deployed `RollingSwapChannel` contract address for this chain — the
+   * EIP-712 `verifyingContract` the swap node binds into its v2
+   * balance-proof domain at signer construction (issue #101). Required, no
+   * default: a swap pair that targets this chain with no address configured
+   * refuses to boot rather than issue claims nobody can verify.
+   */
+  channelAddress: string;
   /** Hex private key used to sign settlement claims. Defaulted by the swap node. */
   keyId?: string;
 }
@@ -644,6 +652,52 @@ function chainFamily(chain: string): SwapNodeChainKind | null {
 }
 
 /**
+ * Parse the numeric EIP-155 chainId out of an `evm:*` chain key — the last
+ * colon-delimited segment, so both the two-segment (`evm:84532`) and
+ * three-segment (`evm:base:8453`) shapes parse. This is the SAME chain key
+ * every swap pair, channel and inventory entry is keyed by, so the signed
+ * chainId can never disagree with the key a claim is filed under (issue #101).
+ *
+ * @internal Exported for unit testing of the chain-key parsing surface; not
+ * part of the supported package API.
+ */
+export function parseEvmChainId(chain: string): bigint {
+  const segments = chain.split(':');
+  const last = segments[segments.length - 1];
+  if (!last || !/^[0-9]+$/.test(last)) {
+    throw new Error(
+      `cannot parse a numeric chainId from the trailing segment of "${chain}"`
+    );
+  }
+  return BigInt(last);
+}
+
+/**
+ * Look up the `chainProviders` entry for an `evm:*` target chain, or throw the
+ * `INVALID_CONFIG` refusal naming the chain key and the missing setting.
+ *
+ * Shared by {@link validateConfig} (the boot-time refusal) and `startSwapNode`
+ * (which re-checks defensively at signer construction, so the lookup can never
+ * silently fall through to an unbound signer) — issue #101.
+ */
+function requireEvmChainProvider(
+  chainProviders: SwapNodeConfig['chainProviders'],
+  chain: string
+): SwapNodeEvmChainProvider {
+  const provider = chainProviders?.find(
+    (p): p is SwapNodeEvmChainProvider =>
+      p.chainType === 'evm' && p.chainId === chain
+  );
+  if (!provider) {
+    throw new SwapNodeStartError(
+      'INVALID_CONFIG',
+      `SwapNodeConfig.chainProviders is missing an entry for pair.to.chain="${chain}" — a "channelAddress" (deployed RollingSwapChannel address) is required to sign v2 balance proofs on this chain`
+    );
+  }
+  return provider;
+}
+
+/**
  * Validate a {@link SwapNodeConfig} and throw {@link SwapNodeStartError} with code
  * `INVALID_CONFIG` on the first violation. Pure and synchronous — it allocates
  * no resources and boots nothing, so it is safe to call directly in tests
@@ -822,6 +876,26 @@ export function validateConfig(config: SwapNodeConfig): void {
       validateChainProviderEntry(p, i);
     }
   }
+
+  // The v2 EIP-712 domain (chainId + verifyingContract) is bound at signer
+  // construction (issue #101), so every EVM chain a swap pair targets MUST
+  // resolve to a chain key the connector can parse a chainId out of AND a
+  // `chainProviders` entry naming the deployed RollingSwapChannel address —
+  // otherwise the swap node would boot and issue claims nobody can verify.
+  for (const chain of distinctTargetChains) {
+    if (chainFamily(chain) !== 'evm') continue;
+    try {
+      parseEvmChainId(chain);
+    } catch (err) {
+      throw new SwapNodeStartError(
+        'INVALID_CONFIG',
+        // parseEvmChainId's own message already quotes the chain key, so
+        // naming it again here would just duplicate it.
+        `SwapNodeConfig: invalid pair.to.chain — ${err instanceof Error ? err.message : String(err)}`
+      );
+    }
+    requireEvmChainProvider(config.chainProviders, chain);
+  }
 }
 
 /**
@@ -835,7 +909,13 @@ const SWAP_REQUIRED_PROVIDER_FIELDS: Record<
   SwapNodeChainProvider['chainType'],
   readonly string[]
 > = {
-  evm: ['chainId', 'rpcUrl', 'registryAddress', 'tokenAddress'],
+  evm: [
+    'chainId',
+    'rpcUrl',
+    'registryAddress',
+    'tokenAddress',
+    'channelAddress',
+  ],
   solana: ['chainId', 'rpcUrl', 'programId'],
   mina: ['chainId', 'graphqlUrl', 'zkAppAddress'],
 };
@@ -926,23 +1006,23 @@ export async function startSwapNode(
     // with `fromMnemonic()`. Re-enable once SDK identity derivation supports it.
   });
 
-  // 4. Construct payment-channel signers per configured family.
-  //    Re-use one signer instance per family across every `evm:*`/`solana:*`/
-  //    `mina:*` chain. NOTE: the shared EVM signer key is reused for every
-  //    `evm:*` chain, but the signed balance-proof digest does NOT currently
-  //    bind the chainId or the contract/deployment address —
-  //    `EvmPaymentChannelSigner.signBalanceProof` hashes only
-  //    { channelId, cumulativeAmount, nonce, recipient }. Cross-chain /
-  //    cross-deployment replay is therefore prevented ONLY by channelId
-  //    uniqueness, not by the signature itself. A proper fix that
-  //    domain-separates the digest (binding chainId + contract address) is
-  //    tracked in connector#324 (finding #1 from connector PR #320); until
-  //    then, do NOT rely on the signature to scope a balance proof to a chain.
+  // 4. Construct payment-channel signers per configured family. EVM chains
+  //    get ONE signer instance per distinct chain, each domain-bound at
+  //    construction to that chain's (chainId, RollingSwapChannel address) —
+  //    issue #101, so a claim signed for one EVM chain's domain can never
+  //    recover as valid under another's. Key material stays shared (the same
+  //    derived EVM key backs every signer); only the instances multiply.
+  //    Solana and Mina are untouched: one signer instance is still shared
+  //    across every chain in their respective family.
   const signers: Record<string, PaymentChannelSigner> = {};
   const distinctTargetChains = Array.from(
     new Set(config.swapPairs.map((p) => p.to.chain))
   );
-  let sharedEvmSigner: EvmPaymentChannelSigner | undefined;
+  // Issue #102 — the kind:10032 `tokenNetworks` map, filled in THIS loop from
+  // the same `provider.channelAddress` (and under the same chain key) each EVM
+  // signer binds into its EIP-712 domain, so what the node advertises can never
+  // drift from what its claims are signed under.
+  const tokenNetworks: Record<string, string> = {};
   let sharedSolanaSigner: SolanaPaymentChannelSigner | undefined;
   let sharedMinaSigner: MinaPaymentChannelSigner | undefined;
   for (const chain of distinctTargetChains) {
@@ -953,15 +1033,17 @@ export async function startSwapNode(
           `Pair targets ${chain} but no EVM key was derived`
         );
       }
-      // Re-use a single signer/key across all `evm:*` chains. See the note
-      // above: the balance-proof digest does not bind chainId or contract
-      // address, so this key sharing is NOT what provides cross-chain replay
-      // protection (connector#324).
-      sharedEvmSigner ??= new EvmPaymentChannelSigner({
+      // validateConfig() has already guaranteed a chainProviders entry with
+      // a non-empty channelAddress exists for every EVM chain a pair
+      // targets, and that the chain key parses to a numeric chainId.
+      const provider = requireEvmChainProvider(config.chainProviders, chain);
+      signers[chain] = new EvmPaymentChannelSigner({
         chain,
         privateKey: swapNodeKeys.evm.privateKey,
+        chainId: parseEvmChainId(chain),
+        verifyingContract: provider.channelAddress,
       });
-      signers[chain] = sharedEvmSigner;
+      tokenNetworks[chain] = provider.channelAddress;
     } else if (chain.startsWith('solana:')) {
       if (!swapNodeKeys.solana) {
         throw new SwapNodeStartError(
@@ -1990,6 +2072,12 @@ export async function startSwapNode(
       btpEndpoint: config.btpEndpoint ?? '',
       assetCode: config.advertisedAsset?.assetCode ?? 'USD',
       assetScale: config.advertisedAsset?.assetScale ?? 6,
+      // Issue #102 — what a stock client needs to reconstruct the EIP-712
+      // domain of a leg-B claim: this node's per-chain payout address, and the
+      // `verifyingContract` (see `tokenNetworks` above). Both maps are keyed by
+      // `pair.to.chain`, the same key the claims themselves are signed under.
+      settlementAddresses: { ...signerAddresses },
+      tokenNetworks: { ...tokenNetworks },
       swapPairs: [...config.swapPairs],
     };
     const ilpInfoEvent = buildIlpPeerInfoEvent(ownIlpInfo, identity.secretKey);

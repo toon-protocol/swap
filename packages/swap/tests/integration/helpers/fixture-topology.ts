@@ -57,6 +57,15 @@ export const ANVIL_CHAIN_ID = 31337;
 export const ANVIL_URL = 'http://localhost:18545';
 
 /**
+ * Test-only deployed `RollingSwapChannel` address the fixture swap node
+ * binds into its v2 EIP-712 domain (issue #101). Callers that independently
+ * verify a fixture-issued claim (e.g. `buildSettlementTx`) MUST pass this
+ * SAME address as `contractAddress`, or the v2 digest domain will not match
+ * and the claim will fail to recover.
+ */
+export const FIXTURE_CHANNEL_ADDRESS = '0x' + '33'.repeat(20);
+
+/**
  * Default USDC→ETH swap pair on Anvil.
  * Rate 0.0004: 1 USDC (1e6 micros, scale 6) → 0.0004 ETH (4e14 wei, scale 18).
  */
@@ -186,6 +195,18 @@ export async function buildFixtureSwapNode(
     chains: ['evm'],
     channels: { [targetChain]: channels },
     inventory: { [targetChain]: 10n ** 20n }, // 100 ETH in wei
+    // Issue #101: every EVM chain a pair targets needs a chainProviders
+    // entry naming the deployed RollingSwapChannel address.
+    chainProviders: [
+      {
+        chainType: 'evm',
+        chainId: targetChain,
+        rpcUrl: 'http://127.0.0.1:1',
+        registryAddress: '0x' + '11'.repeat(20),
+        tokenAddress: '0x' + '22'.repeat(20),
+        channelAddress: FIXTURE_CHANNEL_ADDRESS,
+      },
+    ],
     relayUrls: ['ws://localhost:0'],
     blsPort: 0,
     // parseIlpPeerInfo rejects empty btpEndpoint, so advertise a test-only

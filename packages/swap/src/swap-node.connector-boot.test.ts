@@ -54,6 +54,16 @@ function buildConfig(events: string[]): SwapNodeConfig {
       ],
     },
     inventory: { 'evm:8453': 1_000_000n },
+    chainProviders: [
+      {
+        chainType: 'evm',
+        chainId: 'evm:8453',
+        rpcUrl: 'http://127.0.0.1:1',
+        registryAddress: '0x' + '11'.repeat(20),
+        tokenAddress: '0x' + '22'.repeat(20),
+        channelAddress: '0x' + '33'.repeat(20),
+      },
+    ],
     relayUrls: ['ws://127.0.0.1:1'],
     blsPort: 0,
     // Unreachable parent: nothing listens on port 1. Boot must still succeed.

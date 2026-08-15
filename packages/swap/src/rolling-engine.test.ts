@@ -255,6 +255,8 @@ function buildStack(options?: {
       [CHAIN]: new EvmPaymentChannelSigner({
         chain: CHAIN,
         privateKey: new Uint8Array(32).fill(7),
+        chainId: 31337n,
+        verifyingContract: '0x' + '33'.repeat(20),
       }),
     },
     signerAddresses: { [CHAIN]: '0x' + '22'.repeat(20) },
