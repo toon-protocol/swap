@@ -1,120 +1,121 @@
 /**
- * Story 12.10 — Docker infra gate for swap-node E2E tests.
+ * swap#104 — self-contained infra gate for the Docker cross-chain E2E suites.
  *
- * Re-exports the SDK's `docker-e2e-setup.ts` helpers so swap-node E2E tests
- * have a single import target (Task 1.3). We use a relative path into the
- * SDK's `tests/e2e/helpers/` directory because the helpers are TEST-ONLY
- * code (not part of the SDK's public surface) and there is no reason to
- * publish a new `@toon-protocol/*` package just for them (guardrail 9.4).
+ * Replaces the dead cross-repo re-export (`../../../../sdk/tests/e2e/
+ * helpers/docker-e2e-setup.js`, a `packages/sdk` sibling that has not
+ * existed in this repo since the monorepo extraction — swap#51) with
+ * constants and readiness probes for the self-contained harness booted by
+ * `global-setup.ts`: a vendored-fixture Anvil, an in-process Nostr relay,
+ * and an in-process peer1 `startSwapNode()` instance. See
+ * `tests/e2e/README.md` for the full topology and how to extend it to
+ * Solana / Mina.
  *
- * ## Anvil account allocation (Task 1.4)
+ * ## EVM vs Solana/Mina readiness
  *
- * The SDK E2E suite claims Anvil accounts **#3–#9** (plus 1 non-standard
- * key outside the default Anvil set; see `docker-e2e-setup.ts`
- * TEST_PRIVATE_KEY and friends). swap-node E2E must pick disjoint accounts to
- * avoid nonce contention if both suites ever run in parallel on shared infra.
- *
- * **Critical allocation constraints (from Story 12.10 v0.3 review):**
- * - Account **#0** (`0xf39F...`) is peer1's `SETTLEMENT_PRIVATE_KEY` — DO NOT USE.
- * - Account **#2** (`0x3C44...`) is peer2's `SETTLEMENT_PRIVATE_KEY` — DO NOT USE.
- *   Using these as test sender keys causes nonce contention and settlement
- *   assertion failures.
- * - Accounts **#3–#9** are claimed by SDK E2E tests.
- *
- * swap-node E2E uses:
- * - Anvil account **#1** — `SWAP_E2E_EVM_SENDER_PRIVATE_KEY` (the ONLY
- *   unclaimed standard Anvil account). Sufficient if tests run serially
- *   (enforced by `singleFork: true` in vitest config).
- *
- * If the swap-node E2E suite ever needs >1 concurrent EVM signer, derive fresh
- * keys from a test-local mnemonic and fund them with a one-time `cast send`
- * at the top of the suite rather than grabbing claimed accounts.
+ * `checkAllServicesReady()` gates ONLY the self-contained EVM leg (Anvil +
+ * relay + peer1) — this repo owns that infra outright (it boots it
+ * in-process; a devbox `anvil` install is the only external requirement),
+ * so a failure there is a real regression. Solana and Mina need external
+ * infra this repo does not vendor (`solana-test-validator`, Mina
+ * lightnet) — `waitForSolanaHealth()` / `waitForMinaHealth()` probe
+ * operator-supplied endpoints and are never treated as a harness
+ * regression; see `skipIfNotReady()`.
  */
 
-// Local binding (the block below RE-exports CHAIN_ID, which does not create a
-// usable local binding) so DOCKER_CHAIN_EVM can track the active chain id.
-import { CHAIN_ID } from '../../../../sdk/tests/e2e/helpers/docker-e2e-setup.js';
+import { createPublicClient, http, type Chain } from 'viem';
+import WebSocket from 'ws';
 
-export {
-  // Endpoints
+import {
+  USDC_TOKEN_ADDRESS,
+  TOKEN_NETWORK_REGISTRY_ADDRESS,
+  TOKEN_NETWORK_ADDRESS as ROLLING_TOKEN_NETWORK_ADDRESS,
+  SENDER_EVM_PRIVATE_KEY,
+  SENDER_EVM_ADDRESS,
+  MAKER_EVM_ADDRESS,
+} from '../../integration/helpers/rolling-e2e-harness.js';
+import {
+  ANVIL_CHAIN_ID,
   ANVIL_RPC,
-  PEER1_RELAY_URL,
+  EVM_CHAIN_PREFIX,
+  RELAY_URL,
   PEER1_BTP_URL,
   PEER1_BLS_URL,
-  PEER1_EVM_ADDRESS,
-  PEER2_RELAY_URL,
-  PEER2_BLS_URL,
-  SOLANA_RPC,
-  SOLANA_WS,
-  SOLANA_PROGRAM_ID,
-  MINA_GRAPHQL,
-  MINA_ACCOUNTS_MANAGER,
-  MINA_ZKAPP_ADDRESS,
-
-  // Contracts
-  TOKEN_ADDRESS,
-  TOKEN_NETWORK_ADDRESS,
-  REGISTRY_ADDRESS,
-  CHAIN_ID,
-
-  // Chain def + ABIs
-  anvilChain,
-  TOKEN_NETWORK_ABI,
-  ERC20_ABI,
-  BALANCE_PROOF_TYPES,
-
-  // Client helpers
-  createViemClient,
-  getChannelState,
-  getParticipantInfo,
-  getTokenBalance,
-  getChannelCounter,
-  publicModeSettlementKey,
-
-  // Wait / probe helpers
-  waitForEventOnRelay,
-  waitForServiceHealth,
-  waitForRelayReady,
-  waitForPeer2Bootstrap,
-  waitForSolanaHealth,
-  waitForMinaHealth,
-  acquireMinaAccount,
-  releaseMinaAccount,
-
-  // Infra gate
-  checkAllServicesReady,
-  skipIfNotReady,
-} from '../../../../sdk/tests/e2e/helpers/docker-e2e-setup.js';
+  PEER1_NOSTR_PUBKEY,
+} from './topology.js';
 
 // ---------------------------------------------------------------------------
-// swap-node-E2E-specific Anvil keys (disjoint from SDK E2E accounts #3–#9)
+// Endpoints
 // ---------------------------------------------------------------------------
+
+export { ANVIL_RPC };
+export const PEER1_RELAY_URL = RELAY_URL;
+export { PEER1_BTP_URL };
+export { PEER1_NOSTR_PUBKEY };
+export const PEER1_EVM_ADDRESS = MAKER_EVM_ADDRESS;
 
 /**
- * Anvil account #1 — the ONLY unclaimed standard Anvil account available
- * for swap-node E2E tests. Account #0 is peer1's settlement key, account #2 is
- * peer2's settlement key, and accounts #3-#9 are claimed by SDK E2E tests.
+ * Solana / Mina endpoints. These literal defaults are asserted verbatim by
+ * `docker-swap-flow-solana-e2e.test.ts` / `docker-swap-flow-mina-e2e.test.ts`
+ * (config-drift guards) — only reached once `waitForSolanaHealth()` /
+ * `waitForMinaHealth()` report ready, i.e. once an operator has actually
+ * brought up the matching infra (see `tests/e2e/README.md`) and overridden
+ * `SOLANA_E2E_PROGRAM_ID` / `MINA_E2E_ZKAPP_ADDRESS`.
  */
-// Public mode overrides this with a mnemonic-derived, treasury-funded key
-// (idx11) the harness writes to .env.sdk-e2e (EVM_SWAP_CLIENT_PRIVATE_KEY) —
-// the hardcoded Anvil account #1 has no funds on Base Sepolia.
-export const SWAP_E2E_EVM_SENDER_PRIVATE_KEY = (process.env[
-  'EVM_SWAP_CLIENT_PRIVATE_KEY'
-] ||
-  '0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d') as `0x${string}`;
-
-/** Sender address — public: EVM_SWAP_CLIENT_ADDRESS; local: Anvil account #1. */
-export const SWAP_E2E_EVM_SENDER_ADDRESS = (process.env[
-  'EVM_SWAP_CLIENT_ADDRESS'
-] || '0x70997970C51812dc3A010C7d01b50e0d17dc79C8') as `0x${string}`;
+export const SOLANA_RPC =
+  process.env['SOLANA_E2E_RPC_URL'] || 'http://localhost:19899';
+export const SOLANA_PROGRAM_ID = process.env['SOLANA_E2E_PROGRAM_ID'] || '';
+export const MINA_GRAPHQL =
+  process.env['MINA_E2E_GRAPHQL_URL'] || 'http://localhost:19085/graphql';
+export const MINA_ZKAPP_ADDRESS = process.env['MINA_E2E_ZKAPP_ADDRESS'] || '';
+const MINA_ACCOUNTS_MANAGER =
+  process.env['MINA_E2E_ACCOUNTS_MANAGER_URL'] || '';
 
 // ---------------------------------------------------------------------------
-// Chain-string constants (must match docker-compose-sdk-e2e.yml env vars)
+// Contracts / chain id
 // ---------------------------------------------------------------------------
 
-/** Exact chain strings advertised in `SUPPORTED_CHAINS` on peer1/peer2.
- * Tracks the active EVM chain id (31337 Anvil / 84532 Base Sepolia public). */
-export const DOCKER_CHAIN_EVM = `evm:base:${CHAIN_ID}` as const;
+export const TOKEN_ADDRESS = USDC_TOKEN_ADDRESS;
+export const TOKEN_NETWORK_ADDRESS = ROLLING_TOKEN_NETWORK_ADDRESS;
+export const REGISTRY_ADDRESS = TOKEN_NETWORK_REGISTRY_ADDRESS;
+export const CHAIN_ID = ANVIL_CHAIN_ID;
+
+const anvilChain: Chain = {
+  id: CHAIN_ID,
+  name: 'anvil-e2e',
+  nativeCurrency: { name: 'Ether', symbol: 'ETH', decimals: 18 },
+  rpcUrls: { default: { http: [ANVIL_RPC] } },
+};
+
+export function createViemClient() {
+  return createPublicClient({ chain: anvilChain, transport: http(ANVIL_RPC) });
+}
+
+// ---------------------------------------------------------------------------
+// swap-node-E2E EVM sender key (Anvil account #1 — see rolling-e2e-harness.ts
+// for the full account allocation: #0 is peer1's settlement key)
+// ---------------------------------------------------------------------------
+
+export const SWAP_E2E_EVM_SENDER_PRIVATE_KEY = SENDER_EVM_PRIVATE_KEY as `0x${string}`;
+export const SWAP_E2E_EVM_SENDER_ADDRESS = SENDER_EVM_ADDRESS as `0x${string}`;
+
+/**
+ * No persistent/public-testnet mode exists in this self-contained harness
+ * (local Anvil only) — pass the configured key straight through. Kept as a
+ * function (rather than inlining `SWAP_E2E_EVM_SENDER_PRIVATE_KEY` at each
+ * call site) so a future public-mode harness can slot in a real
+ * just-in-time-funded-key implementation without changing callers.
+ */
+export async function publicModeSettlementKey(
+  privateKey: `0x${string}`
+): Promise<string> {
+  return privateKey;
+}
+
+// ---------------------------------------------------------------------------
+// Chain-string constants (peer1's advertised swap pairs — see peer-node.ts)
+// ---------------------------------------------------------------------------
+
+export const DOCKER_CHAIN_EVM = `${EVM_CHAIN_PREFIX}${CHAIN_ID}` as const;
 export const DOCKER_CHAIN_SOLANA = 'solana:devnet' as const;
 export const DOCKER_CHAIN_MINA = 'mina:devnet' as const;
 
@@ -131,7 +132,247 @@ export const DOCKER_PAIR_MATRIX: readonly {
   from: DockerChain;
   to: DockerChain;
 }[] = Object.freeze(
-  DOCKER_CHAINS.flatMap((from) =>
-    DOCKER_CHAINS.map((to) => ({ from, to }))
-  )
+  DOCKER_CHAINS.flatMap((from) => DOCKER_CHAINS.map((to) => ({ from, to })))
 );
+
+// ---------------------------------------------------------------------------
+// Readiness probes
+// ---------------------------------------------------------------------------
+
+/**
+ * POST a JSON body and decode the response, or `null` for any failure
+ * (transport error, timeout, non-2xx, undecodable body). Every chain probe
+ * below is a POST-only endpoint — a bare GET 404s regardless of health
+ * (PR #106 review finding #4).
+ */
+async function postJson<T>(
+  url: string,
+  body: unknown,
+  timeoutMs: number
+): Promise<T | null> {
+  try {
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+    if (!res.ok) return null;
+    return (await res.json()) as T;
+  } catch {
+    return null;
+  }
+}
+
+/** `getHealth` — the smallest real request solana-test-validator accepts. */
+async function probeSolanaRpc(
+  url: string,
+  timeoutMs: number
+): Promise<boolean> {
+  const json = await postJson<{ result?: string }>(
+    url,
+    { jsonrpc: '2.0', id: 1, method: 'getHealth', params: [] },
+    timeoutMs
+  );
+  return json?.result === 'ok';
+}
+
+/** `{ syncStatus }` — the smallest real query a Mina lightnet accepts. */
+async function probeMinaGraphql(
+  url: string,
+  timeoutMs: number
+): Promise<boolean> {
+  const json = await postJson<{ data?: { syncStatus?: string } }>(
+    url,
+    { query: '{ syncStatus }' },
+    timeoutMs
+  );
+  return typeof json?.data?.syncStatus === 'string';
+}
+
+async function probeAnvil(timeoutMs: number): Promise<boolean> {
+  const json = await postJson<{ result?: string }>(
+    ANVIL_RPC,
+    { jsonrpc: '2.0', id: 1, method: 'eth_chainId', params: [] },
+    timeoutMs
+  );
+  if (!json) return false;
+  return parseInt(json.result ?? '0x0', 16) === ANVIL_CHAIN_ID;
+}
+
+function probeRelay(timeoutMs: number): Promise<boolean> {
+  return new Promise<boolean>((resolve) => {
+    let settled = false;
+    const ws = new WebSocket(PEER1_RELAY_URL);
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      try {
+        ws.terminate();
+      } catch {
+        /* ignore */
+      }
+      resolve(false);
+    }, timeoutMs);
+    ws.once('open', () => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      ws.close();
+      resolve(true);
+    });
+    ws.once('error', () => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(false);
+    });
+  });
+}
+
+async function probePeer1(timeoutMs: number): Promise<boolean> {
+  try {
+    const res = await fetch(`${PEER1_BLS_URL}/health`, {
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+    if (!res.ok) return false;
+    const json = (await res.json()) as { status?: string };
+    return json.status === 'ok';
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * True once the self-contained EVM core (Anvil + relay + peer1) is up.
+ * Memoized for the lifetime of the test process — `vitest.e2e.config.ts`
+ * sets `isolate: false` specifically so this cache (and the underlying
+ * booted infra from `global-setup.ts`) is shared across all four suite
+ * files instead of being re-probed per file.
+ */
+let cachedCoreReady: Promise<boolean> | null = null;
+/** Last observed core-readiness — drives `skipIfNotReady()`'s CI-fail path. */
+let lastCoreReady = true;
+
+async function probeCore(): Promise<boolean> {
+  const [anvilOk, relayOk, peer1Ok] = await Promise.all([
+    probeAnvil(3000),
+    probeRelay(3000),
+    probePeer1(3000),
+  ]);
+  const ready = anvilOk && relayOk && peer1Ok;
+  lastCoreReady = ready;
+  return ready;
+}
+
+export function checkAllServicesReady(): Promise<boolean> {
+  if (!cachedCoreReady) cachedCoreReady = probeCore();
+  return cachedCoreReady;
+}
+
+/**
+ * The original two-peer Docker topology (peer1 + peer2) used peer2 purely
+ * as a readiness signal — none of the four suites assert anything about a
+ * distinct peer2 identity or behavior (grep confirms `waitForPeer2Bootstrap`
+ * is only ever used as a boolean gate). This self-contained harness has one
+ * peer, so this is an alias for the same core-readiness check rather than a
+ * second boot.
+ */
+export async function waitForPeer2Bootstrap(_timeoutMs: number): Promise<boolean> {
+  return checkAllServicesReady();
+}
+
+let warnedSolana = false;
+let warnedMina = false;
+
+export async function waitForSolanaHealth(timeoutMs: number): Promise<boolean> {
+  if (!process.env['SOLANA_E2E_RPC_URL']) {
+    if (!warnedSolana) {
+      warnedSolana = true;
+      console.warn(
+        '[swap e2e] Solana infra not configured — set SOLANA_E2E_RPC_URL ' +
+          '(and SOLANA_E2E_PROGRAM_ID) to a running solana-test-validator ' +
+          'to exercise solana:devnet suites. See tests/e2e/README.md.'
+      );
+    }
+    return false;
+  }
+  return probeSolanaRpc(SOLANA_RPC, timeoutMs);
+}
+
+export async function waitForMinaHealth(timeoutMs: number): Promise<boolean> {
+  if (!process.env['MINA_E2E_GRAPHQL_URL']) {
+    if (!warnedMina) {
+      warnedMina = true;
+      console.warn(
+        '[swap e2e] Mina infra not configured — set MINA_E2E_GRAPHQL_URL ' +
+          '(and MINA_E2E_ZKAPP_ADDRESS, MINA_E2E_ACCOUNTS_MANAGER_URL) to a ' +
+          'running Mina lightnet to exercise mina:devnet suites. See ' +
+          'tests/e2e/README.md.'
+      );
+    }
+    return false;
+  }
+  return probeMinaGraphql(MINA_GRAPHQL, timeoutMs);
+}
+
+export async function acquireMinaAccount(): Promise<{ pk: string; sk: string } | null> {
+  if (!MINA_ACCOUNTS_MANAGER) return null;
+  try {
+    const res = await fetch(`${MINA_ACCOUNTS_MANAGER}/acquire-account`, {
+      method: 'GET',
+      signal: AbortSignal.timeout(15000),
+    });
+    if (!res.ok) return null;
+    return (await res.json()) as { pk: string; sk: string };
+  } catch {
+    return null;
+  }
+}
+
+export async function releaseMinaAccount(pk: string): Promise<void> {
+  if (!MINA_ACCOUNTS_MANAGER) return;
+  try {
+    await fetch(`${MINA_ACCOUNTS_MANAGER}/release-account`, {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ pk }),
+      signal: AbortSignal.timeout(15000),
+    });
+  } catch {
+    /* best-effort release */
+  }
+}
+
+let warnedSkip = false;
+
+/**
+ * AC-2: skip (return `true`) when infra isn't ready, EXCEPT under CI when
+ * the failure is attributable to the self-contained EVM core this harness
+ * owns and boots itself — that's a real regression (this repo's `anvil` is
+ * devbox-pinned and CI-installed), so it fails loud instead of masking the
+ * gap as a pass-via-skip. Solana/Mina unreadiness never fails CI: nothing
+ * in this repo's CI provisions those chains today, so it is an expected,
+ * permanent condition rather than a regression signal.
+ */
+export function skipIfNotReady(ready: boolean): boolean {
+  if (ready) return false;
+  if (process.env['CI'] && !lastCoreReady) {
+    throw new Error(
+      '[swap e2e] Self-contained EVM infra (Anvil + relay + peer1) did not ' +
+        'come up under CI — this is this harness\'s own responsibility ' +
+        '(devbox pins `anvil`). Check the global-setup logs rather than ' +
+        'silently skipping. See tests/e2e/README.md.'
+    );
+  }
+  if (!warnedSkip) {
+    warnedSkip = true;
+    console.warn(
+      '[swap e2e] Infra not ready — skipping. Run with `anvil` on PATH ' +
+        '(`devbox run -- pnpm --filter @toon-protocol/swap test:e2e:docker`) ' +
+        'for the self-contained EVM suites, or see tests/e2e/README.md to ' +
+        'bring up Solana/Mina infra too.'
+    );
+  }
+  return true;
+}

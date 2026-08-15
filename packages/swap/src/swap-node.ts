@@ -1499,10 +1499,19 @@ export async function startSwapNode(
     config.btpServerPort !== undefined
   ) {
     // Standalone mode: auto-wire an embedded ConnectorNode with no parent
-    // peer or routes. `ConnectorNode` rejects port=0 (OS-assigned), so the
-    // explicit `btpServerPort` opt-in is what gates this branch.
+    // peer. `ConnectorNode` rejects port=0 (OS-assigned), so the explicit
+    // `btpServerPort` opt-in is what gates this branch.
     const nodeId = config.nodeId ?? `toon-swap-${identity.pubkey.slice(0, 16)}`;
     const btpServerPort = config.btpServerPort;
+    // Self-route — without it every inbound packet addressed at our own
+    // `ilpAddress` (the common case: a peer streaming a swap directly to
+    // us with no upstream apex) hits PacketHandler's `routingTable.
+    // getNextHop()` with no matching entry and is F02-rejected as "no
+    // route found" before `setPacketHandler`'s local-delivery dispatch
+    // (§11a below) ever runs. Mirrors the embedded-with-parent branch's
+    // self-route above.
+    const ilpAddress =
+      config.ilpAddress ?? `g.toon.swap.${identity.pubkey.slice(0, 16)}`;
     const connectorLogger = createConnectorLogger(
       nodeId,
       (process.env['TOON_CONNECTOR_LOG_LEVEL'] as
@@ -1536,7 +1545,7 @@ export async function startSwapNode(
         environment: 'development' as const,
         deploymentMode: 'embedded' as const,
         peers: [],
-        routes: [],
+        routes: [{ prefix: ilpAddress, nextHop: nodeId, priority: 100 }],
         localDelivery: { enabled: false },
         ...(resolvedChainProviders &&
           resolvedChainProviders.length > 0 && {
@@ -1553,7 +1562,11 @@ export async function startSwapNode(
       effectiveConnector =
         autoCreatedConnector as unknown as EmbeddableConnectorLike;
       ownsConnector = true;
-      logger.debug?.('swap.connector.auto_created', { nodeId, btpServerPort });
+      logger.debug?.('swap.connector.auto_created', {
+        nodeId,
+        btpServerPort,
+        ilpAddress,
+      });
     } catch (err) {
       logger.warn?.('swap.connector.auto_create_failed', {
         err: errSummary(err),

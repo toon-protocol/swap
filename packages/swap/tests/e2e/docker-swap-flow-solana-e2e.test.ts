@@ -30,6 +30,7 @@ import {
   waitForPeer2Bootstrap,
   waitForSolanaHealth,
   skipIfNotReady,
+  PEER1_NOSTR_PUBKEY,
   SOLANA_RPC,
   SOLANA_PROGRAM_ID,
   DOCKER_CHAIN_EVM,
@@ -39,13 +40,6 @@ import {
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
-
-/**
- * Peer1's Nostr pubkey — derived from the NOSTR_SECRET_KEY in
- * docker-compose-sdk-e2e.yml.
- */
-const PEER1_NOSTR_PUBKEY =
-  'd6bfe100d1600c0d8f769501676fc74c3809500bd131c8a549f88cf616c21f35';
 
 // Sender builder extracted to helpers/build-live-sender.ts (shared across all
 // swap-node E2E test files to eliminate ~80 lines of duplicated wiring per file).

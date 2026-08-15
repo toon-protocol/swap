@@ -10,9 +10,13 @@ import { resolve } from 'path';
  * `@toon-protocol/{core,sdk,connector}` resolve from node_modules; only
  * `@toon-protocol/swap` is aliased to local source (development loop).
  *
- * Prerequisites: `./scripts/sdk-e2e-infra.sh up` must be running. Tests
- * runtime-skip via `skipIfNotReady()` when infra is down (AC-2) — they do
- * NOT fail locally, but throw under `CI=1` per `skipIfNotReady()` semantics.
+ * Prerequisites (swap#104): none for the EVM leg — `globalSetup` boots a
+ * self-contained Anvil + relay + peer1 harness in-process (requires only
+ * `anvil` on PATH, devbox-pinned). Solana/Mina need operator-supplied infra
+ * — see `tests/e2e/README.md`. Tests runtime-skip via `skipIfNotReady()`
+ * when infra is down (AC-2) — they do NOT fail locally, but throw under
+ * `CI=1` when the self-contained EVM core itself failed to boot (a real
+ * regression this harness owns) per `skipIfNotReady()`'s semantics.
  */
 export default defineConfig({
   resolve: {
@@ -31,12 +35,17 @@ export default defineConfig({
     include: ['tests/e2e/**/*.test.ts'],
     exclude: ['**/node_modules/**', '**/dist/**'],
     testTimeout: 180000,
-    // Serial execution — E2E tests share Docker peers and ports.
+    globalSetup: ['./tests/e2e/global-setup.ts'],
+    // Serial execution — E2E tests share the booted Anvil/relay/peer1 infra
+    // and its ports. `isolate: false` so infra-gate.ts's readiness cache
+    // (and its module-level connections) are shared across suite files
+    // instead of being re-probed fresh per file.
     pool: 'forks',
     poolOptions: {
       forks: {
         singleFork: true,
       },
     },
+    isolate: false,
   },
 });

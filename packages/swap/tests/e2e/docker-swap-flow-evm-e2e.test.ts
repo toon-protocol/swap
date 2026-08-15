@@ -34,6 +34,7 @@ import {
   waitForPeer2Bootstrap,
   skipIfNotReady,
   PEER1_RELAY_URL,
+  PEER1_NOSTR_PUBKEY,
   TOKEN_NETWORK_ADDRESS,
   CHAIN_ID,
   createViemClient,
@@ -52,16 +53,6 @@ const EVM_CHAIN_RECIPIENT = SWAP_E2E_EVM_SENDER_ADDRESS.toLowerCase();
 
 /** Invalid chain-recipient value used for AC-5 T00 probe. */
 const MALFORMED_CHAIN_RECIPIENT = '0xdeadbeef';
-
-/**
- * Peer1's Nostr pubkey — derived from the NOSTR_SECRET_KEY in
- * docker-compose-sdk-e2e.yml:
- *   `a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2`
- *
- * This is the recipient pubkey for NIP-59 gift-wrapping in `streamSwap()`.
- */
-const PEER1_NOSTR_PUBKEY =
-  'd6bfe100d1600c0d8f769501676fc74c3809500bd131c8a549f88cf616c21f35';
 
 // Sender builder extracted to helpers/build-live-sender.ts (shared across all
 // swap-node E2E test files to eliminate ~80 lines of duplicated wiring per file).
