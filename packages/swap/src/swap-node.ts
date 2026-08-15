@@ -256,6 +256,18 @@ export interface SwapNodeConfig {
   swapPairs: readonly SwapPair[];
   chains: readonly SwapNodeChainKind[];
   channels: Record<string, readonly ChannelEntry[]>;
+  /**
+   * Issue #113 — opt-in idle-timeout (ms) after which the sender⇄channel
+   * sticky binding (see `channel-state.ts`) may reclaim a bound channel for
+   * a fresh sender, once no unbound channel remains for its `(asset, chain)`
+   * pool AND the bound channel has seen no `reserve()`/`release()` activity
+   * for at least this long. Unset (default) preserves the pre-#113
+   * "sticky forever" behavior — needed because a released client mints a
+   * FRESH ephemeral sender pubkey per swap request, which a permanently
+   * sticky binding treats as an unbindable new peer on every request after
+   * the first.
+   */
+  channelBindingIdleMs?: number;
   inventory: Record<string, bigint>;
   /**
    * Issue #49 — per-chain in-flight window ceiling for the ROLLING path
@@ -835,6 +847,18 @@ export function validateConfig(config: SwapNodeConfig): void {
     }
   }
 
+  if (
+    config.channelBindingIdleMs !== undefined &&
+    (typeof config.channelBindingIdleMs !== 'number' ||
+      !Number.isFinite(config.channelBindingIdleMs) ||
+      config.channelBindingIdleMs <= 0)
+  ) {
+    throw new SwapNodeStartError(
+      'INVALID_CONFIG',
+      'SwapNodeConfig.channelBindingIdleMs MUST be a positive finite number'
+    );
+  }
+
   if (config.rolling !== undefined) {
     const knobs: readonly (keyof NonNullable<SwapNodeConfig['rolling']>)[] = [
       'sessionTtlMs',
@@ -1226,6 +1250,10 @@ export async function startSwapNode(
     // Restored sticky bindings keep each sender pinned to the channel its
     // existing balance proofs were issued against (dangling ones dropped).
     ...(persistedState && { bindings: persistedState.bindings }),
+    // Issue #113 — opt-in idle-reclaim of a sticky binding.
+    ...(config.channelBindingIdleMs !== undefined && {
+      bindingIdleTtlMs: config.channelBindingIdleMs,
+    }),
   });
 
   // 6b. Issue #46 — persister + persistent replay set.

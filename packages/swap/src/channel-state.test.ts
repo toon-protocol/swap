@@ -407,3 +407,187 @@ describe('Story 12.8 AC-12 — sender→channel sticky binding', () => {
     ).toThrow(SwapWalletError);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Issue #113 — idle-based sticky-binding reclaim
+// ---------------------------------------------------------------------------
+//
+// A released client daemon mints a FRESH ephemeral sender pubkey per
+// `POST /swap` — every request looks like a brand-new sender to the
+// AC-12 "first UNBOUND channel" policy above. With only one channel
+// provisioned (the common single-channel deployment), the second request's
+// sender can never bind, and `reserve()` throws UNSUPPORTED_CHAIN forever
+// (persisted bindings survive a restart too — only deleting the state file
+// "fixes" it). `bindingIdleTtlMs` lets an operator opt into reclaiming a
+// bound channel from whichever sender has been idle the longest, but ONLY
+// once no unbound channel exists AND the oldest binding has actually gone
+// idle — so an active multi-sender AC-12 deployment is unaffected.
+describe('Issue #113 — idle-based sticky-binding reclaim', () => {
+  const SENDER_A = 'a'.repeat(64);
+  const SENDER_B = 'b'.repeat(64);
+
+  it.each([[0], [-1], [Number.NaN], [Infinity]])(
+    '[P2] constructor rejects a non-positive-finite bindingIdleTtlMs (%j)',
+    (bad) => {
+      expect(
+        () => new SwapChannelState({ channels: {}, bindingIdleTtlMs: bad })
+      ).toThrow();
+    }
+  );
+
+  function makeOneChannelPool(bindingIdleTtlMs: number, clock: () => number) {
+    return new SwapChannelState({
+      channels: {
+        'ETH:evm:31337:0xchan-1': {
+          channelId: '0xchan-1',
+          cumulativeAmount: 0n,
+          nonce: 0n,
+          updatedAt: 0,
+        },
+      },
+      bindingIdleTtlMs,
+      clock,
+    });
+  }
+
+  it('[P0] a fresh sender reclaims the sole channel once the prior binding has been idle past bindingIdleTtlMs', () => {
+    let now = 0;
+    const cs = makeOneChannelPool(1000, () => now);
+
+    const r1 = cs.reserve({
+      assetCode: 'ETH',
+      chain: 'evm:31337',
+      senderPubkey: SENDER_A,
+      cumulativeDelta: 1n,
+    });
+
+    now = 1000; // exactly at the idle threshold
+    const r2 = cs.reserve({
+      assetCode: 'ETH',
+      chain: 'evm:31337',
+      senderPubkey: SENDER_B,
+      cumulativeDelta: 2n,
+    });
+
+    expect(r2.channelId).toBe(r1.channelId);
+    // The channel's running nonce/cumulativeAmount watermark is NOT reset on
+    // reclaim — it is a single on-chain channel's monotonic ledger, and the
+    // balance-proof `recipient` (not the sticky-binding sender) determines
+    // who a claim pays.
+    expect(r2.nonce).toBe(2n);
+    expect(r2.cumulativeAmount).toBe(3n);
+
+    const bindings = cs.getBindings();
+    expect(bindings['ETH:evm:31337:' + SENDER_A]).toBeUndefined();
+    expect(bindings['ETH:evm:31337:' + SENDER_B]).toBe(
+      'ETH:evm:31337:0xchan-1'
+    );
+  });
+
+  it("[P0] a fresh sender does NOT reclaim the channel before bindingIdleTtlMs has elapsed (an active sender's binding is never stolen)", () => {
+    let now = 0;
+    const cs = makeOneChannelPool(1000, () => now);
+
+    cs.reserve({
+      assetCode: 'ETH',
+      chain: 'evm:31337',
+      senderPubkey: SENDER_A,
+      cumulativeDelta: 1n,
+    });
+
+    now = 999; // one ms short of the idle threshold
+    expect(() =>
+      cs.reserve({
+        assetCode: 'ETH',
+        chain: 'evm:31337',
+        senderPubkey: SENDER_B,
+        cumulativeDelta: 1n,
+      })
+    ).toThrow(SwapWalletError);
+  });
+
+  it('[P1] without bindingIdleTtlMs configured, behavior is unchanged (throws regardless of elapsed time)', () => {
+    let now = 0;
+    const cs = new SwapChannelState({
+      channels: {
+        'ETH:evm:31337:0xchan-1': {
+          channelId: '0xchan-1',
+          cumulativeAmount: 0n,
+          nonce: 0n,
+          updatedAt: 0,
+        },
+      },
+      clock: () => now,
+    });
+    cs.reserve({
+      assetCode: 'ETH',
+      chain: 'evm:31337',
+      senderPubkey: SENDER_A,
+      cumulativeDelta: 1n,
+    });
+    now = 1_000_000_000;
+    expect(() =>
+      cs.reserve({
+        assetCode: 'ETH',
+        chain: 'evm:31337',
+        senderPubkey: SENDER_B,
+        cumulativeDelta: 1n,
+      })
+    ).toThrow(SwapWalletError);
+  });
+
+  it('[P1] reclaim picks the LEAST-recently-active bound channel among multiple idle candidates', () => {
+    let now = 0;
+    const cs = new SwapChannelState({
+      channels: {
+        'ETH:evm:31337:0xchan-1': {
+          channelId: '0xchan-1',
+          cumulativeAmount: 0n,
+          nonce: 0n,
+          updatedAt: 0,
+        },
+        'ETH:evm:31337:0xchan-2': {
+          channelId: '0xchan-2',
+          cumulativeAmount: 0n,
+          nonce: 0n,
+          updatedAt: 0,
+        },
+      },
+      bindingIdleTtlMs: 1000,
+      clock: () => now,
+    });
+
+    // SENDER_A binds first (at t=0); SENDER_B binds second (at t=500).
+    const rA = cs.reserve({
+      assetCode: 'ETH',
+      chain: 'evm:31337',
+      senderPubkey: SENDER_A,
+      cumulativeDelta: 1n,
+    });
+    now = 500;
+    cs.reserve({
+      assetCode: 'ETH',
+      chain: 'evm:31337',
+      senderPubkey: SENDER_B,
+      cumulativeDelta: 1n,
+    });
+
+    // At t=1500 both are idle-eligible (>=1000ms since their last activity),
+    // but SENDER_A has been idle longest — it should be reclaimed first.
+    now = 1500;
+    const SENDER_C = 'c'.repeat(64);
+    const rC = cs.reserve({
+      assetCode: 'ETH',
+      chain: 'evm:31337',
+      senderPubkey: SENDER_C,
+      cumulativeDelta: 1n,
+    });
+    expect(rC.channelId).toBe(rA.channelId);
+
+    const bindings = cs.getBindings();
+    expect(bindings['ETH:evm:31337:' + SENDER_A]).toBeUndefined();
+    expect(bindings['ETH:evm:31337:' + SENDER_B]).toBe(
+      'ETH:evm:31337:0xchan-2'
+    );
+  });
+});

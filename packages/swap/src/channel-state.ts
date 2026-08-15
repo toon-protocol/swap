@@ -20,6 +20,23 @@
  * (`SwapInventory` budget/reservations); making the binding deposit-aware
  * is future work once channel deposits are tracked in this state.
  *
+ * Issue #113 — the "sticky forever" half of this policy assumed a stable
+ * long-lived sender identity (a peered daemon). A released client instead
+ * mints a FRESH ephemeral `senderPubkey` per swap request, so every request
+ * looks like a brand-new sender; with the (common) single-channel
+ * deployment, the second request can never bind and `reserve()` throws
+ * UNSUPPORTED_CHAIN forever (the binding is persisted — issue #46 — so not
+ * even a restart clears it). `bindingIdleTtlMs` (opt-in, unset by default —
+ * existing deployments are unaffected) lets an operator declare a binding
+ * "closed" after it has seen no `reserve()`/`release()` activity for that
+ * long: once no UNBOUND channel exists for the pool, `resolveChannel`
+ * reclaims the LEAST-recently-active bound channel that has crossed the
+ * idle threshold instead of throwing. The channel's nonce/cumulativeAmount
+ * watermark is untouched by a reclaim — it is one on-chain channel's
+ * monotonic ledger, and the balance-proof `recipient` (not the sticky
+ * binding) decides who a claim actually pays. An actively-used binding
+ * (idle time under the threshold) is never stolen.
+ *
  * State is held in memory for microtask-atomic `reserve`/`release`;
  * durability is provided by `SwapStatePersister` (`state-store.ts`, issue
  * #46): `snapshot()` exports channels + bindings, and the constructor's
@@ -55,6 +72,15 @@ export interface SwapChannelStateInit {
    * exists, failing every subsequent `reserve()`).
    */
   bindings?: Record<string, string>;
+  /**
+   * Issue #113 — opt-in idle-timeout (ms) for reclaiming a sticky binding.
+   * Unset (default) preserves the pre-#113 "sticky forever" behavior byte
+   * for byte. When set, `resolveChannel`'s first-use fallback may steal the
+   * least-recently-active bound channel for a fresh sender once no unbound
+   * channel remains AND that binding has been idle at least this long —
+   * see the class docblock.
+   */
+  bindingIdleTtlMs?: number;
 }
 
 export interface ReserveParams {
@@ -95,10 +121,21 @@ export class SwapChannelState {
   private readonly boundChannels = new Set<string>();
   private readonly clock: () => number;
   private readonly logger?: ReleaseLogger;
+  /** Issue #113 — opt-in idle-timeout (ms) for reclaiming a sticky binding. Unset = disabled. */
+  private readonly bindingIdleTtlMs?: number;
 
   constructor(init?: SwapChannelStateInit) {
     this.clock = init?.clock ?? Date.now;
     this.logger = init?.logger;
+    if (
+      init?.bindingIdleTtlMs !== undefined &&
+      (!Number.isFinite(init.bindingIdleTtlMs) || init.bindingIdleTtlMs <= 0)
+    ) {
+      throw new Error(
+        'SwapChannelState bindingIdleTtlMs must be a positive number'
+      );
+    }
+    this.bindingIdleTtlMs = init?.bindingIdleTtlMs;
     if (init) {
       for (const [k, v] of Object.entries(init.channels)) {
         this.channels.set(k, { ...v });
@@ -142,8 +179,9 @@ export class SwapChannelState {
   /**
    * Resolve the channel for a given sender, establishing a sticky binding
    * on first use. Returns `null` if no unbound channel is available for
-   * this `(asset, chain)`. First-use selection is "first unbound channel"
-   * — NOT capacity-aware (see the class docblock, issue #49).
+   * this `(asset, chain)` AND (issue #113) no bound channel qualifies for
+   * idle reclaim. First-use selection is "first unbound channel" — NOT
+   * capacity-aware (see the class docblock, issue #49).
    *
    * @internal — exposed for AC-12 test introspection via the swap node.
    */
@@ -172,6 +210,38 @@ export class SwapChannelState {
       this.senderBinding.set(bk, storedKey);
       this.boundChannels.add(storedKey);
       return entry;
+    }
+    // Issue #113 — no unbound channel left. If the operator opted into
+    // `bindingIdleTtlMs`, reclaim the LEAST-recently-active bound channel
+    // in this pool, provided it has actually gone idle that long. This
+    // never fires for a genuinely active multi-sender pool (AC-12): every
+    // bound channel's `updatedAt` stays fresh as long as its sender keeps
+    // reserving/releasing.
+    if (this.bindingIdleTtlMs !== undefined) {
+      const now = this.clock();
+      let oldestKey: string | undefined;
+      let oldestEntry: ChannelEntry | undefined;
+      for (const [storedKey, entry] of this.channels) {
+        if (!storedKey.startsWith(prefix)) continue;
+        if (!this.boundChannels.has(storedKey)) continue;
+        if (now - entry.updatedAt < this.bindingIdleTtlMs) continue;
+        if (!oldestEntry || entry.updatedAt < oldestEntry.updatedAt) {
+          oldestKey = storedKey;
+          oldestEntry = entry;
+        }
+      }
+      if (oldestKey && oldestEntry) {
+        for (const [otherBk, storedKey] of this.senderBinding) {
+          if (storedKey === oldestKey) {
+            this.senderBinding.delete(otherBk);
+            break;
+          }
+        }
+        this.senderBinding.set(bk, oldestKey);
+        // oldestKey stays in boundChannels — it is still bound, just to a
+        // different sender now.
+        return oldestEntry;
+      }
     }
     return null;
   }
