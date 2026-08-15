@@ -25,6 +25,8 @@ const FIXTURE_MNEMONIC =
 const BTP_PORT = 20000 + Math.floor(Math.random() * 20000);
 
 const ILP_ADDRESS = 'g.toon.swap.issue111-fixture';
+/** Pinned so the self-route's `nextHop` has a known expected value. */
+const NODE_ID = 'toon-swap-issue111-fixture';
 
 function buildStandaloneConfig(): SwapNodeConfig {
   return {
@@ -63,6 +65,7 @@ function buildStandaloneConfig(): SwapNodeConfig {
     // Standalone mode: no `connector`, no `connectorUrl` — just btpServerPort.
     btpServerPort: BTP_PORT,
     ilpAddress: ILP_ADDRESS,
+    nodeId: NODE_ID,
   };
 }
 
@@ -75,12 +78,14 @@ describe('standalone startSwapNode routing (issue #111)', () => {
 
       // Before the fix, routes: [] meant getNextHop() returned null here
       // and every inbound packet at our own address was F02-rejected.
-      const nextHop = connector.routingTable.getNextHop(ILP_ADDRESS);
-      expect(nextHop).not.toBeNull();
+      // `nextHop === nodeId` is what PacketHandler treats as local delivery
+      // (packet-handler.js: `nextHop === this.nodeId || nextHop === 'local'`),
+      // so a route pointing anywhere else would dodge the F02 without ever
+      // reaching the swap handler.
+      expect(connector.routingTable.getNextHop(ILP_ADDRESS)).toBe(NODE_ID);
 
-      const routes = connector.getRoutingTable();
-      expect(routes).toContainEqual(
-        expect.objectContaining({ prefix: ILP_ADDRESS })
+      expect(connector.getRoutingTable()).toContainEqual(
+        expect.objectContaining({ prefix: ILP_ADDRESS, nextHop: NODE_ID })
       );
     } finally {
       await instance.stop();
