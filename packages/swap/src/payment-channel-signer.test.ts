@@ -37,9 +37,8 @@ try {
 describe('EvmPaymentChannelSigner — round-trip derive → sign → verify (Story 12.4 AC-5, T-035)', () => {
   it('[P0] (T-035) EVM signer produces a 65-byte signature (r||s||v) that recovers to the derived public key', async () => {
     const { secp256k1 } = await import('@noble/curves/secp256k1.js');
-    const { balanceProofHashEvm, hexToBytes } = await import(
-      '@toon-protocol/settlement-digest'
-    );
+    const { balanceProofHashEvm, hexToBytes } =
+      await import('@toon-protocol/settlement-digest');
 
     // Arrange
     const keys = await deriveSwapNodeKeys({

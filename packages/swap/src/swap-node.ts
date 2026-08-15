@@ -673,6 +673,31 @@ export function parseEvmChainId(chain: string): bigint {
 }
 
 /**
+ * Look up the `chainProviders` entry for an `evm:*` target chain, or throw the
+ * `INVALID_CONFIG` refusal naming the chain key and the missing setting.
+ *
+ * Shared by {@link validateConfig} (the boot-time refusal) and `startSwapNode`
+ * (which re-checks defensively at signer construction, so the lookup can never
+ * silently fall through to an unbound signer) — issue #101.
+ */
+function requireEvmChainProvider(
+  chainProviders: SwapNodeConfig['chainProviders'],
+  chain: string
+): SwapNodeEvmChainProvider {
+  const provider = chainProviders?.find(
+    (p): p is SwapNodeEvmChainProvider =>
+      p.chainType === 'evm' && p.chainId === chain
+  );
+  if (!provider) {
+    throw new SwapNodeStartError(
+      'INVALID_CONFIG',
+      `SwapNodeConfig.chainProviders is missing an entry for pair.to.chain="${chain}" — a "channelAddress" (deployed RollingSwapChannel address) is required to sign v2 balance proofs on this chain`
+    );
+  }
+  return provider;
+}
+
+/**
  * Validate a {@link SwapNodeConfig} and throw {@link SwapNodeStartError} with code
  * `INVALID_CONFIG` on the first violation. Pure and synchronous — it allocates
  * no resources and boots nothing, so it is safe to call directly in tests
@@ -867,16 +892,7 @@ export function validateConfig(config: SwapNodeConfig): void {
         `SwapNodeConfig: pair.to.chain="${chain}" ${err instanceof Error ? err.message : String(err)}`
       );
     }
-    const provider = config.chainProviders?.find(
-      (p): p is SwapNodeEvmChainProvider =>
-        p.chainType === 'evm' && p.chainId === chain
-    );
-    if (!provider) {
-      throw new SwapNodeStartError(
-        'INVALID_CONFIG',
-        `SwapNodeConfig.chainProviders is missing an entry for pair.to.chain="${chain}" — a "channelAddress" (deployed RollingSwapChannel address) is required to sign v2 balance proofs on this chain`
-      );
-    }
+    requireEvmChainProvider(config.chainProviders, chain);
   }
 }
 
@@ -891,7 +907,13 @@ const SWAP_REQUIRED_PROVIDER_FIELDS: Record<
   SwapNodeChainProvider['chainType'],
   readonly string[]
 > = {
-  evm: ['chainId', 'rpcUrl', 'registryAddress', 'tokenAddress', 'channelAddress'],
+  evm: [
+    'chainId',
+    'rpcUrl',
+    'registryAddress',
+    'tokenAddress',
+    'channelAddress',
+  ],
   solana: ['chainId', 'rpcUrl', 'programId'],
   mina: ['chainId', 'graphqlUrl', 'zkAppAddress'],
 };
@@ -1007,16 +1029,7 @@ export async function startSwapNode(
       // validateConfig() has already guaranteed a chainProviders entry with
       // a non-empty channelAddress exists for every EVM chain a pair
       // targets, and that the chain key parses to a numeric chainId.
-      const provider = (config.chainProviders ?? []).find(
-        (p): p is SwapNodeEvmChainProvider =>
-          p.chainType === 'evm' && p.chainId === chain
-      );
-      if (!provider) {
-        throw new SwapNodeStartError(
-          'INVALID_CONFIG',
-          `SwapNodeConfig.chainProviders is missing an entry for pair.to.chain="${chain}" — a "channelAddress" (deployed RollingSwapChannel address) is required to sign v2 balance proofs on this chain`
-        );
-      }
+      const provider = requireEvmChainProvider(config.chainProviders, chain);
       signers[chain] = new EvmPaymentChannelSigner({
         chain,
         privateKey: swapNodeKeys.evm.privateKey,

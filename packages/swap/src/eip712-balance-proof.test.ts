@@ -204,15 +204,16 @@ describe('issue #101 — boot refuses without a deployed RollingSwapChannel addr
 
   it('[P0] a swap pair targeting an EVM chain with NO chainProviders entry at all fails INVALID_CONFIG, naming the chain', () => {
     const chain = 'evm:8453';
-    expect(() => validateConfig(baseConfig(chain))).toThrow(SwapNodeStartError);
+    let caught: unknown;
     try {
       validateConfig(baseConfig(chain));
-      throw new Error('expected throw');
     } catch (err) {
-      expect((err as SwapNodeStartError).code).toBe('INVALID_CONFIG');
-      expect((err as Error).message).toContain(chain);
-      expect((err as Error).message).toContain('channelAddress');
+      caught = err;
     }
+    expect(caught).toBeInstanceOf(SwapNodeStartError);
+    expect((caught as SwapNodeStartError).code).toBe('INVALID_CONFIG');
+    expect((caught as Error).message).toContain(chain);
+    expect((caught as Error).message).toContain('channelAddress');
   });
 
   it('[P0] a chainProviders entry present but missing channelAddress fails INVALID_CONFIG, naming the setting', () => {
