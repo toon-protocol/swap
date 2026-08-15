@@ -104,6 +104,11 @@ describe('AC-9 [P2] Anvil-backed settlement tx well-formedness (opt-in, SDK E2E 
         verifySignatures: true,
       });
 
+      // With verification on, a claim that fails to recover lands in
+      // `rejected` rather than throwing — assert none did, so the bundle
+      // below is built from claims sdk itself accepted.
+      expect(settlement.rejected.length).toBe(0);
+
       const bundle = settlement.bundles[0]!;
       expect(bundle.unsignedTxBytes.length).toBeGreaterThan(0);
 

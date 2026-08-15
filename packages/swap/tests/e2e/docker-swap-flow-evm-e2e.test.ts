@@ -270,15 +270,14 @@ describe('Docker Swap-Flow EVM E2E (Story 12.10, Task 2)', () => {
 
   // ---------------------------------------------------------------------
   // AC-5 — real NIP-59 gift-wrap: malformed chain-recipient → F00
-  // (toon#200/swap#112: the swap handler now classifies this
-  // INVALID_CHAIN_RECIPIENT reject as F01, not T00, so the sender can
-  // self-diagnose instead of treating it as transient. On the wire this
-  // still surfaces as F00: core's REJECT_CODE_MAP has no dedicated
-  // semantic slot for F01, so it deliberately narrows to the
-  // `invalid_request` reason (issue #86) — same as F01 always has — which
-  // the connector's payment-handler adapter re-encodes as F00. The
-  // meaningful change is T00 (transient) -> F00 (permanent), not the exact
-  // wire byte.)
+  //
+  // toon#200/swap#112: the swap handler now classifies this reject as F01,
+  // not T00, so the sender can self-diagnose instead of retrying a
+  // permanent failure. On the wire it surfaces as F00 — core's
+  // `ILP_TO_SEMANTIC` has no dedicated slot for F01 and deliberately maps it
+  // to the `invalid_request` reason (issue #86), which the connector
+  // re-encodes as F00. The meaningful change is T00 (transient) → F00
+  // (permanent), not the exact wire byte.
   // ---------------------------------------------------------------------
   it('AC-5 [P1] malformed chain-recipient rumor sent through real BTP returns F00, not T00 (Story 12.9 AC-8, swap#112)', async (ctx) => {
     if (skipIfNotReady(servicesReady)) return ctx.skip();
@@ -332,10 +331,8 @@ describe('Docker Swap-Flow EVM E2E (Story 12.10, Task 2)', () => {
       timeout: 15000,
     });
 
-    // The swap node classifies this F01 internally (INVALID_CHAIN_RECIPIENT
-    // — toon#200 moved it off T00), which the connector's wire adapter
-    // narrows to F00 (see the comment above the `it()` block). Either way
-    // it is NOT T00: the sender sees a permanent, self-diagnosable reject.
+    // NOT T00: the sender sees a permanent, self-diagnosable reject (see the
+    // F01 → F00 mapping note above the `it()` block).
     expect(result.accepted).toBe(false);
     expect(result.code).toBe('F00');
   });

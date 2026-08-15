@@ -379,7 +379,7 @@ describe('AC-4 [P0] end-to-end swap: 1-packet, 10-packet, rate-drift (T-061, T-0
     expect(checksummedRecipient).not.toBe(checksummedRecipient.toLowerCase());
 
     const swapNode = await buildFixtureSwapNode();
-    const sender = await buildFixtureSender(swapNode, new Uint8Array(32).fill(7));
+    const sender = await buildFixtureSender(swapNode, new Uint8Array(32).fill(14));
     try {
       const result = await streamSwap({
         client: sender.client,
@@ -396,9 +396,10 @@ describe('AC-4 [P0] end-to-end swap: 1-packet, 10-packet, rate-drift (T-061, T-0
       expect(result.claims.length).toBe(1);
       const claim = result.claims[0];
       if (!claim) throw new Error('expected exactly one claim');
-      expect(claim.recipient?.toLowerCase()).toBe(
-        checksummedRecipient.toLowerCase(),
-      );
+      // The node signs and echoes the canonical (lowercased) form — asserting
+      // that exactly, rather than a case-insensitive compare, pins the
+      // normalization the fix introduced.
+      expect(claim.recipient).toBe(checksummedRecipient.toLowerCase());
     } finally {
       await sender.close();
       await swapNode.stop();
