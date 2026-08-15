@@ -31,7 +31,9 @@ const servers: Server[] = [];
 
 afterEach(async () => {
   await Promise.all(
-    servers.splice(0).map((s) => new Promise<void>((resolve) => s.close(() => resolve())))
+    servers
+      .splice(0)
+      .map((s) => new Promise<void>((resolve) => s.close(() => resolve())))
   );
 });
 
@@ -56,10 +58,10 @@ async function startFakeChainRpc(cumulativePaid: bigint): Promise<string> {
         [
           word('11'.repeat(20)),
           word('22'.repeat(20)),
-          word((3n).toString(16)),
+          word(3n.toString(16)),
           word(cumulativePaid.toString(16)),
-          word((1_000n).toString(16)),
-          word((0n).toString(16)),
+          word(1_000n.toString(16)),
+          word(0n.toString(16)),
           word((1).toString(16)),
         ].join('');
       res.writeHead(200, { 'content-type': 'application/json' });
@@ -116,7 +118,14 @@ async function bootAndCaptureChannelState(
       },
     ],
     channels: {
-      [EVM_CHAIN]: [{ channelId: CHANNEL_ID, cumulativeAmount: 0n, nonce: 0n, updatedAt: 0 }],
+      [EVM_CHAIN]: [
+        {
+          channelId: CHANNEL_ID,
+          cumulativeAmount: 0n,
+          nonce: 0n,
+          updatedAt: 0,
+        },
+      ],
     },
     inventory: { [EVM_CHAIN]: 1_000_000n },
     chainProviders: [evmProvider],
@@ -130,7 +139,7 @@ async function bootAndCaptureChannelState(
   return { channelState: captured, stop: () => instance.stop() };
 }
 
-describe("startSwapNode wires the issue #113 on-chain rebind reader (no opt-in knob)", () => {
+describe('startSwapNode wires the issue #113 on-chain rebind reader (no opt-in knob)', () => {
   it('[P0] the reported repro: a second ephemeral sender succeeds once the first is fully redeemed on-chain', async () => {
     const rpcUrl = await startFakeChainRpc(1n);
     const { channelState, stop } = await bootAndCaptureChannelState(rpcUrl);
@@ -197,7 +206,12 @@ describe("startSwapNode wires the issue #113 on-chain rebind reader (no opt-in k
       ],
       channels: {
         [SOLANA_CHAIN]: [
-          { channelId: '11'.repeat(32), cumulativeAmount: 0n, nonce: 0n, updatedAt: 0 },
+          {
+            channelId: '11'.repeat(32),
+            cumulativeAmount: 0n,
+            nonce: 0n,
+            updatedAt: 0,
+          },
         ],
       },
       inventory: { [SOLANA_CHAIN]: 1_000_000n },

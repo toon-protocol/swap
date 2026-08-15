@@ -2,13 +2,14 @@
  * EVM implementation of {@link ChannelOnChainReader} (issue #113).
  *
  * Reads the LIVE `cumulativePaid` watermark for a `RollingSwapChannel`
- * channel straight off-chain via a raw `eth_call` to the `channels(bytes32)`
- * public-mapping getter Solidity auto-generates for the `Channel` struct
- * (see `tests/integration/fixtures/RollingSwapChannel.sol`). Every call
- * issues a fresh call — the reader caches nothing, matching the "never
- * stale" requirement in `channel-state.ts`'s `ChannelOnChainReader` docs: a
- * rebind decision made on a cached answer could approve stealing a channel
- * that has since accrued an unredeemed claim.
+ * channel directly from the chain via a raw `eth_call` to the
+ * `channels(bytes32)` public-mapping getter Solidity auto-generates for the
+ * `Channel` struct (see `tests/integration/fixtures/RollingSwapChannel.sol`).
+ * Every call hits the RPC endpoint afresh — the reader caches nothing,
+ * matching the "never stale" requirement in `channel-state.ts`'s
+ * `ChannelOnChainReader` docs: a rebind decision made on a cached answer
+ * could approve stealing a channel that has since accrued an unredeemed
+ * claim.
  *
  * Hand-rolled (selector + fixed-offset word decode) rather than pulling in
  * an ABI/RPC client library: every `Channel` field is a static (non-dynamic)
@@ -34,6 +35,34 @@ const CHANNELS_SELECTOR = keccak_256(
 /** Word index of `cumulativePaid` in the `Channel` struct's ABI-encoded return. */
 const CUMULATIVE_PAID_WORD_INDEX = 3;
 const WORD_HEX_LEN = 64; // 32 bytes, 2 hex chars/byte
+
+/** `channels(bytes32)` calldata: 4-byte selector followed by the 32-byte channelId. */
+function encodeChannelsCall(channelId: string): string {
+  const channelIdBytes = hexToBytes(channelId);
+  if (channelIdBytes.length !== 32) {
+    throw new Error(
+      `channelId must be a 32-byte hex value (got ${channelIdBytes.length} bytes)`
+    );
+  }
+  return `0x${bytesToHex(CHANNELS_SELECTOR)}${bytesToHex(channelIdBytes)}`;
+}
+
+/**
+ * Pull `cumulativePaid` out of a `channels()` return value. Every `Channel`
+ * field is a static type, so the struct is a flat run of 32-byte words and
+ * the field sits at a fixed offset — no general ABI decoder needed.
+ */
+function decodeCumulativePaid(resultHex: string, chain: string): bigint {
+  const hex = resultHex.startsWith('0x') ? resultHex.slice(2) : resultHex;
+  const wordStart = CUMULATIVE_PAID_WORD_INDEX * WORD_HEX_LEN;
+  const word = hex.slice(wordStart, wordStart + WORD_HEX_LEN);
+  if (word.length !== WORD_HEX_LEN) {
+    throw new Error(
+      `channels() response for chain '${chain}' is too short to contain cumulativePaid (got ${hex.length} hex chars)`
+    );
+  }
+  return BigInt(`0x${word}`);
+}
 
 /** Minimal per-EVM-chain slice this reader needs — see `SwapNodeEvmChainProvider`. */
 export interface EvmChannelReaderProvider {
@@ -73,17 +102,11 @@ export function createEvmChannelOnChainReader(
     async getCumulativePaid({ chain, channelId }) {
       const entry = byChain.get(chain);
       if (!entry) {
-        throw new Error(`No EVM chain provider configured for chain '${chain}'`);
-      }
-      const channelIdBytes = hexToBytes(channelId);
-      if (channelIdBytes.length !== 32) {
         throw new Error(
-          `channelId must be a 32-byte hex value (got ${channelIdBytes.length} bytes)`
+          `No EVM chain provider configured for chain '${chain}'`
         );
       }
-      const calldata = `0x${bytesToHex(CHANNELS_SELECTOR)}${bytesToHex(
-        channelIdBytes
-      )}`;
+      const calldata = encodeChannelsCall(channelId);
       const response = await fetch(entry.rpcUrl, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
@@ -110,17 +133,7 @@ export function createEvmChannelOnChainReader(
           `eth_call to channels(${channelId}) on chain '${chain}' returned no result`
         );
       }
-      const hex = json.result.startsWith('0x')
-        ? json.result.slice(2)
-        : json.result;
-      const wordStart = CUMULATIVE_PAID_WORD_INDEX * WORD_HEX_LEN;
-      const word = hex.slice(wordStart, wordStart + WORD_HEX_LEN);
-      if (word.length !== WORD_HEX_LEN) {
-        throw new Error(
-          `channels() response for chain '${chain}' is too short to contain cumulativePaid (got ${hex.length} hex chars)`
-        );
-      }
-      return BigInt(`0x${word}`);
+      return decodeCumulativePaid(json.result, chain);
     },
   };
 }

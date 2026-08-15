@@ -20,7 +20,9 @@ const servers: Server[] = [];
 
 afterEach(async () => {
   await Promise.all(
-    servers.splice(0).map((s) => new Promise<void>((resolve) => s.close(() => resolve())))
+    servers
+      .splice(0)
+      .map((s) => new Promise<void>((resolve) => s.close(() => resolve())))
   );
 });
 
@@ -201,7 +203,11 @@ describe('createEvmChannelOnChainReader (issue #113)', () => {
   it('[P1] rejects a malformed channelAddress at construction time', () => {
     expect(() =>
       createEvmChannelOnChainReader([
-        { chainId: CHAIN, rpcUrl: 'http://127.0.0.1:1', channelAddress: '0xnot-an-address' },
+        {
+          chainId: CHAIN,
+          rpcUrl: 'http://127.0.0.1:1',
+          channelAddress: '0xnot-an-address',
+        },
       ])
     ).toThrow();
   });

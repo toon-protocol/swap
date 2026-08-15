@@ -137,6 +137,16 @@ function bindingKey(p: {
   return `${p.assetCode}:${p.chain}:${p.senderPubkey}`;
 }
 
+/**
+ * Stored-key prefix shared by every channel in one `(asset, chain)` pool.
+ * The third segment is normally the channelId, but fixtures/legacy callers
+ * may key by anything — prefix matching keeps provisioning callers decoupled
+ * from the internal storage-key shape.
+ */
+function poolPrefix(p: { assetCode: string; chain: string }): string {
+  return `${p.assetCode}:${p.chain}:`;
+}
+
 /** Result of a rebind attempt — see {@link SwapChannelState.reclaimFullyRedeemedChannel}. */
 interface ReclaimResult {
   /** The rebound channel, or `null` when no candidate was safe to rebind. */
@@ -236,12 +246,8 @@ export class SwapChannelState {
       return this.channels.get(existing) ?? null;
     }
     // First-use: find any provisioned channel for this (asset, chain) that
-    // is not already bound to a different sender. We scan the raw stored
-    // keys — any key prefixed `${assetCode}:${chain}:` counts, regardless
-    // of whether the third segment is the channelId or a legacy
-    // senderPubkey. This keeps provisioning callers decoupled from the
-    // internal storage-key shape.
-    const prefix = `${p.assetCode}:${p.chain}:`;
+    // is not already bound to a different sender.
+    const prefix = poolPrefix(p);
     for (const [storedKey, entry] of this.channels) {
       if (!storedKey.startsWith(prefix)) continue;
       if (this.boundChannels.has(storedKey)) continue;
@@ -273,7 +279,7 @@ export class SwapChannelState {
     senderPubkey: string;
   }): Promise<ReclaimResult> {
     if (!this.onChainReader) return { entry: null, refusals: [] };
-    const prefix = `${p.assetCode}:${p.chain}:`;
+    const prefix = poolPrefix(p);
     const candidateKeys: string[] = [];
     for (const storedKey of this.channels.keys()) {
       if (!storedKey.startsWith(prefix)) continue;
