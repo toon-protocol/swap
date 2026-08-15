@@ -1,0 +1,14 @@
+# Build context trim for deploy/swap/Dockerfile (issue #124). Keeps the
+# `docker build -f deploy/swap/Dockerfile .` context to source + manifests —
+# everything the multi-stage build actually COPYs in.
+node_modules/
+**/node_modules/
+**/dist/
+.git/
+.pnpm-store/
+coverage/
+.sandcastle/
+.changeset/
+docs/
+*.md
+.devbox/

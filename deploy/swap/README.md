@@ -1,0 +1,84 @@
+# swap runtime image (issue #124)
+
+Runtime container for the TS rolling-swap **maker** node. Built from
+`deploy/swap/Dockerfile` (repo-root build context); entrypoint is the
+`toon-swap` CLI (`packages/swap/src/cli.ts`).
+
+```
+docker build -f deploy/swap/Dockerfile -t swap .
+docker run --rm -p 3400:3400 \
+  -v "$(pwd)/swap.config.json:/app/config/swap.config.json:ro" \
+  -e SWAP_MNEMONIC="$(cat mnemonic.txt)" \
+  swap
+```
+
+This does **not** deploy anything to a box — it only produces a pullable
+image. On-box provisioning (identity generation, DNS/TLS, gas funding, the
+connector-side compose service) is a separate, human-gated ticket
+(toon-meta#402).
+
+## Config file (`/app/config/swap.config.json` by default)
+
+Mounted read-only at the path the `CMD` passes to `--config` (override with
+a different `--config <path>` in the container's command). JSON, same shape
+`startSwapNode()` consumes. Fields relevant to the proven standalone-maker
+wiring (`scratchpad/t6/maker.mjs`):
+
+| Field | Required | Notes |
+| --- | --- | --- |
+| `swapPairs` | yes | Non-empty array of `{ from, to, rate }` (`{ assetCode, assetScale, chain }` legs). |
+| `chains` | yes | e.g. `["evm"]`. |
+| `channels` | yes | Per-chain seed `ChannelEntry[]` (`channelId`, `cumulativeAmount`, `nonce`, `updatedAt`). |
+| `inventory` | yes | Per-chain starting inventory (string/number, coerced to `bigint`). |
+| `relayUrls` | yes | Nostr relay WS URLs (legacy fallback publish path — see `peerInfoIlpDestination` below). |
+| `windowBudget` | no | Issue #49 per-chain in-flight window ceiling. |
+| `blsPort` | no | `/health` HTTP port. |
+| `btpServerPort` | no | **Required for the proven standalone-maker wiring** — no `connectorUrl`/`connector` set + this present = auto-created embedded `ConnectorNode` with no parent, self-routed. |
+| `statePath` | no | Durable state snapshot path (issue #46) — mount a volume here to persist inventory/watermarks/bindings across restarts. |
+| `chainProviders` | yes for EVM settlement | Array of `{ chainType: "evm", chainId, rpcUrl, registryAddress, tokenAddress, channelAddress, keyId? }` (or the `solana`/`mina` variants — see `SwapNodeChainProvider` in `swap-node.ts`). `channelAddress` (the deployed `RollingSwapChannel`) is **required** for any EVM chain a `swapPair` targets — boot refuses otherwise. `keyId` defaults to `settlementPrivateKey` (or the identity secret key) when omitted. |
+| `settlementPrivateKey` | no | Hex EVM private key for the claim signer / `chainProviders[].keyId` default. In the proven wiring this is the **same BIP-44 account-index-2 key** used as the connector `keyId`. |
+| `ilpAddress` | no | Advertised ILP address + self-route prefix. Default `g.toon.swap.<pubkey16>`. |
+| `btpEndpoint` | no | **Public** `wss://host:port` BTP endpoint advertised in kind:10032 — the "direct-dial" reachability path a client uses to reach a deployed maker with no parent connector (toon-meta#402). |
+| `advertisedAsset` | no | `{ assetCode, assetScale }` for kind:10032. Default `{ USD, 6 }`. |
+| `peerInfoIlpDestination` | no | **Issue #124.** ILP address of a relay that stores events, e.g. the apex `g.townhouse` — routes the paid kind:10032 announce over ILP through the connector instead of the (pay-to-write-rejected) unpaid Nostr WS publish. Requires a connector (`btpServerPort` standalone mode, or `connectorUrl`). |
+| `peerInfoPricePerByte` | no | Price-per-byte (string/number → `bigint`) for the `peerInfoIlpDestination` ILP PREPARE `amount`. Default `0`. |
+| `passphrase` | no | BIP-39 passphrase. |
+| `knownPeers`, `transport`, `connectorUrl`, `parentPeerId`, `parentAuthToken`, `nodeId`, `parentEvmAddress`, `maxRateAge` | no | See `packages/swap/src/cli.ts` header + `SwapNodeConfig` — not part of the proven standalone wiring, only needed for the embedded-with-parent / rate-feed / privacy-overlay variants. |
+
+Exactly one identity is required: `mnemonic` (BIP-39) in the config file, or
+`SWAP_MNEMONIC` (below) — env always wins and is the preferred way to inject
+it from a mounted secret rather than baking it into the config file.
+
+## Environment variables (override the config file)
+
+| Var | Purpose |
+| --- | --- |
+| `SWAP_MNEMONIC` | BIP-39 mnemonic — identity + (unless `settlementPrivateKey`/`chainProviders[].keyId` override it) the claim signer. |
+| `SWAP_SECRET_KEY_HEX` | 64-char hex secret key, alternative to a mnemonic. |
+| `SWAP_BLS_PORT` | Overrides `blsPort`. |
+| `SWAP_RELAYS` | Comma-separated relay WS URLs, overrides `relayUrls`. |
+| `SWAP_STATE_PATH` | Overrides `statePath`. |
+| `TOON_CONNECTOR_URL` | Parent BTP URL — activates embedded-with-parent mode instead of standalone. |
+| `TOON_PARENT_PEER_ID` | Parent peer id (default `apex`). |
+| `TOON_PARENT_AUTH_TOKEN` | BTP auth token for the parent peer. |
+| `TOON_ILP_ADDRESS` | Overrides `ilpAddress`. |
+| `TOON_NODE_ID` | Overrides the embedded connector `nodeId`. |
+| `SWAP_MAX_RATE_AGE_MS`, `SWAP_MAX_RATE_AGE` | Maker staleness bound(s) (issue #48) — require `SWAP_RATE_URL`. |
+| `SWAP_RATE_URL`, `SWAP_RATE_TIMEOUT_MS` | HTTP JSON rate feed (issue #47 AC-3). |
+
+`peerInfoIlpDestination` / `peerInfoPricePerByte` are config-file-only (no
+env override), matching `ilpAddress`/`btpEndpoint`.
+
+## Ports
+
+- `btpServerPort` (config field, no default in standalone mode — the
+  maker.mjs wiring uses `3400`): BTP WebSocket server, `EXPOSE`/`-p` this to
+  make the maker directly dialable.
+- `blsPort`: `/health` HTTP.
+
+## Not covered by this image
+
+Identity generation, DNS/TLS, gas funding, and the connector-side compose
+service that mounts this image on a box are the sibling toon-meta#402
+tickets — this image only needs a config file and (for identity) a mnemonic
+to boot standalone and start advertising.

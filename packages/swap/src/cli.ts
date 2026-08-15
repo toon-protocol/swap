@@ -44,6 +44,13 @@
  * `startSwapNode()` embedding. Setting it on a static-rate JSON-config swap
  * node fails boot with INVALID_CONFIG (loud by design; a static rate has no
  * age to measure).
+ *
+ * Config-file-only fields (no env override, matching `ilpAddress`/
+ * `btpEndpoint`): `peerInfoIlpDestination` + `peerInfoPricePerByte` (issue
+ * #124) — routes the paid kind:10032 announce over ILP through a connector
+ * (`connectorUrl`, `connector`, or the auto-created standalone one) instead
+ * of the legacy unpaid Nostr WS publish a TOON relay drops. See
+ * `SwapNodeConfig.peerInfoIlpDestination`.
  */
 
 import { parseArgs } from 'node:util';
@@ -106,6 +113,11 @@ interface CliRawConfig {
   // Embedded-connector ClaimReceiver signer + parent treasury address.
   settlementPrivateKey?: string;
   parentEvmAddress?: string;
+  // Story 50.4 — paid kind:10032 advertisement via ILP (issue #124). Requires
+  // a connector (`connectorUrl`/`connector`/an auto-created standalone one);
+  // see SwapNodeConfig.peerInfoIlpDestination.
+  peerInfoIlpDestination?: string;
+  peerInfoPricePerByte?: string | number;
   // Maker staleness bound(s) — swap#48. Forwarded verbatim; startSwapNode()'s
   // validateConfig() enforces the shape AND the rateProvider requirement
   // (see the maxRateAge NOTE in the header).
@@ -218,6 +230,12 @@ function parseRawConfig(raw: CliRawConfig): SwapNodeConfig {
     cfg.settlementPrivateKey = raw.settlementPrivateKey;
   }
   if (raw.parentEvmAddress) cfg.parentEvmAddress = raw.parentEvmAddress;
+  if (raw.peerInfoIlpDestination) {
+    cfg.peerInfoIlpDestination = raw.peerInfoIlpDestination;
+  }
+  if (raw.peerInfoPricePerByte !== undefined) {
+    cfg.peerInfoPricePerByte = toBigInt(raw.peerInfoPricePerByte);
+  }
   if (raw.maxRateAge !== undefined) {
     cfg.maxRateAge = raw.maxRateAge as SwapNodeConfig['maxRateAge'];
   }
