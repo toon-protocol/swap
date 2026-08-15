@@ -67,15 +67,11 @@
  * unpaid Nostr WS publish a TOON relay drops. See
  * `SwapNodeConfig.peerInfoIlpDestination`.
  *
- * `settlementPrivateKey` auto-derivation (issue #126): whenever the
- * resolved identity is a mnemonic AND `settlementPrivateKey` is unset (or a
- * `0xdead…`-style placeholder), the CLI derives the BIP-44 account-index-2
- * EVM key (`deriveSwapNodeKeys` / D12-011 — the same key `settlementAddresses`
- * advertises and leg-B v2 EIP-712 claims are signed with) and fills
- * `settlementPrivateKey` in. This applies regardless of whether the
- * mnemonic was auto-generated or operator-provided. The resolved index-0
- * Nostr pubkey and index-2 EVM settlement address are logged once (never
- * the secret) so an operator can fund the settlement address.
+ * `settlementPrivateKey` auto-derivation (issue #126): whenever the resolved
+ * identity is a mnemonic — auto-generated or operator-provided — and
+ * `settlementPrivateKey` is unset (or a `0xdead…`-style placeholder), the CLI
+ * fills it with the BIP-44 account-index-2 EVM key. See
+ * `resolveIdentityConfig()` below.
  */
 
 import { parseArgs } from 'node:util';
@@ -379,7 +375,9 @@ const PLACEHOLDER_SETTLEMENT_KEY_RE = /^0x(?:dead)+$/i;
  * `settlementPrivateKey` needs to be (re-)derived from the mnemonic: unset,
  * or a `0xdead…`-style placeholder.
  */
-export function needsSettlementKeyDerivation(value: string | undefined): boolean {
+export function needsSettlementKeyDerivation(
+  value: string | undefined
+): boolean {
   return value === undefined || PLACEHOLDER_SETTLEMENT_KEY_RE.test(value);
 }
 
