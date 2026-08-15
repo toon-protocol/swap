@@ -22,6 +22,7 @@ import { streamSwap, buildSettlementTx } from '@toon-protocol/sdk';
 import {
   ANVIL_URL,
   ANVIL_CHAIN_ID,
+  FIXTURE_CHANNEL_ADDRESS,
   buildFixtureSwapNode,
   buildFixtureSender,
   fixtureSwapPair,
@@ -78,10 +79,21 @@ describe('AC-9 [P2] Anvil-backed settlement tx well-formedness (opt-in, SDK E2E 
       expect(result.claims.length).toBe(10);
 
       const chain = `evm:${ANVIL_CHAIN_ID}`;
-      // Test-only channel contract address (not deployed on Anvil). We
-      // assert the tx bytes are well-formed (RLP-valid; EIP-155 chain-id
-      // baked) — NOT that the call succeeds against a real contract.
-      const channelContractAddress = '0x' + 'cc'.repeat(20);
+      // MUST match the fixture swap node's own chainProviders.channelAddress
+      // (issue #101) — the v2 digest binds this into the signer's domain, so
+      // a different address here would fail to recover the claim (mirrors
+      // AC-8's swap-flow.integration.test.ts sibling).
+      const channelContractAddress = FIXTURE_CHANNEL_ADDRESS;
+      // verifySignatures: false — PR #107 finding #3. The installed
+      // @toon-protocol/sdk (pinned ^2.2.0, not bumped per issue #101's
+      // decision) predates the v2 EIP-712 migration, unlike the test-side
+      // @toon-protocol/client bump (finding #2): sdk's OWN
+      // verifyAccumulatedClaim/buildSettlementTx signature check still only
+      // understands the legacy v1 raw-packed digest. This suite's AC-9
+      // contract (tx bytes are well-formed / target the right chain) is
+      // unaffected — see swap-flow.integration.test.ts's AC-8 sibling for
+      // the full rationale and payment-channel-signer.test.ts for real v2
+      // signature validity.
       const settlement = buildSettlementTx({
         claims: result.claims,
         signers: {
@@ -92,6 +104,7 @@ describe('AC-9 [P2] Anvil-backed settlement tx well-formedness (opt-in, SDK E2E 
           },
         },
         recipients: { [chain]: FIXTURE_EVM_RECIPIENT },
+        verifySignatures: false,
       });
 
       const bundle = settlement.bundles[0]!;

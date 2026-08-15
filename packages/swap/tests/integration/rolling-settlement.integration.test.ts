@@ -10,7 +10,11 @@
  * ## Topology (all real, in-process — no Docker)
  *
  *   two anvils               chain A (evm:31337): TokenNetwork + USDC
- *                            chain B (evm:31338): RollingSwapChannel fixture
+ *                            chain B (evm:31338): RollingSwapChannel (v2
+ *                                                 EIP-712, vendored from
+ *                                                 connector — issue #101),
+ *                                                 settling the SAME USDC
+ *                                                 ERC20 as chain A
  *
  *   senderConnector ══ BTP ══ makerConnector           (two REAL ConnectorNodes,
  *        │    ▲                   │                     mutual BTP peering,
@@ -19,7 +23,8 @@
  *        │    │                   │     PUBLIC sendPacket executionCondition)
  *        │    └── leg-B PREPARE ──┘
  *        └─ setLocalDeliveryHandler → sender daemon (R5 verify-before-reveal,
- *           via @toon-protocol/client 0.18.0 `ingestReceivedClaims`)
+ *           via @toon-protocol/client 0.29.8 `ingestReceivedClaims`, which
+ *           verifies the v2 EIP-712 balance-proof digest)
  *
  *   - Leg-A fills: `senderConnector.sendPacket({ executionCondition })` →
  *     BTP → maker connector → local delivery → rolling engine. The sender
@@ -127,7 +132,10 @@ const CHANNEL_B_ID = '0x' + '5b'.repeat(32);
  */
 const CHAIN_B_RECIPIENT = '0x' + '7e57'.repeat(10);
 
-/** USDC (chain A) → USDB (chain B, paid 1:1 in wei by the fixture contract). */
+/**
+ * USDC (chain A) → USDB (chain B, paid 1:1 in the fixture RollingSwapChannel's
+ * ERC20 base units — same USDC token/decimals, distinct asset code by design).
+ */
 const PAIR: SwapPair = {
   from: { assetCode: 'USDC', assetScale: 6, chain: CHAIN_A },
   to: { assetCode: 'USDB', assetScale: 6, chain: CHAIN_B },
@@ -229,7 +237,7 @@ function makeSenderDaemon(
       }
       daemon.advances.push(advance);
 
-      // R5 verify-before-reveal, using the REAL client 0.18.0 pipeline
+      // R5 verify-before-reveal, using the REAL client 0.29.8 pipeline
       // (signature vs the advertised signer, recipient equality, monotone
       // nonce+cumulative vs the persisted watermark, Δcumulative covers
       // targetAmount). The store is only allowed to keep the watermark when
@@ -270,6 +278,11 @@ function makeSenderDaemon(
         expectedChain: PAIR.to.chain,
         chainRecipient: CHAIN_B_RECIPIENT,
         expectedSignerAddress: daemon.expectedSignerAddress,
+        // client 0.29.8 verifies EVM claims against the v2 EIP-712 digest
+        // (issue #101 / PR #107 finding #2), which is domain-separated by
+        // (chainId, verifyingContract) — an EVM chain with no tokenNetworks
+        // entry is rejected MISSING_CHAIN_CONFIG, fail-closed.
+        tokenNetworks: { [PAIR.to.chain]: ROLLING_SWAP_CHANNEL_ADDRESS },
         store,
       });
       if (result.verified.length !== 1) {
@@ -554,16 +567,28 @@ describe('swap#50 — N advances net to ONE settlement per chain (rolling e2e)',
       });
     }
 
-    // 7. Chain-B channel on the RollingSwapChannel contract, funded by the
-    //    maker treasury with 1 ETH (covers the 24e6-wei watermark).
+    // 7. Chain-B channel on the (vendored, ERC20) RollingSwapChannel
+    //    contract, funded by the maker treasury with 100 USDC (covers the
+    //    24 USDC / 24e6-micros watermark). The maker's chain-B address is
+    //    anvil account #0 — the same deployer the fixture snapshot minted
+    //    the entire USDC supply to (issue #101 / PR #107 finding #1).
+    const CHANNEL_B_DEPOSIT = 100_000_000n; // 100 USDC (6dp)
+    await sendUnlockedTx(anvilB.rpcUrl, {
+      from: MAKER_EVM_ADDRESS,
+      to: USDC_TOKEN_ADDRESS,
+      data: encodeCall(selector('approve(address,uint256)'), [
+        pad32(ROLLING_SWAP_CHANNEL_ADDRESS.slice(2).toLowerCase()),
+        pad32(CHANNEL_B_DEPOSIT.toString(16)),
+      ]),
+    });
     await sendUnlockedTx(anvilB.rpcUrl, {
       from: MAKER_EVM_ADDRESS,
       to: ROLLING_SWAP_CHANNEL_ADDRESS,
-      data: encodeCall(selector('openChannel(bytes32,address)'), [
+      data: encodeCall(selector('openChannel(bytes32,address,uint256)'), [
         CHANNEL_B_ID.slice(2),
         pad32(swapSignerAddress.slice(2)),
+        pad32(CHANNEL_B_DEPOSIT.toString(16)),
       ]),
-      value: 10n ** 18n,
     });
 
     // 8. Warmup packet — flushes the per-packet claim pipeline so the
@@ -681,7 +706,7 @@ describe('swap#50 — N advances net to ONE settlement per chain (rolling e2e)',
     // The sender daemon terminated one leg-B PREPARE per ATTEMPTED fill.
     expect(daemon.advances).toHaveLength(TOTAL_FILLS);
 
-    // Receive side (client 0.18.0): the persisted watermark is the final
+    // Receive side (client 0.29.8): the persisted watermark is the final
     // cumulative — N advances collapsed losslessly into ONE claim.
     const entries = daemon.store.list();
     expect(entries).toHaveLength(1);
@@ -745,7 +770,7 @@ describe('swap#50 — N advances net to ONE settlement per chain (rolling e2e)',
   // Chain B: exactly ONE settlement via the receive-side client machinery
   // -------------------------------------------------------------------
 
-  it('chain B nets to exactly ONE on-chain settlement for the final watermark via client 0.18.0 buildSwapSettlements + submitEvmSettlement', async (ctx) => {
+  it('chain B nets to exactly ONE on-chain settlement for the final watermark via client 0.29.8 buildSwapSettlements + submitEvmSettlement', async (ctx) => {
     if (!anvilOk) return ctx.skip();
 
     const builds = buildSwapSettlements({
@@ -782,9 +807,11 @@ describe('swap#50 — N advances net to ONE settlement per chain (rolling e2e)',
       BigInt(FULFILLED)
     );
 
-    // Contract state: one settlement, final nonce/cumulative, and the
-    // recipient's balance is EXACTLY the watermark (key-less account —
-    // nothing else can move it).
+    // Contract state: final nonce/cumulative, channel still Open (no close
+    // was requested), and the recipient's ERC20 balance is EXACTLY the
+    // watermark (key-less account — nothing else can move it). Struct
+    // layout per the vendored contract's public `channels` getter: signer,
+    // funder, nonce, cumulativePaid, deposit, closingAt, state.
     const channelWords = await rpc<string>(anvilB!.rpcUrl, 'eth_call', [
       {
         to: ROLLING_SWAP_CHANNEL_ADDRESS,
@@ -796,16 +823,20 @@ describe('swap#50 — N advances net to ONE settlement per chain (rolling e2e)',
     ]);
     const word = (i: number): bigint =>
       BigInt('0x' + channelWords.slice(2 + i * 64, 2 + (i + 1) * 64));
-    expect(word(1)).toBe(BigInt(FULFILLED)); // nonce
-    expect(word(2)).toBe(FINAL_WATERMARK_B); // cumulativePaid
-    expect(word(4)).toBe(1n); // settlementCount
+    expect(word(2)).toBe(BigInt(FULFILLED)); // nonce
+    expect(word(3)).toBe(FINAL_WATERMARK_B); // cumulativePaid
+    expect(word(6)).toBe(1n); // state == Open
 
-    const recipientBalance = await rpc<string>(
-      anvilB!.rpcUrl,
-      'eth_getBalance',
-      [CHAIN_B_RECIPIENT, 'latest']
-    );
-    expect(BigInt(recipientBalance)).toBe(FINAL_WATERMARK_B);
+    const recipientBalanceWord = await rpc<string>(anvilB!.rpcUrl, 'eth_call', [
+      {
+        to: USDC_TOKEN_ADDRESS,
+        data: encodeCall(selector('balanceOf(address)'), [
+          pad32(CHAIN_B_RECIPIENT.slice(2)),
+        ]),
+      },
+      'latest',
+    ]);
+    expect(BigInt(recipientBalanceWord)).toBe(FINAL_WATERMARK_B);
   }, 60_000);
 
   // -------------------------------------------------------------------
