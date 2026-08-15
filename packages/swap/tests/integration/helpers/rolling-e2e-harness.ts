@@ -31,9 +31,10 @@
  *      chain-B settlement surface the sdk's `buildSettlementTx()` EVM
  *      bundles / the client's `submitEvmSettlement` target
  *      (`updateBalance(bytes32,uint256,uint256,address,bytes)`). Issue
- *      #101 / PR #107 finding #1: this fixture is now a byte-for-byte
- *      VENDORED COPY of connector's production `RollingSwapChannel.sol`
- *      (see the .sol file's own doc comment) — an ERC20 (not native-ETH)
+ *      #101 / PR #107 finding #1: this fixture is now a VENDORED COPY of
+ *      connector's production `RollingSwapChannel.sol`, code-identical to
+ *      upstream (see the .sol file's own doc comment for the pinned
+ *      upstream commit) — an ERC20 (not native-ETH)
  *      settlement contract, bound to the SAME `usdcToken` deployed in
  *      step 0. Since deployer-CREATE addresses depend only on
  *      `(deployer, nonce)` and never on bytecode, swapping the v1

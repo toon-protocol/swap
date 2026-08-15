@@ -187,10 +187,7 @@ describe('issue #101 — boot refuses without a deployed RollingSwapChannel addr
     };
   }
 
-  function evmProvider(
-    chain: string,
-    overrides: Partial<SwapNodeEvmChainProvider> = {}
-  ): SwapNodeEvmChainProvider {
+  function evmProvider(chain: string): SwapNodeEvmChainProvider {
     return {
       chainType: 'evm',
       chainId: chain,
@@ -198,7 +195,6 @@ describe('issue #101 — boot refuses without a deployed RollingSwapChannel addr
       registryAddress: '0x' + '11'.repeat(20),
       tokenAddress: '0x' + '22'.repeat(20),
       channelAddress: '0x' + '33'.repeat(20),
-      ...overrides,
     };
   }
 

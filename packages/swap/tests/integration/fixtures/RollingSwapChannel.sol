@@ -42,10 +42,12 @@ import "@openzeppelin/contracts/utils/cryptography/EIP712.sol";
 ///      The `updateBalance` selector/arity and the `SettlementSucceeded` event
 ///      shape are UNCHANGED — only the signed digest preimage moved.
 ///
-///      VENDORED COPY (swap#101, PR #107 finding #1): this file is a
-///      byte-for-byte copy of toon-protocol/connector's production
+///      VENDORED COPY (swap#101, PR #107 finding #1): every line of code in
+///      this file is identical to toon-protocol/connector's production
 ///      `packages/contracts/src/RollingSwapChannel.sol` as of commit
-///      12042209ed94a4b9c68d061ea7e8ca242e24869c. It replaces the swap
+///      12042209ed94a4b9c68d061ea7e8ca242e24869c; only THIS doc paragraph
+///      differs from upstream's (it names the vendoring instead of
+///      contrasting against the fixture this replaces). It replaces the swap
 ///      repo's former hand-rolled native-ETH fixture (swap#59), which
 ///      verified the v1 raw-packed digest and could never recover a v2
 ///      EIP-712 claim. Do NOT hand-patch this file when connector's
