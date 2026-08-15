@@ -4,6 +4,17 @@
 // landed. pollForSha() re-reads on a fixed interval until the ref catches up
 // or a time budget runs out, and it matches the EXACT sha that was pushed
 // (not "did the tip move at all").
+//
+// readRemoteHead() (issue #121, porting toon-meta#398) is the read primitive
+// pollForSha is meant to be called with: it queries origin via
+// `git ls-remote`, NOT `gh api repos/{owner}/{repo}/git/ref/heads/<branch>`.
+// The REST ref endpoint is served from a read replica and can itself return
+// the PRE-push SHA for seconds after a push lands — polling narrows that
+// window but keeps hitting the same lagging replica every attempt.
+// `ls-remote` talks to the same git backend the push just wrote to, so it
+// does not lag it.
+
+import { execFileSync } from "node:child_process";
 
 export interface PollForShaOptions {
   /** Total time budget to keep polling, in ms. Default 30s (issue #108). */
@@ -21,6 +32,30 @@ export interface PollForShaResult {
   lastSha: string | null;
   /** How many times `readSha()` was called (always at least 1). */
   attempts: number;
+}
+
+// Parses `git ls-remote origin refs/heads/<branch>`'s stdout — a single
+// `<sha>\t<ref>` line, or empty output when the ref does not exist on
+// origin — into just the sha.
+export function parseLsRemoteSha(output: string): string | null {
+  const trimmed = output.trim();
+  return trimmed ? (trimmed.split(/\s+/)[0] ?? null) : null;
+}
+
+// Reads a branch's current tip sha from origin via `git ls-remote`. Returns
+// null when the branch does not exist on origin (or the read errors) — a
+// null never equals the pushed sha, so pollForSha() keeps polling on it.
+export function readRemoteHead(ref: string): string | null {
+  try {
+    const out = execFileSync(
+      "git",
+      ["ls-remote", "origin", `refs/heads/${ref}`],
+      { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] },
+    );
+    return parseLsRemoteSha(out);
+  } catch {
+    return null;
+  }
 }
 
 const realSleep = (ms: number): Promise<void> =>
