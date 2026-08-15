@@ -1018,6 +1018,11 @@ export async function startSwapNode(
   const distinctTargetChains = Array.from(
     new Set(config.swapPairs.map((p) => p.to.chain))
   );
+  // Issue #102 — populated in the SAME loop, from the SAME `provider.
+  // channelAddress` bound into each EVM signer's EIP-712 domain, so the
+  // chain key + contract address the kind:10032 advertises can never drift
+  // from the ones a claim is actually signed under.
+  const tokenNetworks: Record<string, string> = {};
   let sharedSolanaSigner: SolanaPaymentChannelSigner | undefined;
   let sharedMinaSigner: MinaPaymentChannelSigner | undefined;
   for (const chain of distinctTargetChains) {
@@ -1038,6 +1043,7 @@ export async function startSwapNode(
         chainId: parseEvmChainId(chain),
         verifyingContract: provider.channelAddress,
       });
+      tokenNetworks[chain] = provider.channelAddress;
     } else if (chain.startsWith('solana:')) {
       if (!swapNodeKeys.solana) {
         throw new SwapNodeStartError(
@@ -2066,6 +2072,16 @@ export async function startSwapNode(
       btpEndpoint: config.btpEndpoint ?? '',
       assetCode: config.advertisedAsset?.assetCode ?? 'USD',
       assetScale: config.advertisedAsset?.assetScale ?? 6,
+      // Issue #102 — so a stock client can reconstruct the EIP-712 domain
+      // (chainId + verifyingContract) for leg-B claims: `settlementAddresses`
+      // is the swap node's own payout address per chain (`signerAddresses`,
+      // computed above — both it and `tokenNetworks` derive from the same
+      // `config.swapPairs` walk), and `tokenNetworks` is the deployed
+      // RollingSwapChannel address, built in the signer-construction loop
+      // above from the same `provider.channelAddress` each EVM signer binds
+      // into its domain.
+      settlementAddresses: { ...signerAddresses },
+      tokenNetworks,
       swapPairs: [...config.swapPairs],
     };
     const ilpInfoEvent = buildIlpPeerInfoEvent(ownIlpInfo, identity.secretKey);
