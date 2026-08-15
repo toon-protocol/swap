@@ -198,7 +198,7 @@ describe('kind:10032 advertises supportedChains + preferredTokens (#114)', () =>
     });
   });
 
-  it('[P1] a non-EVM chain with no chainProviders entry (or no tokenMint) is still in supportedChains but absent from preferredTokens', async () => {
+  it('[P1] a non-EVM chain with no chainProviders entry is still in supportedChains but absent from preferredTokens', async () => {
     const content = await bootAndCapturePeerInfo({
       chains: ['evm', 'solana'],
       swapPairs: [usdcPair(EVM_CHAIN_A), usdcPair(SOLANA_CHAIN)],
@@ -210,7 +210,34 @@ describe('kind:10032 advertises supportedChains + preferredTokens (#114)', () =>
         [EVM_CHAIN_A]: 1_000_000_000n,
         [SOLANA_CHAIN]: 1_000_000_000n,
       },
-      chainProviders: [evmProvider(EVM_CHAIN_A, CHANNEL_ADDRESS_A, TOKEN_ADDRESS_A)],
+      chainProviders: [
+        evmProvider(EVM_CHAIN_A, CHANNEL_ADDRESS_A, TOKEN_ADDRESS_A),
+      ],
+    });
+    expect(content.supportedChains?.slice().sort()).toEqual(
+      [EVM_CHAIN_A, SOLANA_CHAIN].sort()
+    );
+    expect(content.preferredTokens).toEqual({
+      [EVM_CHAIN_A]: TOKEN_ADDRESS_A,
+    });
+  });
+
+  it('[P1] a non-EVM chain whose chainProviders entry names no token (native asset) is still in supportedChains but absent from preferredTokens', async () => {
+    const content = await bootAndCapturePeerInfo({
+      chains: ['evm', 'solana'],
+      swapPairs: [usdcPair(EVM_CHAIN_A), usdcPair(SOLANA_CHAIN)],
+      channels: {
+        [EVM_CHAIN_A]: [channelEntry('0x' + 'cd'.repeat(32))],
+        [SOLANA_CHAIN]: [channelEntry('11'.repeat(32))],
+      },
+      inventory: {
+        [EVM_CHAIN_A]: 1_000_000_000n,
+        [SOLANA_CHAIN]: 1_000_000_000n,
+      },
+      chainProviders: [
+        evmProvider(EVM_CHAIN_A, CHANNEL_ADDRESS_A, TOKEN_ADDRESS_A),
+        solanaProvider(SOLANA_CHAIN),
+      ],
     });
     expect(content.supportedChains?.slice().sort()).toEqual(
       [EVM_CHAIN_A, SOLANA_CHAIN].sort()
