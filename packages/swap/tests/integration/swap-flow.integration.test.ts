@@ -35,6 +35,7 @@ import type { BuildSettlementTxResult } from '@toon-protocol/sdk';
 import { verifyEvmClaimSignature } from '@toon-protocol/settlement-digest';
 import { generateSecretKey, getPublicKey } from 'nostr-tools/pure';
 import { nip44 } from 'nostr-tools';
+import { getAddress } from 'viem';
 
 import type { SwapNodeInstance } from '@toon-protocol/swap';
 
@@ -366,6 +367,43 @@ describe('AC-4 [P0] end-to-end swap: 1-packet, 10-packet, rate-drift (T-061, T-0
       await swapNode.stop();
     }
   });
+
+  it('AC-4.4 — checksummed EIP-55 chain-recipient reaches the claim issuer (issue #112)', async () => {
+    // `@toon-protocol/sdk@2.2.0`'s validateChainRecipient tested EVM
+    // recipients against a lowercase-only regex; released clients send
+    // EIP-55 mixed-case addresses (toon#200), so every such packet died
+    // `missing_or_malformed_chain_recipient` before this fix. The mixed-case
+    // requirement only bites when the address contains hex letters (a-f) —
+    // FIXTURE_EVM_RECIPIENT's repeated-digit addresses never exercised it.
+    const checksummedRecipient = getAddress('0x' + 'ab'.repeat(20));
+    expect(checksummedRecipient).not.toBe(checksummedRecipient.toLowerCase());
+
+    const swapNode = await buildFixtureSwapNode();
+    const sender = await buildFixtureSender(swapNode, new Uint8Array(32).fill(7));
+    try {
+      const result = await streamSwap({
+        client: sender.client,
+        swapPubkey: swapNode.identity.pubkey,
+        swapIlpAddress: FIXTURE_SWAP_NODE_ILP_ADDRESS,
+        pair: fixtureSwapPair(),
+        senderSecretKey: sender.secretKey,
+        chainRecipient: checksummedRecipient,
+        totalAmount: 1_000_000n,
+        packetCount: 1,
+      });
+
+      expect(result.state).toBe('completed');
+      expect(result.claims.length).toBe(1);
+      const claim = result.claims[0];
+      if (!claim) throw new Error('expected exactly one claim');
+      expect(claim.recipient?.toLowerCase()).toBe(
+        checksummedRecipient.toLowerCase(),
+      );
+    } finally {
+      await sender.close();
+      await swapNode.stop();
+    }
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -627,24 +665,17 @@ describe('AC-8 [P0] streamSwap → buildSettlementTx schema round-trip (T-8A)', 
 
       // NO transformation, NO adaptation — pipe AccumulatedClaim[] directly.
       //
-      // verifySignatures: false — the installed @toon-protocol/sdk (pinned
-      // ^2.2.0, not bumped per issue #101's decision) predates the v2
-      // EIP-712 migration: its OWN verifyAccumulatedClaim/buildSettlementTx
-      // signature check still only understands the legacy v1 raw-packed
-      // digest, independently of the shared @toon-protocol/settlement-digest
-      // leaf the swap node now signs with. That cross-implementation gap is
-      // sdk's own future major migration (out of scope here — see CLAUDE.md
-      // "Cross-repo dependencies"); this test's SHAPE/AC-8 contract (claims
-      // need no adaptation to build a settlement tx) is unaffected. Real v2
-      // signature validity is proven by the golden-vector conformance test
-      // and the domain-mismatch test in src/eip712-balance-proof.test.ts,
-      // plus the v2 check on this suite's OWN claims immediately below.
-      //
-      // That check is what `verifySignatures: false` would otherwise cost
-      // this suite: it verifies against the SAME domain the fixture node
-      // was configured with — chainId parsed from the chain key, and
-      // `chainProviders[].channelAddress` as the verifyingContract — so the
-      // config→signer-domain wiring is asserted end-to-end, not assumed.
+      // issue #112 bumped @toon-protocol/sdk to ^3.1.8, which closes the gap
+      // that used to force `verifySignatures: false` here: sdk's OWN
+      // verifyAccumulatedClaim/buildSettlementTx signature check now
+      // understands the v2 EIP-712 digest (via the shared
+      // @toon-protocol/settlement-digest leaf the swap node signs with), so
+      // `buildSettlementTx` below verifies for real instead of trusting the
+      // claim bytes unchecked. The manual `verifyEvmClaimSignature` checks
+      // immediately below are kept anyway — they additionally pin the
+      // negative case (a claim must NOT verify under a different
+      // deployment's domain), which `buildSettlementTx`'s positive-only
+      // check doesn't exercise.
       const evmKeys = swapNode.swapNodeKeys.evm;
       if (!evmKeys) throw new Error('fixture swap node derived no EVM key');
       const winner = result.claims.at(-1);
@@ -690,7 +721,7 @@ describe('AC-8 [P0] streamSwap → buildSettlementTx schema round-trip (T-8A)', 
           },
         },
         recipients: { [chain]: FIXTURE_EVM_RECIPIENT },
-        verifySignatures: false,
+        verifySignatures: true,
       });
 
       expect(settlement.bundles.length).toBeGreaterThan(0);

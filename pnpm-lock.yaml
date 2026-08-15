@@ -128,8 +128,8 @@ importers:
         specifier: ^2.1.0
         version: 2.1.0(@toon-protocol/connector@3.30.0)(typescript@5.9.3)
       '@toon-protocol/sdk':
-        specifier: ^2.2.0
-        version: 2.2.0(@toon-protocol/connector@3.30.0)(typescript@5.9.3)
+        specifier: ^3.1.8
+        version: 3.1.8(@toon-protocol/connector@3.30.0)(mina-signer@3.1.0)(typescript@5.9.3)
       '@toon-protocol/settlement-digest':
         specifier: ^1.0.0
         version: 1.0.0
@@ -2727,7 +2727,7 @@ packages:
       debug: 4.4.3
       lodash: 4.17.23
       pony-cause: 2.1.11
-      semver: 7.7.4
+      semver: 7.8.4
       uuid: 9.0.1
     transitivePeerDependencies:
       - supports-color
@@ -2755,7 +2755,7 @@ packages:
       '@types/debug': 4.1.13
       debug: 4.4.3
       pony-cause: 2.1.11
-      semver: 7.7.4
+      semver: 7.8.4
       uuid: 9.0.1
     transitivePeerDependencies:
       - supports-color
@@ -5220,7 +5220,7 @@ packages:
       '@scure/bip32': 1.7.0
       '@scure/bip39': 1.6.0
       '@toon-protocol/core': 3.3.0(@toon-protocol/connector@3.30.0)(typescript@5.9.3)
-      '@toon-protocol/sdk': 3.1.7(@toon-protocol/connector@3.30.0)(mina-signer@3.1.0)(typescript@5.9.3)
+      '@toon-protocol/sdk': 3.1.8(@toon-protocol/connector@3.30.0)(mina-signer@3.1.0)(typescript@5.9.3)
       nostr-tools: 2.23.1(typescript@5.9.3)
       viem: 2.47.2(typescript@5.9.3)(zod@3.25.76)
     optionalDependencies:
@@ -5447,32 +5447,28 @@ packages:
       - utf-8-validate
     dev: true
 
-  /@toon-protocol/mina-zkapp@0.1.1:
-    resolution: {integrity: sha512-N0i40O6PzoBM05IMGZ2G6MB5n7U4VjNTimmAEx8A3ABdaGz9oedFuKZF0eJkEV5v1glOLIy4yvVU/LUOHhre9Q==}
-    engines: {node: '>=22.11.0'}
-    dependencies:
-      o1js: 2.14.0
-
-  /@toon-protocol/sdk@2.2.0(@toon-protocol/connector@3.30.0)(typescript@5.9.3):
-    resolution: {integrity: sha512-wUd49fdYjm6rVo8if3jsbk3As52lnzTCnRA7+PG9R/RypUwL9IIQ2Y7e5uBzmVpmLjZWzpWwQPJZsqCJKbDn1A==}
+  /@toon-protocol/core@3.4.0(@toon-protocol/connector@3.30.0)(typescript@5.9.3):
+    resolution: {integrity: sha512-eQIVBZgVKvAaAAqMeBIC3rxydGehEzasgh0qYLtld0tSLG2Vi54WKuuCYVz5mAJcB3f+KwmZ4FHEa8PTE6CwjA==}
     engines: {node: '>=22'}
     peerDependencies:
       '@toon-protocol/connector': '>=3.3.3'
-      mina-signer: '>=3.0.0'
     peerDependenciesMeta:
       '@toon-protocol/connector':
         optional: true
-      mina-signer:
-        optional: true
     dependencies:
       '@ardrive/turbo-sdk': 1.41.0(typescript@5.9.3)
+      '@noble/ciphers': 2.1.1
       '@noble/curves': 2.0.1
       '@noble/hashes': 2.0.1
       '@scure/bip32': 2.0.1
       '@scure/bip39': 2.0.1
+      '@toon-format/toon': 1.4.0
       '@toon-protocol/connector': 3.30.0(@types/node@20.19.32)(typescript@5.9.3)
-      '@toon-protocol/core': 2.1.0(@toon-protocol/connector@3.30.0)(typescript@5.9.3)
+      '@toon-protocol/settlement-digest': 1.0.0
+      arweave: 1.15.7
       nostr-tools: 2.23.1(typescript@5.9.3)
+      simple-git: 3.33.0
+      ws: 8.20.0(bufferutil@4.1.0)(utf-8-validate@5.0.10)
     transitivePeerDependencies:
       - '@azure/app-configuration'
       - '@azure/cosmos'
@@ -5510,10 +5506,15 @@ packages:
       - typescript
       - uploadthing
       - utf-8-validate
-    dev: false
 
-  /@toon-protocol/sdk@3.1.7(@toon-protocol/connector@3.30.0)(mina-signer@3.1.0)(typescript@5.9.3):
-    resolution: {integrity: sha512-88bFFaan2eV3YzE1bkoA8PzZseVENYXcuMb7iGGmQkKQMrsraqgUx22gONz2BZh6jkUbYgne21YZi044HAP0NA==}
+  /@toon-protocol/mina-zkapp@0.1.1:
+    resolution: {integrity: sha512-N0i40O6PzoBM05IMGZ2G6MB5n7U4VjNTimmAEx8A3ABdaGz9oedFuKZF0eJkEV5v1glOLIy4yvVU/LUOHhre9Q==}
+    engines: {node: '>=22.11.0'}
+    dependencies:
+      o1js: 2.14.0
+
+  /@toon-protocol/sdk@3.1.8(@toon-protocol/connector@3.30.0)(mina-signer@3.1.0)(typescript@5.9.3):
+    resolution: {integrity: sha512-aPJ5r9iL5j1dYhU1Oo2+oWsw2KLgNB4jlg214tcmCNs73GuKRx8S/biTsML9s4F2twZjUaoNyRabVK8mhvSQ1Q==}
     engines: {node: '>=22'}
     peerDependencies:
       '@toon-protocol/connector': '>=3.3.3'
@@ -5530,7 +5531,7 @@ packages:
       '@scure/bip32': 2.0.1
       '@scure/bip39': 2.0.1
       '@toon-protocol/connector': 3.30.0(@types/node@20.19.32)(typescript@5.9.3)
-      '@toon-protocol/core': 3.3.0(@toon-protocol/connector@3.30.0)(typescript@5.9.3)
+      '@toon-protocol/core': 3.4.0(@toon-protocol/connector@3.30.0)(typescript@5.9.3)
       '@toon-protocol/settlement-digest': 1.0.0
       mina-signer: 3.1.0
       nostr-tools: 2.23.1(typescript@5.9.3)
@@ -5571,7 +5572,6 @@ packages:
       - typescript
       - uploadthing
       - utf-8-validate
-    dev: true
 
   /@toon-protocol/settlement-digest@1.0.0:
     resolution: {integrity: sha512-8OcQ5ZvmZpzhepefbY5WkRDAs/JeGM9TYqzKYPZffdYG/RZGRtcU89/QqcwFH5MP4rnsjv2p8E27aLLPR3FQZQ==}
@@ -10236,7 +10236,6 @@ packages:
     dependencies:
       blakejs: 1.2.1
       js-sha256: 0.9.0
-    dev: true
 
   /minimalistic-assert@1.0.1:
     resolution: {integrity: sha512-UtJcAD4yEaGtjPezWuO9wC4nwUnVH/8/Im3yEHQP4b67cXlD/Qr9hdITCU1xDbSEXg2XKNaP8jsReV7vQd00/A==}

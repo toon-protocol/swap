@@ -84,16 +84,13 @@ describe('AC-9 [P2] Anvil-backed settlement tx well-formedness (opt-in, SDK E2E 
       // a different address here would fail to recover the claim (mirrors
       // AC-8's swap-flow.integration.test.ts sibling).
       const channelContractAddress = FIXTURE_CHANNEL_ADDRESS;
-      // verifySignatures: false — PR #107 finding #3. The installed
-      // @toon-protocol/sdk (pinned ^2.2.0, not bumped per issue #101's
-      // decision) predates the v2 EIP-712 migration, unlike the test-side
-      // @toon-protocol/client bump (finding #2): sdk's OWN
-      // verifyAccumulatedClaim/buildSettlementTx signature check still only
-      // understands the legacy v1 raw-packed digest. This suite's AC-9
-      // contract (tx bytes are well-formed / target the right chain) is
-      // unaffected — see swap-flow.integration.test.ts's AC-8 sibling for
-      // the full rationale and src/eip712-balance-proof.test.ts for real v2
-      // signature validity.
+      // verifySignatures: true — issue #112 bumped @toon-protocol/sdk to
+      // ^3.1.8, which closes the PR #107 finding #3 gap: sdk's OWN
+      // verifyAccumulatedClaim/buildSettlementTx signature check now
+      // understands the v2 EIP-712 digest (via @toon-protocol/settlement-digest),
+      // the same leaf the swap node signs with, so real end-to-end signature
+      // verification runs here rather than being deferred to the sibling
+      // manual check in swap-flow.integration.test.ts's AC-8.
       const settlement = buildSettlementTx({
         claims: result.claims,
         signers: {
@@ -104,7 +101,7 @@ describe('AC-9 [P2] Anvil-backed settlement tx well-formedness (opt-in, SDK E2E 
           },
         },
         recipients: { [chain]: FIXTURE_EVM_RECIPIENT },
-        verifySignatures: false,
+        verifySignatures: true,
       });
 
       const bundle = settlement.bundles[0]!;
