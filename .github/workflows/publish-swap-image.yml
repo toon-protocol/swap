@@ -69,6 +69,7 @@ jobs:
             type=raw,value=main,enable={{is_default_branch}}
 
       - name: Build and push swap image
+        id: build
         uses: docker/build-push-action@v5
         with:
           context: .
@@ -121,6 +122,8 @@ jobs:
             echo "## swap image published"
             echo ""
             echo "**Image:** \`${{ env.IMAGE }}\`"
+            echo ""
+            echo "**Digest:** \`${{ steps.build.outputs.digest }}\`"
             echo ""
             echo "**Tags:**"
             echo '```'

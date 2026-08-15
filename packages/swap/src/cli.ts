@@ -45,8 +45,8 @@
  * node fails boot with INVALID_CONFIG (loud by design; a static rate has no
  * age to measure).
  *
- * Config-file-only fields (no env override, matching `ilpAddress`/
- * `btpEndpoint`): `peerInfoIlpDestination` + `peerInfoPricePerByte` (issue
+ * Config-file-only fields (no env override, matching `btpEndpoint`):
+ * `peerInfoIlpDestination` + `peerInfoPricePerByte` (issue
  * #124) — routes the paid kind:10032 announce over ILP through a connector
  * (`connectorUrl`, `connector`, or the auto-created standalone one) instead
  * of the legacy unpaid Nostr WS publish a TOON relay drops. See

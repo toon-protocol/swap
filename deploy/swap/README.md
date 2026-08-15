@@ -45,9 +45,10 @@ wiring (`scratchpad/t6/maker.mjs`):
 | `passphrase` | no | BIP-39 passphrase. |
 | `knownPeers`, `transport`, `connectorUrl`, `parentPeerId`, `parentAuthToken`, `nodeId`, `parentEvmAddress`, `maxRateAge` | no | See `packages/swap/src/cli.ts` header + `SwapNodeConfig` — not part of the proven standalone wiring, only needed for the embedded-with-parent / rate-feed / privacy-overlay variants. |
 
-Exactly one identity is required: `mnemonic` (BIP-39) in the config file, or
-`SWAP_MNEMONIC` (below) — env always wins and is the preferred way to inject
-it from a mounted secret rather than baking it into the config file.
+Exactly one identity is required: `mnemonic` (BIP-39) or `secretKey` (64-char
+hex, 32 bytes) in the config file, or their env equivalents `SWAP_MNEMONIC` /
+`SWAP_SECRET_KEY_HEX` (below) — env always wins and is the preferred way to
+inject the secret from a mount rather than baking it into the config file.
 
 ## Environment variables (override the config file)
 
@@ -67,13 +68,14 @@ it from a mounted secret rather than baking it into the config file.
 | `SWAP_RATE_URL`, `SWAP_RATE_TIMEOUT_MS` | HTTP JSON rate feed (issue #47 AC-3). |
 
 `peerInfoIlpDestination` / `peerInfoPricePerByte` are config-file-only (no
-env override), matching `ilpAddress`/`btpEndpoint`.
+env override), matching `btpEndpoint`. (`ilpAddress` is the exception among
+the kind:10032 fields — it *does* have an override, `TOON_ILP_ADDRESS`.)
 
 ## Ports
 
 - `btpServerPort` (config field, no default in standalone mode — the
-  maker.mjs wiring uses `3400`): BTP WebSocket server, `EXPOSE`/`-p` this to
-  make the maker directly dialable.
+  maker.mjs wiring uses `3400`): BTP WebSocket server. The image declares no
+  `EXPOSE`; publish it with `-p` to make the maker directly dialable.
 - `blsPort`: `/health` HTTP.
 
 ## Runtime user & filesystem

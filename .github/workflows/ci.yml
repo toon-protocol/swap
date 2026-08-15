@@ -84,7 +84,7 @@ jobs:
         run: devbox run -- bash -c "pnpm --filter @toon-protocol/swap test:e2e:docker"
 
   swap-image-build:
-    name: swap runtime image build (issue #124)
+    name: swap runtime image build
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
@@ -94,12 +94,12 @@ jobs:
         uses: docker/setup-buildx-action@v3
 
       # Build-only (no push, no registry login) — validates
-      # deploy/swap/Dockerfile on every PR/push, ahead of and independently
-      # from publish-swap-image.yml's build-AND-push run on main. `load: true`
-      # is required on the default docker-container buildx driver: without it
-      # the build result lands in the buildx cache only, never the local
-      # daemon, so the boot-refusal check below would fail on "Unable to find
-      # image" rather than actually exercising the image.
+      # deploy/swap/Dockerfile (issue #124) on every PR/push, ahead of and
+      # independently from publish-swap-image.yml's build-AND-push run on
+      # main. `load: true` is required on the default docker-container buildx
+      # driver: without it the build result lands in the buildx cache only,
+      # never the local daemon, so the boot-refusal check below would fail on
+      # "Unable to find image" rather than actually exercising the image.
       - name: Build swap runtime image
         uses: docker/build-push-action@v5
         with:
