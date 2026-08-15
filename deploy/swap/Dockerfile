@@ -7,8 +7,9 @@
 # @toon-protocol/swap (packages/swap/package.json), so `pnpm install` fetches
 # both from the registry like any other package — no special-casing needed.
 #
-# CLI config-surface check (per the issue): the proven `scratchpad/t6/
-# maker.mjs` wiring — operator-supplied standalone `btpServerPort` mode (no
+# CLI config-surface check (per the issue): the proven standalone-maker
+# wiring (`scratchpad/t6/maker.mjs`, a driving-session scratch file — not
+# checked into this repo) — standalone `btpServerPort` mode (no
 # parent), `chainProviders` with a `channelAddress`, `settlementPrivateKey`
 # for the claim signer, and a paid kind:10032 announce — is fully expressible
 # through `toon-swap --config` (packages/swap/src/cli.ts): chainProviders/

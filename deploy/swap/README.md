@@ -22,7 +22,8 @@ connector-side compose service) is a separate, human-gated ticket
 Mounted read-only at the path the `CMD` passes to `--config` (override with
 a different `--config <path>` in the container's command). JSON, same shape
 `startSwapNode()` consumes. Fields relevant to the proven standalone-maker
-wiring (`scratchpad/t6/maker.mjs`):
+wiring (`scratchpad/t6/maker.mjs` — a driving-session scratch file, not
+checked into this repo):
 
 | Field | Required | Notes |
 | --- | --- | --- |

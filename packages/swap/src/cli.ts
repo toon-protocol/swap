@@ -46,10 +46,10 @@
  * age to measure).
  *
  * Config-file-only fields (no env override, matching `btpEndpoint`):
- * `peerInfoIlpDestination` + `peerInfoPricePerByte` (issue
- * #124) — routes the paid kind:10032 announce over ILP through a connector
- * (`connectorUrl`, `connector`, or the auto-created standalone one) instead
- * of the legacy unpaid Nostr WS publish a TOON relay drops. See
+ * `peerInfoIlpDestination` + `peerInfoPricePerByte` (issue #124) — route the
+ * paid kind:10032 announce over ILP through a connector (`connectorUrl`,
+ * `connector`, or the auto-created standalone one) instead of the legacy
+ * unpaid Nostr WS publish a TOON relay drops. See
  * `SwapNodeConfig.peerInfoIlpDestination`.
  */
 

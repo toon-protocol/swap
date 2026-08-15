@@ -12,13 +12,20 @@ on:
   push:
     branches:
       - main
+    # Every input the image build actually reads: the sources and manifests
+    # the Dockerfile COPYs, the build config that shapes `dist/`, and the
+    # `.dockerignore` that decides what reaches the build context.
     paths:
       - 'packages/swap/src/**'
       - 'packages/swap/package.json'
+      - 'packages/swap/tsconfig.json'
+      - 'packages/swap/tsup.config.ts'
       - 'pnpm-lock.yaml'
       - 'pnpm-workspace.yaml'
       - 'package.json'
       - 'tsconfig.json'
+      - '.npmrc'
+      - '.dockerignore'
       - 'deploy/swap/Dockerfile'
       - '.github/workflows/publish-swap-image.yml'
   workflow_dispatch: {}
@@ -96,11 +103,15 @@ jobs:
             && echo "✓ Package visibility set to public" \
             || echo "::warning::Could not set package visibility — may need manual fix in GHCR UI"
 
-      # Post-publish, not an assertion: pulls the tag just pushed and shows its
-      # actual stdout/stderr. The CLI refuses to boot without a mounted config
-      # (readFileSync on a missing --config path) — this proves that refusal
-      # against the real published artifact, mirroring connector's ADR 0009
-      # verification step.
+      # Post-publish proof against the REAL published artifact (the build
+      # pushed straight from buildx, so this `docker run` pulls the tag back
+      # down — which also proves it is pullable). The CLI refuses to boot
+      # without a mounted config (readFileSync on a missing --config path);
+      # mirrors connector's ADR 0009 verification step and ci.yml's
+      # pre-merge copy of the same check. Grepping for the entrypoint's own
+      # `[swap-node] Startup error:` log asserts THAT failure mode rather
+      # than any nonzero exit — an unpullable or non-runnable image would
+      # satisfy a bare exit-code check vacuously.
       - name: Verify image refuses to start without a mounted config
         run: |
           set +e
@@ -112,6 +123,10 @@ jobs:
           echo "----- exit code: $STATUS -----"
           if [ "$STATUS" -eq 0 ]; then
             echo "::error::swap image started with no config mounted — expected a refusal"
+            exit 1
+          fi
+          if ! echo "$OUTPUT" | grep -q '\[swap-node\] Startup error'; then
+            echo "::error::published image did not fail with the expected startup error (got a different failure, e.g. the image could not be pulled or run) — output above"
             exit 1
           fi
           echo "✓ Refused to start without a config, as expected"
