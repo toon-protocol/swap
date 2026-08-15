@@ -128,8 +128,9 @@ const hooks = {
 };
 
 // Reads origin's current tip SHA for a branch via the authenticated host `gh`.
-// Returns null when the ref does not exist (or gh errors) — the caller treats a
-// null as "cannot conclude" and does not fail on it.
+// Returns null when the ref does not exist (or gh errors). A null never equals
+// the pushed sha, so the caller keeps polling; if every read in the budget comes
+// back null the push is reported as unverified rather than assumed good.
 function remoteBranchSha(ref: string): string | null {
   try {
     return execFileSync(
@@ -147,9 +148,10 @@ console.log(
 );
 
 // Set to a non-null message below when the review-push phase reported success
-// but origin's PR branch tip never advanced to the pushed sha, even after
-// polling with retry/backoff (issue #108). Recorded here so the `finally`
-// still closes the sandbox before we fail the job non-zero.
+// but origin's PR branch tip never advanced to the pushed sha, even after the
+// runner re-read origin's ref for the full poll budget (issue #108). Recorded
+// here so the `finally` still closes the sandbox before we fail the job
+// non-zero.
 let reviewPushVerificationError: string | null = null;
 
 const sandbox = await sandcastle.createSandbox({
@@ -190,10 +192,9 @@ try {
       );
     }
 
-    // The sha actually pushed is the sandbox's local HEAD — read it from
-    // inside the sandbox rather than trusting the push-review phase's own
-    // COMPLETE log (issue #108: that log fires regardless of whether the
-    // in-sandbox `git push` actually landed).
+    // The sha that was pushed is the sandbox's local HEAD — read it so the
+    // verification below can wait for that EXACT sha rather than for the
+    // weaker "did origin's tip move at all".
     const expectedSha = (await sandbox.exec("git rev-parse HEAD")).stdout.trim();
 
     // FAIL LOUD, but not on a false negative. A single immediate read of
@@ -201,10 +202,12 @@ try {
     // still answer with the PRE-push tip for a moment (issue #108: two
     // consecutive CLEAN verdicts on swap#107 were discarded this way, and
     // because every review pass makes its own commit, the false failure
-    // recurs forever). Poll with retry/backoff for the EXACT sha that was
-    // pushed, not merely "did the tip move at all", before concluding the
+    // recurs forever). Re-read until origin catches up before concluding the
     // push failed.
-    const verification = await pollForSha(() => remoteBranchSha(headRef), expectedSha);
+    const verification = await pollForSha(
+      () => remoteBranchSha(headRef),
+      expectedSha,
+    );
     if (verification.matched) {
       console.log(
         `\nVerified: origin/${headRef} advanced to ${verification.lastSha} ` +
@@ -215,7 +218,7 @@ try {
         `\nERROR: the push-review phase reported COMPLETE, but origin's tip for ` +
         `branch '${headRef}' never advanced to the pushed sha ${expectedSha} ` +
         `(last seen: ${verification.lastSha ?? "(unknown)"}, after ` +
-        `${verification.attempts} read(s) with retry/backoff).\n` +
+        `${verification.attempts} read(s) over the poll budget).\n` +
         `  The reviewer made ${review.commits.length} commit(s), so the ` +
         `in-sandbox \`git push\` failed silently. Inspect the push-review phase ` +
         `logs above. The Actions job is failing deliberately so this is not ` +

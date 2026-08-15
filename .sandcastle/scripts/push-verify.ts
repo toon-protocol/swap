@@ -1,9 +1,9 @@
 // Post-push tip verification (issue #108): a single immediate read of a
 // remote branch ref races the push it's meant to verify — GitHub's API can
 // still answer with the pre-push tip for a moment after a push that already
-// landed. pollForSha() re-reads with retry/backoff instead of reading once,
-// and the caller compares against the EXACT sha that was pushed (not "did
-// the tip move at all").
+// landed. pollForSha() re-reads on a fixed interval until the ref catches up
+// or a time budget runs out, and it matches the EXACT sha that was pushed
+// (not "did the tip move at all").
 
 export interface PollForShaOptions {
   /** Total time budget to keep polling, in ms. Default 30s (issue #108). */
@@ -15,8 +15,11 @@ export interface PollForShaOptions {
 }
 
 export interface PollForShaResult {
+  /** True when some read returned `expectedSha`. */
   matched: boolean;
+  /** The sha the final read returned — null when the ref was unreadable. */
   lastSha: string | null;
+  /** How many times `readSha()` was called (always at least 1). */
   attempts: number;
 }
 
