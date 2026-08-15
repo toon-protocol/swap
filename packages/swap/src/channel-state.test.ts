@@ -44,16 +44,11 @@ describe('SwapChannelState — per-channel nonce + cumulativeAmount (Story 12.4 
 
   it("[P0] reserve on missing channel throws SwapWalletError('UNSUPPORTED_CHAIN')", async () => {
     const cs = new SwapChannelState({ channels: {} });
-    await expect(cs.reserve({ ...KEY, cumulativeDelta: 1n })).rejects.toBeInstanceOf(
-      SwapWalletError
-    );
-    try {
-      await cs.reserve({ ...KEY, cumulativeDelta: 1n });
-      throw new Error('expected throw');
-    } catch (err) {
-      expect(err).toBeInstanceOf(SwapWalletError);
-      expect((err as { code?: string }).code).toBe('UNSUPPORTED_CHAIN');
-    }
+    const rejected = cs.reserve({ ...KEY, cumulativeDelta: 1n });
+    await expect(rejected).rejects.toBeInstanceOf(SwapWalletError);
+    await expect(rejected).rejects.toMatchObject({
+      code: 'UNSUPPORTED_CHAIN',
+    });
   });
 
   it('[P1] release reverses the last reservation (nonce -1, cumulativeAmount -delta)', async () => {
@@ -659,8 +654,8 @@ describe('Issue #113 — on-chain-safety-checked sticky-binding rebind', () => {
     const cs = makeOneChannelPool({
       async getCumulativePaid() {
         call += 1;
-        // First read (during A's later reserve, if any) says unredeemed;
-        // this test only checks that each reserve() triggers its own read.
+        // Answer flips between reads: unredeemed on the first rebind attempt,
+        // fully redeemed afterwards. A cached answer would keep refusing.
         return call === 1 ? 0n : 5n;
       },
     });

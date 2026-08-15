@@ -137,10 +137,13 @@ function bindingKey(p: {
   return `${p.assetCode}:${p.chain}:${p.senderPubkey}`;
 }
 
-/** Result of a rebind attempt — see {@link SwapChannelState.reclaimUnredeemedSafeChannel}. */
-type ReclaimResult =
-  | { entry: ChannelEntry; refusals: never[] }
-  | { entry: null; refusals: string[] };
+/** Result of a rebind attempt — see {@link SwapChannelState.reclaimFullyRedeemedChannel}. */
+interface ReclaimResult {
+  /** The rebound channel, or `null` when no candidate was safe to rebind. */
+  entry: ChannelEntry | null;
+  /** One human-readable reason per refused candidate (empty on success). */
+  refusals: string[];
+}
 
 export class SwapChannelState {
   /** channelKey() → ChannelEntry */
@@ -264,64 +267,60 @@ export class SwapChannelState {
    * The nonce/cumulativeAmount watermark is NOT reset on a successful
    * rebind — see the class docblock for why that is safe.
    */
-  private async reclaimUnredeemedSafeChannel(p: {
+  private async reclaimFullyRedeemedChannel(p: {
     assetCode: string;
     chain: string;
     senderPubkey: string;
   }): Promise<ReclaimResult> {
     if (!this.onChainReader) return { entry: null, refusals: [] };
     const prefix = `${p.assetCode}:${p.chain}:`;
-    const bk = bindingKey(p);
-    const candidates: { storedKey: string; entry: ChannelEntry }[] = [];
-    for (const [storedKey, entry] of this.channels) {
+    const candidateKeys: string[] = [];
+    for (const storedKey of this.channels.keys()) {
       if (!storedKey.startsWith(prefix)) continue;
       if (!this.boundChannels.has(storedKey)) continue;
       if (this.reclaiming.has(storedKey)) continue;
-      candidates.push({ storedKey, entry });
+      candidateKeys.push(storedKey);
     }
-    if (candidates.length === 0) return { entry: null, refusals: [] };
-    for (const c of candidates) this.reclaiming.add(c.storedKey);
+    if (candidateKeys.length === 0) return { entry: null, refusals: [] };
+    for (const storedKey of candidateKeys) this.reclaiming.add(storedKey);
     try {
       const refusals: string[] = [];
-      for (const { storedKey, entry } of candidates) {
+      for (const storedKey of candidateKeys) {
+        const channelId = this.channels.get(storedKey)?.channelId;
+        if (channelId === undefined) continue; // dropped since the scan above
         let onChainCumulativePaid: bigint;
         try {
           onChainCumulativePaid = await this.onChainReader.getCumulativePaid({
             assetCode: p.assetCode,
             chain: p.chain,
-            channelId: entry.channelId,
+            channelId,
           });
         } catch (err) {
           const detail = err instanceof Error ? err.message : String(err);
           this.logger?.warn?.('swap.channelState.reclaim.read_failed', {
-            channelId: entry.channelId,
+            channelId,
             chain: p.chain,
             err,
           });
-          refusals.push(
-            `${entry.channelId}: on-chain read failed (${detail})`
-          );
+          refusals.push(`${channelId}: on-chain read failed (${detail})`);
           continue; // fail closed for this candidate; try the next
         }
-        // The off-chain watermark (or the binding itself) may have moved
-        // while this read was in flight — re-check LIVE state, not the
-        // pre-await snapshot, before trusting the read.
-        const current = this.channels.get(storedKey);
-        if (!current || !this.boundChannels.has(storedKey)) continue;
-        if (onChainCumulativePaid < current.cumulativeAmount) {
-          refusals.push(
-            `${entry.channelId}: ${(
-              current.cumulativeAmount - onChainCumulativePaid
-            ).toString()} unredeemed`
-          );
+        // The read was in flight across an await: the entry may have been
+        // dropped, unbound, or had its watermark advanced meanwhile — re-read
+        // both before trusting the answer.
+        const entry = this.channels.get(storedKey);
+        if (!entry || !this.boundChannels.has(storedKey)) continue;
+        if (onChainCumulativePaid < entry.cumulativeAmount) {
+          const unredeemed = entry.cumulativeAmount - onChainCumulativePaid;
+          refusals.push(`${channelId}: ${unredeemed.toString()} unredeemed`);
           continue;
         }
-        this.rebind(bk, storedKey);
-        return { entry: current, refusals: [] };
+        this.rebind(bindingKey(p), storedKey);
+        return { entry, refusals: [] };
       }
       return { entry: null, refusals };
     } finally {
-      for (const c of candidates) this.reclaiming.delete(c.storedKey);
+      for (const storedKey of candidateKeys) this.reclaiming.delete(storedKey);
     }
   }
 
@@ -344,12 +343,12 @@ export class SwapChannelState {
    * channel) resolve and mutate synchronously, same as before #113. Only
    * the fallback — no unbound channel left, so a bound channel must be
    * safety-checked on-chain before it can be rebound — awaits an RPC read;
-   * see {@link reclaimUnredeemedSafeChannel}.
+   * see {@link reclaimFullyRedeemedChannel}.
    */
   async reserve(p: ReserveParams): Promise<Reservation> {
     let entry = this.resolveChannel(p);
     if (!entry) {
-      const reclaimed = await this.reclaimUnredeemedSafeChannel(p);
+      const reclaimed = await this.reclaimFullyRedeemedChannel(p);
       entry = reclaimed.entry;
       if (!entry) {
         throw new SwapWalletError(

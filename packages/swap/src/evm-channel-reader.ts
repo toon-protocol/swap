@@ -21,6 +21,7 @@
  */
 
 import { keccak_256 } from '@noble/hashes/sha3.js';
+import { bytesToHex } from '@noble/hashes/utils.js';
 import { hexToBytes } from '@toon-protocol/sdk';
 
 import type { ChannelOnChainReader } from './channel-state.js';
@@ -33,10 +34,6 @@ const CHANNELS_SELECTOR = keccak_256(
 /** Word index of `cumulativePaid` in the `Channel` struct's ABI-encoded return. */
 const CUMULATIVE_PAID_WORD_INDEX = 3;
 const WORD_HEX_LEN = 64; // 32 bytes, 2 hex chars/byte
-
-function toHex(bytes: Uint8Array): string {
-  return Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('');
-}
 
 /** Minimal per-EVM-chain slice this reader needs — see `SwapNodeEvmChainProvider`. */
 export interface EvmChannelReaderProvider {
@@ -68,7 +65,7 @@ export function createEvmChannelOnChainReader(
     }
     byChain.set(p.chainId, {
       rpcUrl: p.rpcUrl,
-      address: `0x${toHex(addressBytes)}`,
+      address: `0x${bytesToHex(addressBytes)}`,
     });
   }
 
@@ -84,7 +81,9 @@ export function createEvmChannelOnChainReader(
           `channelId must be a 32-byte hex value (got ${channelIdBytes.length} bytes)`
         );
       }
-      const calldata = `0x${toHex(CHANNELS_SELECTOR)}${toHex(channelIdBytes)}`;
+      const calldata = `0x${bytesToHex(CHANNELS_SELECTOR)}${bytesToHex(
+        channelIdBytes
+      )}`;
       const response = await fetch(entry.rpcUrl, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },

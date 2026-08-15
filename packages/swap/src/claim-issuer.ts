@@ -319,8 +319,11 @@ export class MultiChainClaimIssuer implements ClaimIssuer {
 
     // 3b. Issue #46 — WRITE-AHEAD persist. The reservation (nonce +
     //     cumulative watermark + inventory hold) MUST be durable before the
-    //     signed claim can leave the process. Synchronous, so no other
-    //     issueClaim can interleave between reserve and persist. On failure:
+    //     signed claim can leave the process. The persist call itself is
+    //     synchronous and snapshots the WHOLE live state, so even when a
+    //     concurrent issueClaim interleaves at the `reserve()` await above
+    //     (issue #113's rebind path), disk is never behind the watermark this
+    //     claim is about to be signed against. On failure:
     //     roll back hold + reservation and refuse the claim — handing out a
     //     claim ahead of the stored watermark is the exact desync this
     //     hook exists to prevent.
