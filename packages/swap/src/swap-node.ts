@@ -1018,10 +1018,10 @@ export async function startSwapNode(
   const distinctTargetChains = Array.from(
     new Set(config.swapPairs.map((p) => p.to.chain))
   );
-  // Issue #102 — populated in the SAME loop, from the SAME `provider.
-  // channelAddress` bound into each EVM signer's EIP-712 domain, so the
-  // chain key + contract address the kind:10032 advertises can never drift
-  // from the ones a claim is actually signed under.
+  // Issue #102 — the kind:10032 `tokenNetworks` map, filled in THIS loop from
+  // the same `provider.channelAddress` (and under the same chain key) each EVM
+  // signer binds into its EIP-712 domain, so what the node advertises can never
+  // drift from what its claims are signed under.
   const tokenNetworks: Record<string, string> = {};
   let sharedSolanaSigner: SolanaPaymentChannelSigner | undefined;
   let sharedMinaSigner: MinaPaymentChannelSigner | undefined;
@@ -2072,16 +2072,12 @@ export async function startSwapNode(
       btpEndpoint: config.btpEndpoint ?? '',
       assetCode: config.advertisedAsset?.assetCode ?? 'USD',
       assetScale: config.advertisedAsset?.assetScale ?? 6,
-      // Issue #102 — so a stock client can reconstruct the EIP-712 domain
-      // (chainId + verifyingContract) for leg-B claims: `settlementAddresses`
-      // is the swap node's own payout address per chain (`signerAddresses`,
-      // computed above — both it and `tokenNetworks` derive from the same
-      // `config.swapPairs` walk), and `tokenNetworks` is the deployed
-      // RollingSwapChannel address, built in the signer-construction loop
-      // above from the same `provider.channelAddress` each EVM signer binds
-      // into its domain.
+      // Issue #102 — what a stock client needs to reconstruct the EIP-712
+      // domain of a leg-B claim: this node's per-chain payout address, and the
+      // `verifyingContract` (see `tokenNetworks` above). Both maps are keyed by
+      // `pair.to.chain`, the same key the claims themselves are signed under.
       settlementAddresses: { ...signerAddresses },
-      tokenNetworks,
+      tokenNetworks: { ...tokenNetworks },
       swapPairs: [...config.swapPairs],
     };
     const ilpInfoEvent = buildIlpPeerInfoEvent(ownIlpInfo, identity.secretKey);
