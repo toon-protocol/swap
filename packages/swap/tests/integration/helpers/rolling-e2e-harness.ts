@@ -14,31 +14,53 @@
  * ## The vendored state snapshot
  *
  * `fixtures/rolling-e2e-anvil-state.hex` is an `anvil_dumpState` blob
- * (anvil 1.7.1, the devbox pin) captured from a fresh anvil after:
+ * (anvil 1.7.1, the devbox pin) captured from a fresh anvil after SEVEN
+ * deployer-#0 transactions, nonces 0-6 in order:
  *
- *   1. the connector repo's `packages/contracts` `DeployLocal.s.sol`
- *      broadcast (deployer = anvil account #0), which deploys at the
- *      deterministic addresses below:
- *        - MockERC20 "USD Coin"/USDC/6dp   at {@link USDC_TOKEN_ADDRESS}
- *        - TokenNetworkRegistry            at {@link TOKEN_NETWORK_REGISTRY_ADDRESS}
- *        - TokenNetwork (USDC)             at {@link TOKEN_NETWORK_ADDRESS}
- *      and funds anvil accounts #2/#3 with 10k USDC each;
- *   2. `transfer(account#1, 100_000 USDC)` from the deployer (the sender
- *      connector's settlement account);
- *   3. `forge create fixtures/RollingSwapChannel.sol` (deployer #0, nonce 4)
- *      at {@link ROLLING_SWAP_CHANNEL_ADDRESS} — the chain-B settlement
- *      surface the sdk's `buildSettlementTx()` EVM bundles target
- *      (`updateBalance(bytes32,uint256,uint256,address,bytes)`; see the
- *      .sol fixture for the byte-for-byte claim-format contract).
+ *   0. deploy MockERC20("USD Coin","USDC",6)      → {@link USDC_TOKEN_ADDRESS}
+ *   1. deploy TokenNetworkRegistry                → {@link TOKEN_NETWORK_REGISTRY_ADDRESS}
+ *   2. `registry.createTokenNetwork(usdc)`        → {@link TOKEN_NETWORK_ADDRESS}
+ *   3. `usdc.transfer(account#1, 100_000 USDC)` — funds the sender
+ *      connector's chain-A settlement account.
+ *   4. `usdc.transfer(account#2, 10_000 USDC)` — peer1, unused by this
+ *      suite; kept only to hold the nonce sequence in step with
+ *      connector's own `DeployLocal.s.sol` peer-funding convention.
+ *   5. `usdc.transfer(account#3, 10_000 USDC)` — peer2, ditto.
+ *   6. deploy `fixtures/RollingSwapChannel.sol` (constructor args:
+ *      `usdcToken, 1 days`) → {@link ROLLING_SWAP_CHANNEL_ADDRESS} — the
+ *      chain-B settlement surface the sdk's `buildSettlementTx()` EVM
+ *      bundles / the client's `submitEvmSettlement` target
+ *      (`updateBalance(bytes32,uint256,uint256,address,bytes)`). Issue
+ *      #101 / PR #107 finding #1: this fixture is now a VENDORED COPY of
+ *      connector's production `RollingSwapChannel.sol`, code-identical to
+ *      upstream (see the .sol file's own doc comment for the pinned
+ *      upstream commit) — an ERC20 (not native-ETH)
+ *      settlement contract, bound to the SAME `usdcToken` deployed in
+ *      step 0. Since deployer-CREATE addresses depend only on
+ *      `(deployer, nonce)` and never on bytecode, swapping the v1
+ *      hand-rolled fixture for the real v2 contract at the SAME nonce (6)
+ *      reproduces the exact same {@link ROLLING_SWAP_CHANNEL_ADDRESS} —
+ *      no downstream address constants changed.
  *
  * To regenerate: check out toon-protocol/connector `packages/contracts`,
- * `git submodule update --init`, drop `fixtures/RollingSwapChannel.sol`
- * into its `src/`, run the three steps above against a fresh
- * `anvil --port <p> --chain-id 31337`, then `cast rpc anvil_dumpState`.
+ * `git submodule update --init --recursive lib/forge-std
+ * lib/openzeppelin-contracts` (needed to compile the vendored fixture's
+ * OpenZeppelin imports — the swap repo itself carries no Solidity
+ * dependencies), start a fresh `anvil --port <p> --chain-id 31337
+ * --dump-state <file>`, run the seven steps above via `forge create` /
+ * `cast send` (steps 0-2 use connector's own `test/mocks/MockERC20.sol`
+ * and `src/TokenNetworkRegistry.sol`; step 6 uses THIS repo's
+ * `fixtures/RollingSwapChannel.sol`, e.g. `forge create
+ * <path-to-swap-repo>/fixtures/RollingSwapChannel.sol:RollingSwapChannel
+ * --constructor-args <usdc> 86400` run from inside the connector checkout
+ * so its OZ/forge-std remappings resolve), then stop anvil (SIGTERM
+ * flushes the dump) and strip the JSON string quoting `cast rpc
+ * anvil_dumpState` would otherwise add.
  *
  * The SAME blob is loaded into both anvils (chain ids differ per
  * instance): chain A uses the TokenNetwork/USDC surface, chain B uses the
- * RollingSwapChannel surface.
+ * RollingSwapChannel surface (settling in the SAME MockERC20 token,
+ * consistent with connector's own local-dev deployment).
  */
 
 import { spawn, spawnSync, type ChildProcess } from 'node:child_process';

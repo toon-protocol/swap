@@ -21,6 +21,16 @@
   "inventory": {
     "evm:8453": "1000000"
   },
+  "chainProviders": [
+    {
+      "chainType": "evm",
+      "chainId": "evm:8453",
+      "rpcUrl": "http://127.0.0.1:1",
+      "registryAddress": "0x1111111111111111111111111111111111111111",
+      "tokenAddress": "0x2222222222222222222222222222222222222222",
+      "channelAddress": "0x3333333333333333333333333333333333333333"
+    }
+  ],
   "relayUrls": ["ws://localhost:0"],
   "blsPort": 0
 }
