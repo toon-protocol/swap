@@ -489,3 +489,87 @@ describe('issue #49 — CLI windowBudget config key', () => {
     await expect(mod.main(['--config', cfgPath])).rejects.toThrow();
   });
 });
+
+// ---------------------------------------------------------------------------
+// Issue #124 — CLI peerInfoIlpDestination / peerInfoPricePerByte plumbing
+// (config surface needed for the paid kind:10032 announce in the runtime
+// container).
+// ---------------------------------------------------------------------------
+
+describe('issue #124 — CLI peerInfoIlpDestination / peerInfoPricePerByte', () => {
+  const BTP_PORT = 22000 + Math.floor(Math.random() * 8000);
+
+  function standaloneCfg(
+    overrides: Record<string, unknown> = {}
+  ): Record<string, unknown> {
+    return {
+      mnemonic:
+        'abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about',
+      swapPairs: [
+        {
+          from: { assetCode: 'USDC', assetScale: 6, chain: 'evm:8453' },
+          to: { assetCode: 'USDC', assetScale: 6, chain: 'evm:8453' },
+          rate: '1.0',
+        },
+      ],
+      chains: ['evm'],
+      channels: {
+        'evm:8453': [
+          {
+            channelId:
+              '0xabc0000000000000000000000000000000000000000000000000000000000001',
+            cumulativeAmount: '0',
+            nonce: '0',
+            updatedAt: 0,
+          },
+        ],
+      },
+      inventory: { 'evm:8453': '1000000' },
+      chainProviders: [
+        {
+          chainType: 'evm',
+          chainId: 'evm:8453',
+          rpcUrl: 'http://127.0.0.1:1',
+          registryAddress: '0x1111111111111111111111111111111111111111',
+          tokenAddress: '0x2222222222222222222222222222222222222222',
+          channelAddress: '0x3333333333333333333333333333333333333333',
+        },
+      ],
+      relayUrls: ['ws://localhost:0'],
+      blsPort: 0,
+      btpServerPort: BTP_PORT,
+      ...overrides,
+    };
+  }
+
+  it('[P1] peerInfoIlpDestination + peerInfoPricePerByte forward through to boot without throwing (standalone connector present)', async () => {
+    const mod = (await import('./cli.js')) as {
+      main: (argv: string[]) => Promise<{ stop: () => Promise<void> }>;
+    };
+    const cfgPath = writeTempConfig(
+      standaloneCfg({
+        peerInfoIlpDestination: 'g.toon.relay',
+        peerInfoPricePerByte: '1',
+      })
+    );
+    const instance = await mod.main(['--config', cfgPath]);
+    try {
+      expect(instance).toBeDefined();
+    } finally {
+      await instance.stop();
+    }
+  });
+
+  it('[P2] non-numeric peerInfoPricePerByte throws a clear error before boot', async () => {
+    const mod = (await import('./cli.js')) as {
+      main: (argv: string[]) => Promise<unknown>;
+    };
+    const cfgPath = writeTempConfig(
+      standaloneCfg({
+        peerInfoIlpDestination: 'g.toon.relay',
+        peerInfoPricePerByte: 'lots',
+      })
+    );
+    await expect(mod.main(['--config', cfgPath])).rejects.toThrow();
+  });
+});

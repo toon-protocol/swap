@@ -83,22 +83,79 @@ jobs:
       - name: Docker cross-chain E2E (EVM leg, anvil-gated)
         run: devbox run -- bash -c "pnpm --filter @toon-protocol/swap test:e2e:docker"
 
+  swap-image-build:
+    name: swap runtime image build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # Build-only (no push, no registry login) — validates
+      # deploy/swap/Dockerfile (issue #124) on every PR/push, ahead of and
+      # independently from publish-swap-image.yml's build-AND-push run on
+      # main. `load: true` is required on the default docker-container buildx
+      # driver: without it the build result lands in the buildx cache only,
+      # never the local daemon, so the boot-refusal check below would fail on
+      # "Unable to find image" rather than actually exercising the image.
+      - name: Build swap runtime image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: deploy/swap/Dockerfile
+          push: false
+          load: true
+          tags: swap:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          platforms: linux/amd64
+
+      # Same refusal-to-start check publish-swap-image.yml runs post-publish —
+      # here it catches a Dockerfile/CLI regression before it ever reaches
+      # main, instead of only after a push. Asserts the ACTUAL failure mode
+      # (cli.ts's readFileSync on the missing --config path, caught and
+      # logged by the entrypoint's top-level catch — see cli.ts's
+      # `[swap-node] Startup error:` log) rather than just a nonzero exit,
+      # which a missing-image `docker run` error would satisfy vacuously.
+      - name: Verify image refuses to start without a mounted config
+        run: |
+          set +e
+          OUTPUT=$(docker run --rm swap:ci 2>&1)
+          STATUS=$?
+          set -e
+          echo "----- container output -----"
+          echo "$OUTPUT"
+          echo "----- exit code: $STATUS -----"
+          if [ "$STATUS" -eq 0 ]; then
+            echo "::error::swap image started with no config mounted — expected a refusal"
+            exit 1
+          fi
+          if ! echo "$OUTPUT" | grep -q '\[swap-node\] Startup error'; then
+            echo "::error::container did not fail with the expected startup error (got a different failure, e.g. the image itself failed to run) — output above"
+            exit 1
+          fi
+          echo "✓ Refused to start without a config, as expected"
+
   ci-ok:
     name: CI OK
     runs-on: ubuntu-latest
-    needs: [build, devbox-validate]
+    needs: [build, devbox-validate, swap-image-build]
     if: always()
     steps:
       # Fleet-wide aggregate required check (toon-meta#279): this job is the
       # single required status for the repo. It must fail unless every gating
       # job actually SUCCEEDED — a skipped or cancelled gating job must never
-      # read as a pass. Both `build` and `devbox-validate` are expected on
-      # every run; there are no legitimately-skippable jobs in this workflow.
+      # read as a pass. `build`, `devbox-validate` and `swap-image-build` are
+      # expected on every run; there are no legitimately-skippable jobs in
+      # this workflow.
       - name: Check all gating jobs succeeded
         run: |
           echo "build: ${{ needs.build.result }}"
           echo "devbox-validate: ${{ needs.devbox-validate.result }}"
-          if [ "${{ needs.build.result }}" != "success" ] || [ "${{ needs.devbox-validate.result }}" != "success" ]; then
+          echo "swap-image-build: ${{ needs.swap-image-build.result }}"
+          if [ "${{ needs.build.result }}" != "success" ] || [ "${{ needs.devbox-validate.result }}" != "success" ] || [ "${{ needs.swap-image-build.result }}" != "success" ]; then
             echo "One or more gating jobs did not succeed (failure, cancelled, and skipped all fail)."
             exit 1
           fi
