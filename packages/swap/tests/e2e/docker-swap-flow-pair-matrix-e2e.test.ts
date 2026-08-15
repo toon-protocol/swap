@@ -31,6 +31,7 @@ import {
   skipIfNotReady,
   acquireMinaAccount,
   releaseMinaAccount,
+  PEER1_NOSTR_PUBKEY,
   DOCKER_CHAIN_EVM,
   DOCKER_CHAIN_SOLANA,
   DOCKER_CHAIN_MINA,
@@ -38,13 +39,6 @@ import {
   SWAP_E2E_EVM_SENDER_ADDRESS,
   type DockerChain,
 } from './helpers/infra-gate.js';
-
-// ---------------------------------------------------------------------------
-// Constants
-// ---------------------------------------------------------------------------
-
-const PEER1_NOSTR_PUBKEY =
-  'd6bfe100d1600c0d8f769501676fc74c3809500bd131c8a549f88cf616c21f35';
 
 // ---------------------------------------------------------------------------
 // Per-target chainRecipient factory (format gate per target chain)

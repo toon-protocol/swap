@@ -5,23 +5,27 @@
  * values can never drift between the two.
  */
 
-import { getPublicKey } from 'nostr-tools/pure';
+import { fromMnemonic } from '@toon-protocol/sdk';
 
 /**
- * Peer1's Nostr identity. This exact hex value is load-bearing: all four
- * E2E suites hardcode the derived pubkey (`d6bfe100…`) as
- * `PEER1_NOSTR_PUBKEY` in their own source (originally the
- * `docker-compose-sdk-e2e.yml` `NOSTR_SECRET_KEY` env var) — changing this
- * value breaks every suite's peer1 lookup.
+ * Peer1's identity seed. `startSwapNode()` REQUIRES a BIP-39 mnemonic — it
+ * derives the Nostr/EVM identity via `fromMnemonic()` (BIP-32) and throws
+ * `SWAP_REQUIRES_MNEMONIC` for a bare `secretKey` (PR #106 review finding
+ * #1). This is the standard 12-word all-zero-entropy test mnemonic already
+ * used throughout this package's unit tests (e.g. `src/swap-node.peer-info.
+ * test.ts`); reusing it here is just convention, not a security concern —
+ * it's a well-known public test vector.
  */
-export const PEER1_NOSTR_SECRET_KEY_HEX =
-  'a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2';
+export const PEER1_MNEMONIC =
+  'abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about';
 
-export const PEER1_NOSTR_SECRET_KEY = Uint8Array.from(
-  Buffer.from(PEER1_NOSTR_SECRET_KEY_HEX, 'hex')
-);
-
-export const PEER1_NOSTR_PUBKEY = getPublicKey(PEER1_NOSTR_SECRET_KEY);
+/**
+ * The pubkey `fromMnemonic(PEER1_MNEMONIC)` derives. Computed once here
+ * (not hardcoded) so it can never drift from what peer1 actually boots
+ * with; the four E2E suites import this value instead of hardcoding their
+ * own copy.
+ */
+export const PEER1_NOSTR_PUBKEY = fromMnemonic(PEER1_MNEMONIC).pubkey;
 
 /** Anvil — reuses the vendored fixture from the rolling-swap integration harness (swap#50). */
 export const ANVIL_PORT = 18545;

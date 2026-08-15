@@ -103,11 +103,25 @@ Tear down with `./scripts/sdk-e2e-infra.sh down`.
 
 The EVM suite exercises `streamSwap()` completion, kind:10032 discovery, and
 `buildSettlementTx()`'s structural output (`verifySignatures: false` — no
-client-side signature verification, no on-chain broadcast). It does **not**
-yet catch the v1-vs-v2 balance-proof digest mismatch described in
-toon-meta#394 — that requires peer1 to actually sign with the v2 EIP-712
-digest and advertise its `verifyingContract` (swap#101, swap#102, both
-still open as of this harness landing). Once those ship, this is exactly the
-seam this harness exists to close: wire a real client-side verify step into
-AC-3 (or a new AC) so a future v1/v2 regression fails here instead of
-silently passing both repos' CI, per toon-meta#394's original report.
+client-side signature verification, no on-chain broadcast). swap#101 (v2
+EIP-712 balance-proof signing) and swap#102 (kind:10032 `verifyingContract`
+advertisement) have both since landed on `main`, and `peer-node.ts` wires
+peer1's `chainProviders` entry with the deployed `RollingSwapChannel`
+address (`channelAddress`, from the same vendored Anvil fixture the
+integration suite uses) so the swap node signs with the real v2 digest and
+advertises it — but this harness still does not exercise real client-side
+verification of that signature; AC-6's settlement assertions use
+`verifySignatures: false`. Wiring a real client-side verify step into AC-3
+(or a new AC) so a future v1/v2 regression fails here instead of silently
+passing both repos' CI (per toon-meta#394's original report) remains a
+follow-up.
+
+## Identity
+
+Peer1 boots from a fixed BIP-39 mnemonic (`tests/e2e/helpers/topology.ts`'s
+`PEER1_MNEMONIC`) rather than a raw secret key — `startSwapNode()` requires
+a mnemonic (it throws `SWAP_REQUIRES_MNEMONIC` for a bare `secretKey`, since
+BIP-32 key derivation needs the seed). `PEER1_NOSTR_PUBKEY` is derived from
+that mnemonic at module load (not hardcoded), so the four E2E suites import
+it from `infra-gate.ts` instead of each carrying their own copy of the
+literal hex string.

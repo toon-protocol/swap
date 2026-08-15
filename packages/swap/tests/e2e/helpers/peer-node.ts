@@ -27,8 +27,13 @@ export interface PeerNodeHandle {
 }
 
 export interface StartPeerNodeOptions {
-  /** Nostr identity secret key (32 bytes) — determines the advertised pubkey. */
-  secretKey: Uint8Array;
+  /**
+   * BIP-39 mnemonic — the Nostr/EVM identity `startSwapNode()` derives via
+   * `fromMnemonic()`. `startSwapNode()` REQUIRES a mnemonic (it throws
+   * `SWAP_REQUIRES_MNEMONIC` for a bare `secretKey`), so this is the only
+   * identity input this harness accepts.
+   */
+  mnemonic: string;
   /** EVM settlement private key (0x-hex, 32 bytes). */
   evmPrivateKey: string;
   btpServerPort: number;
@@ -41,11 +46,33 @@ export interface StartPeerNodeOptions {
     rpcUrl: string;
     registryAddress: string;
     tokenAddress: string;
+    /**
+     * Deployed `RollingSwapChannel` address — the EIP-712 `verifyingContract`
+     * `startSwapNode()` binds into its v2 balance-proof signer (issue #101).
+     * `validateConfig()` refuses to boot a pair targeting this chain without
+     * it (PR #106 review finding #2).
+     */
+    channelAddress: string;
   };
   loggerName?: string;
 }
 
 const DOCKER_CHAIN_EVM_PREFIX = 'evm:base:';
+
+/**
+ * Synthetic channelIds seeding `channels[chain]`. `SwapChannelState.
+ * resolveChannel()` binds each DISTINCT sender pubkey to its own unbound
+ * seed entry, sticky for the life of the process — it never rebinds or
+ * frees one, so it needs at least as many entries as there are distinct
+ * senders that will target this chain in one `vitest.e2e.config.ts` run
+ * (`isolate: false` + `singleFork` share one peer1 across every suite
+ * file). Today that's 2 (the EVM suite's own sender + the pair-matrix
+ * suite's shared sender); sized to 8 for headroom against future suites.
+ */
+const SEED_CHANNEL_COUNT = 8;
+function seedChannelId(i: number): string {
+  return '0x' + 'e2'.repeat(31) + i.toString(16).padStart(2, '0');
+}
 
 export async function startPeerNode(
   opts: StartPeerNodeOptions
@@ -54,7 +81,7 @@ export async function startPeerNode(
   const chain = evm ? `${DOCKER_CHAIN_EVM_PREFIX}${evm.chainId}` : undefined;
 
   const config: SwapNodeConfig = {
-    secretKey: opts.secretKey,
+    mnemonic: opts.mnemonic,
     swapPairs: chain
       ? [
           {
@@ -65,8 +92,18 @@ export async function startPeerNode(
         ]
       : [],
     chains: evm ? ['evm'] : [],
-    channels: {},
-    inventory: chain ? { [`USD:${chain}`]: 100_000_000_000n } : {},
+    channels: chain
+      ? {
+          [chain]: Array.from({ length: SEED_CHANNEL_COUNT }, (_, i) => ({
+            channelId: seedChannelId(i),
+            cumulativeAmount: 0n,
+            nonce: 0n,
+            updatedAt: 0,
+          })),
+        }
+      : {},
+    inventory: chain ? { [chain]: 100_000_000_000n } : {},
+    logger: { debug: () => undefined, info: () => undefined, warn: console.warn, error: console.error },
     relayUrls: opts.relayUrls,
     blsPort: opts.blsPort,
     btpServerPort: opts.btpServerPort,
@@ -82,6 +119,7 @@ export async function startPeerNode(
             rpcUrl: evm.rpcUrl,
             registryAddress: evm.registryAddress,
             tokenAddress: evm.tokenAddress,
+            channelAddress: evm.channelAddress,
             keyId: opts.evmPrivateKey,
           },
         ]

@@ -32,6 +32,7 @@ import {
   type AnvilInstance,
   USDC_TOKEN_ADDRESS,
   TOKEN_NETWORK_REGISTRY_ADDRESS,
+  ROLLING_SWAP_CHANNEL_ADDRESS,
   MAKER_EVM_PRIVATE_KEY,
 } from '../integration/helpers/rolling-e2e-harness.js';
 import { startLocalRelay, type LocalRelay } from './helpers/local-nostr-relay.js';
@@ -43,7 +44,7 @@ import {
   RELAY_URL,
   PEER1_BTP_PORT,
   PEER1_BLS_PORT,
-  PEER1_NOSTR_SECRET_KEY,
+  PEER1_MNEMONIC,
 } from './helpers/topology.js';
 
 export default async function globalSetup(): Promise<() => Promise<void>> {
@@ -56,7 +57,7 @@ export default async function globalSetup(): Promise<() => Promise<void>> {
       anvil = await startAnvil({ port: ANVIL_PORT, chainId: ANVIL_CHAIN_ID });
       relay = await startLocalRelay(RELAY_PORT);
       peer1 = await startPeerNode({
-        secretKey: PEER1_NOSTR_SECRET_KEY,
+        mnemonic: PEER1_MNEMONIC,
         evmPrivateKey: MAKER_EVM_PRIVATE_KEY,
         btpServerPort: PEER1_BTP_PORT,
         blsPort: PEER1_BLS_PORT,
@@ -67,6 +68,7 @@ export default async function globalSetup(): Promise<() => Promise<void>> {
           rpcUrl: `http://127.0.0.1:${ANVIL_PORT}`,
           registryAddress: TOKEN_NETWORK_REGISTRY_ADDRESS,
           tokenAddress: USDC_TOKEN_ADDRESS,
+          channelAddress: ROLLING_SWAP_CHANNEL_ADDRESS,
         },
       });
 

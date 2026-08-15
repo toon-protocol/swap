@@ -38,6 +38,7 @@ import {
   RELAY_URL,
   PEER1_BTP_URL,
   PEER1_BLS_URL,
+  PEER1_NOSTR_PUBKEY,
 } from './topology.js';
 
 // ---------------------------------------------------------------------------
@@ -47,6 +48,7 @@ import {
 export { ANVIL_RPC };
 export const PEER1_RELAY_URL = RELAY_URL;
 export { PEER1_BTP_URL };
+export { PEER1_NOSTR_PUBKEY };
 export const PEER1_EVM_ADDRESS = MAKER_EVM_ADDRESS;
 
 /**
@@ -135,10 +137,43 @@ export const DOCKER_PAIR_MATRIX: readonly {
 // Readiness probes
 // ---------------------------------------------------------------------------
 
-async function probeHttp(url: string, timeoutMs: number): Promise<boolean> {
+/**
+ * `solana-test-validator`'s JSON-RPC endpoint is POST-only (a bare GET 404s
+ * regardless of validator health, PR #106 review finding #4) — probe with
+ * the smallest real request it accepts, `getHealth`.
+ */
+async function probeSolanaRpc(url: string, timeoutMs: number): Promise<boolean> {
   try {
-    const res = await fetch(url, { signal: AbortSignal.timeout(timeoutMs) });
-    return res.ok;
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'getHealth', params: [] }),
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+    if (!res.ok) return false;
+    const json = (await res.json()) as { result?: string };
+    return json.result === 'ok';
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Mina GraphQL is a POST-only query endpoint (a bare GET 404s regardless of
+ * lightnet health, PR #106 review finding #4) — probe with the smallest
+ * real query it accepts, `{ syncStatus }`.
+ */
+async function probeMinaGraphql(url: string, timeoutMs: number): Promise<boolean> {
+  try {
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ query: '{ syncStatus }' }),
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+    if (!res.ok) return false;
+    const json = (await res.json()) as { data?: { syncStatus?: string } };
+    return typeof json.data?.syncStatus === 'string';
   } catch {
     return false;
   }
@@ -258,7 +293,7 @@ export async function waitForSolanaHealth(timeoutMs: number): Promise<boolean> {
     }
     return false;
   }
-  return probeHttp(SOLANA_RPC, timeoutMs);
+  return probeSolanaRpc(SOLANA_RPC, timeoutMs);
 }
 
 export async function waitForMinaHealth(timeoutMs: number): Promise<boolean> {
@@ -274,7 +309,7 @@ export async function waitForMinaHealth(timeoutMs: number): Promise<boolean> {
     }
     return false;
   }
-  return probeHttp(MINA_GRAPHQL, timeoutMs);
+  return probeMinaGraphql(MINA_GRAPHQL, timeoutMs);
 }
 
 export async function acquireMinaAccount(): Promise<{ pk: string; sk: string } | null> {
