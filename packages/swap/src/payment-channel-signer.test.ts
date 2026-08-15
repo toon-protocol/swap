@@ -37,16 +37,22 @@ try {
 describe('EvmPaymentChannelSigner — round-trip derive → sign → verify (Story 12.4 AC-5, T-035)', () => {
   it('[P0] (T-035) EVM signer produces a 65-byte signature (r||s||v) that recovers to the derived public key', async () => {
     const { secp256k1 } = await import('@noble/curves/secp256k1.js');
-    const { keccak_256 } = await import('@noble/hashes/sha3.js');
+    const { balanceProofHashEvm, hexToBytes } = await import(
+      '@toon-protocol/settlement-digest'
+    );
 
     // Arrange
     const keys = await deriveSwapNodeKeys({
       mnemonic: ZERO_MNEMONIC,
       chains: ['evm'],
     });
+    const chainId = 8453n;
+    const verifyingContract = '0x' + 'cc'.repeat(20);
     const signer = new EvmPaymentChannelSigner({
       chain: 'evm:base:8453',
       privateKey: keys.evm!.privateKey,
+      chainId,
+      verifyingContract,
     });
 
     const params = {
@@ -65,31 +71,16 @@ describe('EvmPaymentChannelSigner — round-trip derive → sign → verify (Sto
     expect(signer.chain).toBe('evm:base:8453');
     expect(signer.chainKind).toBe('evm');
 
-    // Reconstruct the exact message hash used by the signer
-    // (channelId || cumulativeAmount(32BE) || nonce(32BE) || recipient).
-    const hexToBytes = (hex: string): Uint8Array => {
-      const clean = hex.startsWith('0x') ? hex.slice(2) : hex;
-      const out = new Uint8Array(clean.length / 2);
-      for (let i = 0; i < out.length; i++)
-        out[i] = parseInt(clean.slice(i * 2, i * 2 + 2), 16);
-      return out;
-    };
-    const bigintToBytes32BE = (x: bigint): Uint8Array => {
-      const out = new Uint8Array(32);
-      let v = x;
-      for (let i = 31; i >= 0; i--) {
-        out[i] = Number(v & 0xffn);
-        v >>= 8n;
-      }
-      return out;
-    };
-    const msg = new Uint8Array([
-      ...hexToBytes(params.channelId),
-      ...bigintToBytes32BE(params.cumulativeAmount),
-      ...bigintToBytes32BE(params.nonce),
-      ...hexToBytes(params.recipient),
-    ]);
-    const msgHash = keccak_256(msg);
+    // Reconstruct the exact v2 EIP-712 digest used by the signer, via the
+    // SAME shared leaf (@toon-protocol/settlement-digest) it signs with.
+    const msgHash = balanceProofHashEvm(
+      hexToBytes(params.channelId),
+      params.cumulativeAmount,
+      params.nonce,
+      hexToBytes(params.recipient),
+      chainId,
+      hexToBytes(verifyingContract)
+    );
 
     // Round-trip: the signature is Ethereum-style r || s || v where
     // v ∈ {27, 28}. Extract (r, s, recoveryId) and recover the public key;
@@ -131,6 +122,8 @@ describe('EvmPaymentChannelSigner — round-trip derive → sign → verify (Sto
     const signer = new EvmPaymentChannelSigner({
       chain: 'evm:base:8453',
       privateKey: keys.evm!.privateKey,
+      chainId: 8453n,
+      verifyingContract: '0x' + 'cc'.repeat(20),
     });
 
     await expect(
@@ -360,6 +353,8 @@ describe('Signer construction — defensive key-length checks (code-review harde
         new EvmPaymentChannelSigner({
           chain: 'evm:base:8453',
           privateKey: new Uint8Array(16),
+          chainId: 8453n,
+          verifyingContract: '0x' + 'cc'.repeat(20),
         })
     ).toThrow(SwapWalletError);
     expect(
@@ -367,8 +362,34 @@ describe('Signer construction — defensive key-length checks (code-review harde
         new EvmPaymentChannelSigner({
           chain: 'evm:base:8453',
           privateKey: new Uint8Array(33),
+          chainId: 8453n,
+          verifyingContract: '0x' + 'cc'.repeat(20),
         })
     ).toThrow(/32-byte/);
+  });
+
+  it("[P1] EvmPaymentChannelSigner rejects a non-positive chainId with SwapWalletError('SIGNING_FAILED')", () => {
+    expect(
+      () =>
+        new EvmPaymentChannelSigner({
+          chain: 'evm:base:8453',
+          privateKey: new Uint8Array(32).fill(1),
+          chainId: 0n,
+          verifyingContract: '0x' + 'cc'.repeat(20),
+        })
+    ).toThrow(/positive bigint chainId/);
+  });
+
+  it("[P1] EvmPaymentChannelSigner rejects a malformed verifyingContract with SwapWalletError('SIGNING_FAILED')", () => {
+    expect(
+      () =>
+        new EvmPaymentChannelSigner({
+          chain: 'evm:base:8453',
+          privateKey: new Uint8Array(32).fill(1),
+          chainId: 8453n,
+          verifyingContract: '0x' + 'cc'.repeat(19), // 19 bytes, not 20
+        })
+    ).toThrow(/20-byte verifyingContract/);
   });
 
   it("[P1] SolanaPaymentChannelSigner rejects non-32-byte privateKey with SwapWalletError('SIGNING_FAILED')", () => {

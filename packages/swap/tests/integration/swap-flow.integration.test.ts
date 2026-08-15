@@ -40,6 +40,7 @@ import type { SwapNodeInstance } from '@toon-protocol/swap';
 import {
   FIXTURE_MNEMONIC,
   ANVIL_CHAIN_ID,
+  FIXTURE_CHANNEL_ADDRESS,
   buildFixtureSwapNode,
   buildFixtureSender,
   deriveFixtureConnectorEvmAddress,
@@ -618,11 +619,24 @@ describe('AC-8 [P0] streamSwap → buildSettlementTx schema round-trip (T-8A)', 
       expect(result.claims.length).toBe(10);
 
       const chain = `evm:${ANVIL_CHAIN_ID}`;
-      // Test-only channel contract addr (EVM format). The real Anvil
-      // deployment lives in AC-9.
-      const channelContractAddress = '0x' + 'cc'.repeat(20);
+      // MUST match the fixture swap node's own chainProviders.channelAddress
+      // (issue #101) — the v2 digest binds this into the signer's domain, so
+      // a different address here would fail to recover the claim.
+      const channelContractAddress = FIXTURE_CHANNEL_ADDRESS;
 
       // NO transformation, NO adaptation — pipe AccumulatedClaim[] directly.
+      //
+      // verifySignatures: false — the installed @toon-protocol/sdk (pinned
+      // ^2.2.0, not bumped per issue #101's decision) predates the v2
+      // EIP-712 migration: its OWN verifyAccumulatedClaim/buildSettlementTx
+      // signature check still only understands the legacy v1 raw-packed
+      // digest, independently of the shared @toon-protocol/settlement-digest
+      // leaf the swap node now signs with. That cross-implementation gap is
+      // sdk's own future major migration (out of scope here — see CLAUDE.md
+      // "Cross-repo dependencies"); this test's SHAPE/AC-8 contract (claims
+      // need no adaptation to build a settlement tx) is unaffected. Real v2
+      // signature validity is proven by the golden-vector conformance test
+      // in payment-channel-signer.test.ts and by the domain-mismatch test.
       const settlement: BuildSettlementTxResult = buildSettlementTx({
         claims: result.claims,
         signers: {
@@ -633,6 +647,7 @@ describe('AC-8 [P0] streamSwap → buildSettlementTx schema round-trip (T-8A)', 
           },
         },
         recipients: { [chain]: FIXTURE_EVM_RECIPIENT },
+        verifySignatures: false,
       });
 
       expect(settlement.bundles.length).toBeGreaterThan(0);

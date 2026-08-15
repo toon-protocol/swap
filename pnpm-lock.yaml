@@ -130,6 +130,9 @@ importers:
       '@toon-protocol/sdk':
         specifier: ^2.2.0
         version: 2.2.0(@toon-protocol/connector@3.30.0)(mina-signer@3.1.0)(typescript@5.9.3)
+      '@toon-protocol/settlement-digest':
+        specifier: ^1.0.0
+        version: 1.0.0
       ed25519-hd-key:
         specifier: ^1.3.0
         version: 1.3.0
@@ -2762,7 +2765,7 @@ packages:
       '@types/debug': 4.1.13
       debug: 4.4.3
       pony-cause: 2.1.11
-      semver: 7.7.4
+      semver: 7.8.4
       uuid: 9.0.1
     transitivePeerDependencies:
       - supports-color
@@ -5441,6 +5444,14 @@ packages:
       - typescript
       - uploadthing
       - utf-8-validate
+
+  /@toon-protocol/settlement-digest@1.0.0:
+    resolution: {integrity: sha512-8OcQ5ZvmZpzhepefbY5WkRDAs/JeGM9TYqzKYPZffdYG/RZGRtcU89/QqcwFH5MP4rnsjv2p8E27aLLPR3FQZQ==}
+    engines: {node: '>=22'}
+    dependencies:
+      '@noble/curves': 2.0.1
+      '@noble/hashes': 2.0.1
+    dev: false
 
   /@toon-protocol/shared@1.3.0:
     resolution: {integrity: sha512-upjAzJmZ34OfWUNySva/USjhiSUd7Hy5UCyxhNab1jhN5FQu/h60OPOUWQrnOSq9nA/o2EXA0CwnDHMZRlzaZQ==}

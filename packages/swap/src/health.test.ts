@@ -24,6 +24,18 @@ function fakeConnector() {
   };
 }
 
+/** Issue #101: every EVM chain a pair targets needs a chainProviders entry. */
+function evmChainProvider(chainId: string) {
+  return {
+    chainType: 'evm' as const,
+    chainId,
+    rpcUrl: 'http://127.0.0.1:1',
+    registryAddress: '0x' + '11'.repeat(20),
+    tokenAddress: '0x' + '22'.repeat(20),
+    channelAddress: '0x' + '33'.repeat(20),
+  };
+}
+
 function validConfig() {
   return {
     mnemonic: VALID_MNEMONIC,
@@ -42,6 +54,7 @@ function validConfig() {
       ],
     },
     inventory: { 'evm:8453': 9_007_199_254_740_993n }, // > MAX_SAFE_INTEGER
+    chainProviders: [evmChainProvider('evm:8453')],
     relayUrls: ['ws://localhost:0'],
     blsPort: 0,
   };
@@ -75,6 +88,7 @@ function multiAssetConfig() {
       ],
     },
     inventory: { 'evm:8453': 1_000_000n },
+    chainProviders: [evmChainProvider('evm:8453')],
     relayUrls: ['ws://localhost:0'],
     blsPort: 0,
   };

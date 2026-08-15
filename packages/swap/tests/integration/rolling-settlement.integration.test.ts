@@ -410,6 +410,23 @@ describe('swap#50 — N advances net to ONE settlement per chain (rolling e2e)',
         ],
       },
       inventory: { [CHAIN_B]: 100_000_000n },
+      // Issue #101: the swap node's OWN outbound signer needs the deployed
+      // RollingSwapChannel address on chain B to bind its EIP-712 domain.
+      // `connector: makerConnector` is supplied directly, so this
+      // `chainProviders` entry is never forwarded to an auto-created
+      // embedded connector — registryAddress/tokenAddress are structurally
+      // required but otherwise inert here (chain B has no TokenNetwork
+      // deployment in this fixture; only RollingSwapChannel does).
+      chainProviders: [
+        {
+          chainType: 'evm',
+          chainId: CHAIN_B,
+          rpcUrl: anvilB.rpcUrl,
+          registryAddress: TOKEN_NETWORK_REGISTRY_ADDRESS,
+          tokenAddress: USDC_TOKEN_ADDRESS,
+          channelAddress: ROLLING_SWAP_CHANNEL_ADDRESS,
+        },
+      ],
       relayUrls: ['ws://localhost:0'],
       blsPort: 0,
       btpEndpoint: `ws://127.0.0.1:${MAKER_BTP_PORT}`,

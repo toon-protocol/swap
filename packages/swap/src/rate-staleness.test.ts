@@ -483,6 +483,16 @@ describe('validateMaxRateAgeConfig / SwapNodeConfig.maxRateAge validation', () =
         ],
       },
       inventory: { 'evm:31337': 10n ** 18n },
+      chainProviders: [
+        {
+          chainType: 'evm',
+          chainId: 'evm:31337',
+          rpcUrl: 'http://127.0.0.1:1',
+          registryAddress: '0x' + '11'.repeat(20),
+          tokenAddress: '0x' + '22'.repeat(20),
+          channelAddress: '0x' + '33'.repeat(20),
+        },
+      ],
       relayUrls: ['ws://localhost:0'],
       maxRateAge: { defaultMs: 1000 },
     } as unknown as SwapNodeConfig;
