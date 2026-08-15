@@ -636,7 +636,7 @@ describe('AC-8 [P0] streamSwap → buildSettlementTx schema round-trip (T-8A)', 
       // "Cross-repo dependencies"); this test's SHAPE/AC-8 contract (claims
       // need no adaptation to build a settlement tx) is unaffected. Real v2
       // signature validity is proven by the golden-vector conformance test
-      // in payment-channel-signer.test.ts and by the domain-mismatch test.
+      // and the domain-mismatch test in src/eip712-balance-proof.test.ts.
       const settlement: BuildSettlementTxResult = buildSettlementTx({
         claims: result.claims,
         signers: {

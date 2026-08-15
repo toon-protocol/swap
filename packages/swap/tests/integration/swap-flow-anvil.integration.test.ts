@@ -92,7 +92,7 @@ describe('AC-9 [P2] Anvil-backed settlement tx well-formedness (opt-in, SDK E2E 
       // understands the legacy v1 raw-packed digest. This suite's AC-9
       // contract (tx bytes are well-formed / target the right chain) is
       // unaffected — see swap-flow.integration.test.ts's AC-8 sibling for
-      // the full rationale and payment-channel-signer.test.ts for real v2
+      // the full rationale and src/eip712-balance-proof.test.ts for real v2
       // signature validity.
       const settlement = buildSettlementTx({
         claims: result.claims,
