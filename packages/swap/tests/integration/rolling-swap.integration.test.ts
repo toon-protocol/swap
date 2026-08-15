@@ -25,6 +25,10 @@
  * #103) three signature-verification guards: a tampered claim withholds the
  * reveal and unwinds, a claim verified under the wrong chain domain is
  * rejected, and a v1-style raw-packed signature fails v2 verification.
+ *
+ * The guard is known to bite (issue #103 AC-6), not assumed to: reverting
+ * `EvmPaymentChannelSigner.signBalanceProof` to the pre-#101 v1 digest fails
+ * both swap#47 rolling scenarios plus the AC-1/AC-2 case below.
  */
 
 import { describe, it, expect } from 'vitest';
@@ -70,8 +74,9 @@ const INITIAL_INVENTORY = 10n ** 20n; // 100 ETH (wei)
 const INVENTORY_KEY = `ETH:${CHAIN}`;
 
 // v2 EIP-712 domain (issue #101) the fixture swap node signs leg-B claims
-// under — parsed from CHAIN and the chainProviders.channelAddress below.
-// The sender daemon verifies against this SAME domain by default.
+// under: the EIP-155 id embedded in CHAIN, and the `chainProviders`
+// channelAddress configured below. The sender daemon verifies against this
+// SAME domain by default.
 const CHAIN_ID = 31337n;
 const CHANNEL_CONTRACT_ADDRESS = '0x' + '33'.repeat(20);
 
@@ -106,8 +111,8 @@ interface SenderDaemon {
   /**
    * One-shot toggle (issue #103 AC-2): when true, the NEXT claim's signature
    * bytes are flipped before verification — modeling a cross-repo wire break
-   * (wrong digest layout, wrong domain, a stale signer) — and reset to false
-   * immediately after that check runs, whether it rejected or not.
+   * (wrong digest layout, wrong domain, a stale signer). The flag is consumed
+   * by that single check, so every later packet verifies untouched.
    */
   corruptNextSignature: boolean;
 }
@@ -160,12 +165,13 @@ function makeSenderDaemon(opts: SenderDaemonOptions = {}): SenderDaemon {
       }
 
       // (a) Chain-signature verification (issue #103) — the claim MUST
-      // recover to the maker's advertised on-chain signer under the
-      // session's v2 EIP-712 domain, using the SAME shared digest leaf's
-      // recovery primitive every real verifier (client, sdk, connector,
-      // on-chain RollingSwapChannel) uses. Wrong domain, wrong version, a
-      // hand-rolled reimplementation — anything that doesn't recover is
-      // rejected HERE, before any reveal.
+      // recover to the on-chain signer the advance advertises, under the
+      // session's v2 EIP-712 domain (chainId + verifyingContract), using the
+      // SAME shared digest leaf's recovery primitive every real verifier
+      // (client, sdk, connector, on-chain RollingSwapChannel) uses rather
+      // than a hand-rolled reimplementation. A wrong digest layout, a wrong
+      // domain, a v1-shaped signature — anything that fails to recover to
+      // that address is rejected HERE, before any reveal.
       if (
         !advance.channelId ||
         advance.nonce === undefined ||
@@ -179,17 +185,15 @@ function makeSenderDaemon(opts: SenderDaemonOptions = {}): SenderDaemon {
           message: 'claim missing settlement metadata',
         };
       }
-      let claimBytes: Uint8Array;
-      try {
-        claimBytes = new Uint8Array(Buffer.from(advance.claim, 'base64'));
-      } catch {
-        return { type: 'reject', code: 'F99', message: 'malformed claim encoding' };
-      }
+      // `Buffer.from(_, 'base64')` never throws — it drops invalid
+      // characters — so a garbled claim surfaces as a failed recovery below.
+      const claimBytes = new Uint8Array(Buffer.from(advance.claim, 'base64'));
       if (daemon.corruptNextSignature) {
         daemon.corruptNextSignature = false;
-        claimBytes = new Uint8Array(claimBytes);
         claimBytes[0] = (claimBytes[0] ?? 0) ^ 0xff;
       }
+      // A malformed field length or an invalid `v` byte makes the shared
+      // verifier throw — that is a verification failure, not a fixture crash.
       let sigValid: boolean;
       try {
         sigValid = verifyEvmClaimSignature(
@@ -559,9 +563,7 @@ describe('issue #103 — leg-B claim signature verification (integration)', () =
     try {
       // Packet 1 fills normally — proves the guard does not false-positive
       // on a genuinely valid v2 signature.
-      expect((await driveFill(handler, daemon, 1, DELTA)).wire).toBe(
-        'FULFILL'
-      );
+      expect((await driveFill(handler, daemon, 1, DELTA)).wire).toBe('FULFILL');
       const availableAfter1 =
         instance.health().inventoryAvailable[INVENTORY_KEY];
 
@@ -579,18 +581,14 @@ describe('issue #103 — leg-B claim signature verification (integration)', () =
       expect(instance.health().inventoryAvailable[INVENTORY_KEY]).toBe(
         availableAfter1
       );
-      expect(instance.health().inventoryWindow[INVENTORY_KEY]!).toMatchObject(
-        {
-          inFlight: '0',
-          unsettled: DELTA_WEI.toString(),
-        }
-      );
+      expect(instance.health().inventoryWindow[INVENTORY_KEY]!).toMatchObject({
+        inFlight: '0',
+        unsettled: DELTA_WEI.toString(),
+      });
 
       // Recovery: a genuinely signed claim on a fresh seq fills normally —
       // proves the guard is a per-packet check, not a stuck failure mode.
-      expect((await driveFill(handler, daemon, 3, DELTA)).wire).toBe(
-        'FULFILL'
-      );
+      expect((await driveFill(handler, daemon, 3, DELTA)).wire).toBe('FULFILL');
     } finally {
       await instance.stop();
     }
@@ -611,12 +609,10 @@ describe('issue #103 — leg-B claim signature verification (integration)', () =
       // The advance WAS received and parsed — this is a signature-domain
       // failure, not a malformed/undelivered packet.
       expect(daemon.advances).toHaveLength(1);
-      expect(instance.health().inventoryWindow[INVENTORY_KEY]!).toMatchObject(
-        {
-          inFlight: '0',
-          unsettled: '0',
-        }
-      );
+      expect(instance.health().inventoryWindow[INVENTORY_KEY]!).toMatchObject({
+        inFlight: '0',
+        unsettled: '0',
+      });
     } finally {
       await instance.stop();
     }
@@ -652,14 +648,16 @@ describe('issue #103 — leg-B claim signature verification (integration)', () =
         prehash: false,
         format: 'recovered',
       });
-      const sigObj = secp256k1.Signature.fromBytes(
-        recoveredBytes,
-        'recovered'
-      );
-      const compact = sigObj.toBytes('compact');
+      const sigObj = secp256k1.Signature.fromBytes(recoveredBytes, 'recovered');
+      const { recovery } = sigObj;
+      if (recovery !== 0 && recovery !== 1) {
+        throw new Error(`unexpected recovery id ${String(recovery)}`);
+      }
+      // Same r||s||v layout EvmPaymentChannelSigner emits — only the digest
+      // underneath it is v1.
       const v1Sig = new Uint8Array(65);
-      v1Sig.set(compact, 0);
-      v1Sig[64] = 27 + sigObj.recovery;
+      v1Sig.set(sigObj.toBytes('compact'), 0);
+      v1Sig[64] = 27 + recovery;
 
       // Sanity: the v1 signature DOES recover under the legacy v1 digest —
       // it is well-formed, simply v1, not malformed (mirrors the epic's own
