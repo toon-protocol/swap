@@ -211,39 +211,46 @@ export class SwapChannelState {
       this.boundChannels.add(storedKey);
       return entry;
     }
-    // Issue #113 — no unbound channel left. If the operator opted into
-    // `bindingIdleTtlMs`, reclaim the LEAST-recently-active bound channel
-    // in this pool, provided it has actually gone idle that long. This
-    // never fires for a genuinely active multi-sender pool (AC-12): every
-    // bound channel's `updatedAt` stays fresh as long as its sender keeps
-    // reserving/releasing.
-    if (this.bindingIdleTtlMs !== undefined) {
-      const now = this.clock();
-      let oldestKey: string | undefined;
-      let oldestEntry: ChannelEntry | undefined;
-      for (const [storedKey, entry] of this.channels) {
-        if (!storedKey.startsWith(prefix)) continue;
-        if (!this.boundChannels.has(storedKey)) continue;
-        if (now - entry.updatedAt < this.bindingIdleTtlMs) continue;
-        if (!oldestEntry || entry.updatedAt < oldestEntry.updatedAt) {
-          oldestKey = storedKey;
-          oldestEntry = entry;
-        }
-      }
-      if (oldestKey && oldestEntry) {
-        for (const [otherBk, storedKey] of this.senderBinding) {
-          if (storedKey === oldestKey) {
-            this.senderBinding.delete(otherBk);
-            break;
-          }
-        }
-        this.senderBinding.set(bk, oldestKey);
-        // oldestKey stays in boundChannels — it is still bound, just to a
-        // different sender now.
-        return oldestEntry;
+    // Issue #113 — no unbound channel left; fall back to idle reclaim (a
+    // no-op unless the operator opted into `bindingIdleTtlMs`).
+    return this.reclaimIdleBinding(prefix, bk);
+  }
+
+  /**
+   * Issue #113 — rebind the LEAST-recently-active bound channel in the
+   * `${assetCode}:${chain}:` pool named by `prefix` to the sender keyed by
+   * `bk`, provided it has actually gone idle for `bindingIdleTtlMs`.
+   *
+   * Returns `null` — leaving the pool untouched — when `bindingIdleTtlMs`
+   * is unset (opt-in; the pre-#113 "sticky forever" default) or when no
+   * bound channel has been idle that long. That second guard is what keeps
+   * a genuinely active multi-sender pool (AC-12) intact: every bound
+   * channel's `updatedAt` stays fresh as long as its sender keeps
+   * reserving/releasing.
+   */
+  private reclaimIdleBinding(prefix: string, bk: string): ChannelEntry | null {
+    if (this.bindingIdleTtlMs === undefined) return null;
+    const now = this.clock();
+    let oldest: { storedKey: string; entry: ChannelEntry } | undefined;
+    for (const [storedKey, entry] of this.channels) {
+      if (!storedKey.startsWith(prefix)) continue;
+      if (!this.boundChannels.has(storedKey)) continue;
+      if (now - entry.updatedAt < this.bindingIdleTtlMs) continue;
+      if (!oldest || entry.updatedAt < oldest.entry.updatedAt) {
+        oldest = { storedKey, entry };
       }
     }
-    return null;
+    if (!oldest) return null;
+    for (const [idleBk, storedKey] of this.senderBinding) {
+      if (storedKey === oldest.storedKey) {
+        this.senderBinding.delete(idleBk);
+        break;
+      }
+    }
+    this.senderBinding.set(bk, oldest.storedKey);
+    // The channel stays in `boundChannels` — it is still bound, just to a
+    // different sender now.
+    return oldest.entry;
   }
 
   /**
