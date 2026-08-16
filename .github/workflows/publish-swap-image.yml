@@ -4,9 +4,25 @@ name: Publish swap image
 # to GHCR as ghcr.io/toon-protocol/swap, tagged `sha-<short-sha>` (immutable,
 # content-pinned), `main` (floating, default-branch only), and `release`
 # (floating, default-branch only — the Watchtower watch target on the relay
-# box; moves only on a merge to main that passed this workflow's own gate,
-# see toon-meta#403 and issue #131). Mirrors connector's
-# publish-connector-rust-image.yml. This is swap's first-ever published
+# box; see toon-meta#403 and issue #131). Mirrors connector's
+# publish-connector-rust-image.yml.
+#
+# ── `:release` MOVES LAST, AND ONLY THROUGH A GATE ──────────────────────────
+# `release` used to be pushed by the build step alongside `sha-` and `main`,
+# which made "the build succeeded" and "the live relay box has been
+# redeployed" the same event. They are not the same event, because the maker's
+# config is BIND-MOUNTED on the box and is not in this image — so this repo's
+# CI can be entirely green against a config the fleet does not have.
+#
+# PR #134 proved it: a new required `chainProviders[].tokenNetworkAddress`
+# merged green, `:release` moved, the box's Watchtower recreated the maker
+# within ~60s, and it crash-looped on `INVALID_CONFIG` until a human
+# hand-edited the box. `:release` is therefore moved by its own step at the
+# END of this job, after the fleet-config gate has booted the freshly built
+# image against `toon-protocol/connector`'s committed
+# `infra/linode-relay/swap.config.json`. A build that cannot read the fleet's
+# config still publishes its immutable `sha-` tag; it just does not become
+# what the box runs. See connector ADR 0041. This is swap's first-ever published
 # artifact of any kind — the npm package itself is not yet published (see
 # CLAUDE.md "Publishing"; that stays a separate changesets-driven release.yml
 # flow, untouched here).
@@ -74,10 +90,12 @@ jobs:
         uses: docker/metadata-action@v5
         with:
           images: ${{ env.IMAGE }}
+          # `release` is DELIBERATELY ABSENT from this list. It is moved by the
+          # `Move :release` step near the end of this job, and only after the
+          # fleet-config gate below has passed. See the header.
           tags: |
             type=raw,value=sha-${{ steps.sha.outputs.short }}
             type=raw,value=main,enable={{is_default_branch}}
-            type=raw,value=release,enable={{is_default_branch}}
 
       - name: Build and push swap image
         id: build
@@ -134,6 +152,153 @@ jobs:
             exit 1
           fi
           echo "✓ Refused to start without a config, as expected"
+
+      # ── The fleet-config gate (connector ADR 0041) ────────────────────────
+      # The relay box's maker reads a BIND-MOUNTED `swap.config.json`. It is
+      # not in this image, no build here has ever seen it, and a Watchtower
+      # recreate swaps the binary underneath it within ~60s of `:release`
+      # moving. So this repo's CI can be entirely green and still take the
+      # live maker down — which is exactly what happened.
+      #
+      # 2026-08-16, PR #134: a new REQUIRED `chainProviders[].tokenNetworkAddress`
+      # merged green, `:release` moved, the box's Watchtower recreated
+      # `swap-node`, and the maker crash-looped on
+      # `[INVALID_CONFIG] chainProviders[0].tokenNetworkAddress MUST be a
+      # non-empty string`. It stayed down until a human noticed and hand-edited
+      # the file. #134's own body predicted it ("needs one added key BEFORE the
+      # new image boots") and nothing acted on the prediction, because nothing
+      # could: no gate stood between the merge and the box.
+      #
+      # This is that gate, and it is here rather than in `connector` on purpose.
+      # This is the repo where the schema changes, so this is the only place
+      # the author can act on the answer — and it is the last moment before
+      # the change becomes a deploy.
+      #
+      # The fleet's committed config is public and so is this image, so the
+      # check needs no credential and no box: boot one against the other.
+      - name: Check out the fleet's committed maker config
+        uses: actions/checkout@v4
+        with:
+          repository: toon-protocol/connector
+          # Public repo — the default GITHUB_TOKEN reaches it, and this needs
+          # no write scope of any kind. `main` deliberately, not a pin: the
+          # question is whether this image can run what the fleet has NOW.
+          ref: main
+          path: fleet-config
+          sparse-checkout: |
+            infra/linode-relay/swap.config.json
+          sparse-checkout-cone-mode: false
+
+      - name: Image must still boot the fleet's committed maker config
+        id: fleet_gate
+        run: |
+          set -uo pipefail
+          IMAGE_TAG="${{ env.IMAGE }}:sha-${{ steps.sha.outputs.short }}"
+          CONFIG=fleet-config/infra/linode-relay/swap.config.json
+
+          if [ ! -f "$CONFIG" ]; then
+            echo "::error::could not read the fleet's committed maker config at $CONFIG."
+            echo "::error::If it moved, update this step — do NOT delete the gate (connector ADR 0041)."
+            exit 1
+          fi
+
+          # `validateConfig` runs before the node allocates any resource, so an
+          # incompatible config exits in about a second. A COMPATIBLE one goes
+          # on to open sockets and dial a relay and would run forever — hence
+          # the timeout. Surviving it IS the pass: the question is "was this
+          # config refused", not "does this node work".
+          #
+          # ── The config file alone is NOT what the box runs ─────────────────
+          # The relay box's service is `swap.config.json` PLUS the environment
+          # and the writable state volume that
+          # `infra/linode-relay/docker-compose.relay.swap.yml` supplies. In
+          # particular `SWAP_AUTOGEN_IDENTITY=1`, without which the file alone
+          # fails `[INVALID_CONFIG] SwapNodeConfig: one of mnemonic or secretKey
+          # is required` — because #127 made the maker self-generate and persist
+          # its own BIP-39 mnemonic to `statePath` on first boot rather than
+          # read a committed one. (Found by this gate's own first run, on
+          # toon-protocol/connector#1000.)
+          #
+          # So reproduce the SERVICE, not just the file. Mirrored from that
+          # overlay; connector's `fleet_release_gate.rs` asserts the overlay
+          # still declares exactly this environment, so a variable added there
+          # and not here is a build failure rather than a gate that validates
+          # something the box never runs.
+          #
+          # NOT mirrored: the overlay's `working_dir: /app/state`. It pairs with
+          # an entrypoint override naming an ABSOLUTE `/app/dist/cli.js`, and
+          # this image's own ENTRYPOINT resolves `dist/cli.js` relative to its
+          # workdir -- so setting one without the other fails MODULE_NOT_FOUND.
+          # Replicating both would couple this gate to the overlay's command
+          # shape for no gain: all it suppresses is a few non-fatal
+          # `EACCES ... mkdir './data'` cache warnings, which do not affect
+          # whether the config is accepted, and that is the only question here.
+          STATE=$(mktemp -d)
+          chmod 777 "$STATE"
+          set +e
+          OUTPUT=$(timeout 45 docker run --rm \
+            -v "$PWD/$CONFIG":/app/config/swap.config.json:ro \
+            -v "$STATE":/app/state \
+            -e SWAP_AUTOGEN_IDENTITY=1 \
+            "$IMAGE_TAG" 2>&1)
+          STATUS=$?
+          set -e
+
+          echo "----- container output -----"
+          echo "$OUTPUT"
+          echo "----- exit code: $STATUS -----"
+
+          if [ "$STATUS" -eq 124 ]; then
+            echo "✓ the fleet's committed swap.config.json still boots this build"
+            exit 0
+          fi
+
+          # Grep for the node's own name for "this config does not satisfy my
+          # schema" rather than trusting a bare nonzero exit, so an unrelated
+          # failure (an unreachable RPC from this runner, say) is not
+          # misreported as a config break and does not block a good release.
+          if echo "$OUTPUT" | grep -q 'INVALID_CONFIG'; then
+            REASON=$(echo "$OUTPUT" | grep -o 'INVALID_CONFIG[^"]*' | head -1)
+            {
+              echo "## ❌ \`:release\` NOT moved — this build refuses the fleet's config"
+              echo ""
+              echo "\`$REASON\`"
+              echo ""
+              echo "The relay box bind-mounts \`infra/linode-relay/swap.config.json\` from"
+              echo "\`toon-protocol/connector\`. This build cannot read it, so moving \`:release\`"
+              echo "would crash-loop the live maker within ~60s (this is PR #134's outage)."
+              echo ""
+              echo "**The immutable \`sha-\` tag is published and the fleet is untouched** —"
+              echo "the box keeps running the previous build. To release this change:"
+              echo ""
+              echo "1. Add the setting to \`infra/linode-relay/swap.config.json\` in \`toon-protocol/connector\` and merge it."
+              echo "2. Apply it to the box: \`gh workflow run fleet-ops.yml -f box=relay -f operation=config-apply -f apply=true\` (connector repo)."
+              echo "3. Re-run this workflow on this commit."
+              echo ""
+              echo "Or make the setting optional with a safe default, which needs no coordination at all."
+              echo ""
+              echo "See connector \`docs/adr/0041-a-moving-tag-carries-the-fleets-committed-config-or-it-does-not-move.md\`."
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "::error::this build REFUSES the fleet's committed swap.config.json — $REASON"
+            echo "::error:::release was NOT moved. See the job summary for how to release this change."
+            exit 1
+          fi
+
+          echo "::warning::the fleet config did not reach a running state on this build (exit $STATUS), but not with INVALID_CONFIG."
+          echo "::warning::Not treated as a config-schema break — most likely an unreachable RPC from this runner. Output above."
+
+      # Only now does the tag the live box follows move. Split out of the
+      # build-push step above precisely so that everything between them can
+      # refuse it. A retag of the manifest just validated, never a rebuild.
+      - name: Move :release
+        if: github.ref == 'refs/heads/main'
+        run: |
+          set -euo pipefail
+          docker buildx imagetools create \
+            -t "${{ env.IMAGE }}:release" \
+            "${{ env.IMAGE }}:sha-${{ steps.sha.outputs.short }}"
+          echo "Moved ${{ env.IMAGE }}:release -> sha-${{ steps.sha.outputs.short }}"
+          echo "The relay box's Watchtower recreates swap-node within ~60s."
 
       - name: Publish summary
         run: |
