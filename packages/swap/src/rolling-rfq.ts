@@ -299,6 +299,8 @@ export interface RollingRfqIntakeConfig {
   logger?: {
     debug?: (msg: string, meta?: Record<string, unknown>) => void;
     warn?: (msg: string, meta?: Record<string, unknown>) => void;
+    /** swap#152 — carries the `rolling-rfq` intake classification event. */
+    info?: (msg: string, meta?: Record<string, unknown>) => void;
   };
 }
 
@@ -378,6 +380,22 @@ export function createRollingRfqIntake(config: RollingRfqIntakeConfig): {
       const parsed = parseRollingRfqRequest(
         typeof rumor.content === 'string' ? rumor.content : ''
       );
+
+      // swap#152 (ADR 0003's removal gate) — kind:20033 is unambiguous:
+      // whatever `parsed` turns out to be, this arrival IS the `rolling-rfq`
+      // class. Emitted here (not by the caller) because this is the only
+      // place that has already paid for the unwrap; `sender` is the BTP peer
+      // id, matching the ILP-level identity every other intake class logs
+      // (never the gift-wrap's Nostr `senderPubkey`).
+      logger?.info?.('swap.intake.arrival', {
+        class: 'rolling-rfq',
+        sender: arrival?.sourcePeer,
+        ...(parsed !== null &&
+          parsed !== 'malformed' && {
+            pair: `${parsed.pair.from.assetCode}:${parsed.pair.from.chain}→${parsed.pair.to.assetCode}:${parsed.pair.to.chain}`,
+          }),
+      });
+
       if (parsed === null || parsed === 'malformed') {
         // Kind:20033 is unambiguously rolling traffic. Falling through would
         // hand it to the legacy handler, whose error would misdescribe the

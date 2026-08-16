@@ -1,11 +1,11 @@
 {
   "$schema": "https://toon-protocol.github.io/schemas/gate-baseline.v1.json",
   "repo": "swap",
-  "capturedAt": "2026-08-16T01:50:38Z",
-  "capturedFromCommit": "785b1179da8e70654cd09ee5cc10d7dae2b4ae63",
-  "capturedFromBranch": "sandcastle/issue-131",
+  "capturedAt": "2026-08-16T23:33:06Z",
+  "capturedFromCommit": "d644d4e81cf38b421cf0897f83defdce8894cf9f",
+  "capturedFromBranch": "sandcastle/issue-152",
   "regressionTolerancePct": 25,
-  "recaptureNote": "gateSpeed recaptured; gateCorrectness's enforced allowlists (lint, typecheck) and gatePerformance are untouched — live counts still sit at or under those frozen figures, so no ratchet was needed there. gateCorrectness.test's counts ARE refreshed below (19/285 → 27/365 files/tests) to match the live suite; that block is descriptive only, gate-correctness.ts enforces just lint and typecheck. Recaptured because issue #131 (a workflow-YAML-only change, `.github/workflows/publish-swap-image.yml` — adding the `:release` moving tag, no src/test changes) failed gate:no-regression's test-speed check on an UNMODIFIED baseline: testMs measured ~11.2s vs the frozen 8860ms, >25% over. Verified this is pre-existing baseline staleness, not a regression this change introduced, by stashing the workflow edit and re-running the gate against plain HEAD (785b117) — same failure. Root cause is organic test-suite growth across the ten PRs merged to main since the swap#104 capture commit (fe68208), closing issues #103, #104, #108, #111, #112, #113, #114, #121, #124 and #126: vitest's own test count grew from 285 to 365 (+28%), each adding real coverage, which tracks directly with the ~26% testMs increase measured here. Reproduce via the method below on the current HEAD.",
+  "recaptureNote": "gateSpeed recaptured again; gateCorrectness's enforced allowlists (lint, typecheck) and gatePerformance are untouched — live counts still sit at or under those frozen figures, so no ratchet was needed there. gateCorrectness.test's counts ARE refreshed below (27/365 → 42/519 files/tests) to match the live suite; that block is descriptive only, gate-correctness.ts enforces just lint and typecheck. Recaptured because issue #152 (this PR — adding `swap.intake.arrival` classification logging plus one new test file) failed gate:no-regression's test-speed check on an UNMODIFIED baseline: testMs measured ~17.2s vs the frozen 11216ms, >25% over. Verified this is pre-existing baseline staleness, not a regression this change introduced, by stashing this PR's diff (including the new, untracked test file) and re-running the gate against plain HEAD (d644d4e) — same failure, testMs ~16.7-17.2s. Root cause is the same organic test-suite growth pattern the prior recapture (issue #131) already documented: nine more PRs merged to main since that capture (fe68208 → d644d4e), closing #133, #134, #138, #139, #140, #141, #142, #144, #148 among others — vitest's own test count grew from 365 to 517 (+42%), each adding real coverage (including a wider gate-tooling suite under `.sandcastle/scripts/`), tracking directly with the testMs increase measured here. Reproduce via the method below on the current HEAD.",
   "gateShape": {
     "packageManager": "pnpm@8.15.9",
     "order": ["lint", "build", "typecheck", "test"],
@@ -19,11 +19,11 @@
   "gateSpeed": {
     "description": "CI wall-clock time for the gate the dumb zone (.sandcastle/) runs before opening a PR. Read by gate-no-regression.ts as the frozen numbers to compare live timings against.",
     "unit": "milliseconds",
-    "lintMs": 12729,
-    "buildMs": 7488,
-    "typecheckMs": 6664,
-    "testMs": 11216,
-    "gateTotalMs": 38097,
+    "lintMs": 13085,
+    "buildMs": 7776,
+    "typecheckMs": 5684,
+    "testMs": 16745,
+    "gateTotalMs": 43290,
     "ciWorkflowReference": {
       "note": "Cross-check data point only, NOT the primary number: .github/workflows/ci.yml runs a narrower shape on a GitHub-hosted ubuntu-latest runner. The sandcastle gate above (lint/build/typecheck/test) is the shape this baseline tracks. Not re-measured for this recapture (no CI run available from the capture sandbox) — the prior swap#77 run remains the only data point; treat as stale alongside the rest of this cross-check block.",
       "workflow": "ci.yml",
@@ -69,8 +69,8 @@
     },
     "test": {
       "tool": "vitest run",
-      "testFiles": { "passed": 27, "total": 27 },
-      "tests": { "passed": 365, "skipped": 2, "failed": 0, "total": 367 }
+      "testFiles": { "passed": 42, "total": 42 },
+      "tests": { "passed": 517, "skipped": 2, "failed": 0, "total": 519 }
     },
     "build": {
       "tool": "pnpm -r run build (tsup)",
