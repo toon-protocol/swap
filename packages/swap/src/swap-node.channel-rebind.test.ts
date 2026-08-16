@@ -101,6 +101,7 @@ async function bootAndCaptureChannelState(
     rpcUrl,
     registryAddress: '0x' + '33'.repeat(20),
     tokenAddress: '0x' + '44'.repeat(20),
+    tokenNetworkAddress: '0x' + '55'.repeat(20),
     channelAddress: CHANNEL_ADDRESS,
   };
   const instance = await startSwapNode({

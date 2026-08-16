@@ -532,6 +532,7 @@ describe('issue #124 — CLI peerInfoIlpDestination / peerInfoPricePerByte', () 
           rpcUrl: 'http://127.0.0.1:1',
           registryAddress: '0x1111111111111111111111111111111111111111',
           tokenAddress: '0x2222222222222222222222222222222222222222',
+          tokenNetworkAddress: '0x4444444444444444444444444444444444444444',
           channelAddress: '0x3333333333333333333333333333333333333333',
         },
       ],

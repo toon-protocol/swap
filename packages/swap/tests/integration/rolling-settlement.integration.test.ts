@@ -437,6 +437,10 @@ describe('swap#50 — N advances net to ONE settlement per chain (rolling e2e)',
           rpcUrl: anvilB.rpcUrl,
           registryAddress: TOKEN_NETWORK_REGISTRY_ADDRESS,
           tokenAddress: USDC_TOKEN_ADDRESS,
+          // Leg A — structurally required (issue #133); chain B has no
+          // TokenNetwork deployment in this fixture, so the anvil-A address is
+          // reused as an inert placeholder. Only leg B is exercised here.
+          tokenNetworkAddress: TOKEN_NETWORK_ADDRESS,
           channelAddress: ROLLING_SWAP_CHANNEL_ADDRESS,
         },
       ],

@@ -66,6 +66,14 @@ export const ANVIL_URL = 'http://localhost:18545';
 export const FIXTURE_CHANNEL_ADDRESS = '0x' + '33'.repeat(20);
 
 /**
+ * Test-only deployed `TokenNetwork` address — leg A, the contract a *client*
+ * opens its payment channel against. Deliberately DISTINCT from
+ * {@link FIXTURE_CHANNEL_ADDRESS} so a test can tell the two announce fields
+ * apart (issue #133).
+ */
+export const FIXTURE_TOKEN_NETWORK_ADDRESS = '0x' + '44'.repeat(20);
+
+/**
  * Default USDC→ETH swap pair on Anvil.
  * Rate 0.0004: 1 USDC (1e6 micros, scale 6) → 0.0004 ETH (4e14 wei, scale 18).
  */
@@ -204,6 +212,7 @@ export async function buildFixtureSwapNode(
         rpcUrl: 'http://127.0.0.1:1',
         registryAddress: '0x' + '11'.repeat(20),
         tokenAddress: '0x' + '22'.repeat(20),
+        tokenNetworkAddress: FIXTURE_TOKEN_NETWORK_ADDRESS,
         channelAddress: FIXTURE_CHANNEL_ADDRESS,
       },
     ],

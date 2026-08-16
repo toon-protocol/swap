@@ -51,10 +51,16 @@ export interface StartPeerNodeOptions {
     registryAddress: string;
     tokenAddress: string;
     /**
-     * Deployed `RollingSwapChannel` address — the EIP-712 `verifyingContract`
-     * `startSwapNode()` binds into its v2 balance-proof signer (issue #101).
-     * `validateConfig()` refuses to boot a pair targeting this chain without
-     * it (PR #106 review finding #2).
+     * Leg A — deployed `TokenNetwork` address, the contract a client opens its
+     * payment channel against and the value the kind:10032 `tokenNetworks`
+     * entry carries (issue #133).
+     */
+    tokenNetworkAddress: string;
+    /**
+     * Leg B — deployed `RollingSwapChannel` address, the EIP-712
+     * `verifyingContract` `startSwapNode()` binds into its v2 balance-proof
+     * signer (issue #101). `validateConfig()` refuses to boot a pair targeting
+     * this chain without it (PR #106 review finding #2).
      */
     channelAddress: string;
   };
@@ -126,6 +132,7 @@ export async function startPeerNode(
             rpcUrl: evm.rpcUrl,
             registryAddress: evm.registryAddress,
             tokenAddress: evm.tokenAddress,
+            tokenNetworkAddress: evm.tokenNetworkAddress,
             channelAddress: evm.channelAddress,
             keyId: opts.evmPrivateKey,
           },

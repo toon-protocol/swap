@@ -164,11 +164,36 @@ export interface SwapNodeEvmChainProvider {
   /** Settlement token (USDC, M2M, …) contract address. */
   tokenAddress: string;
   /**
-   * Deployed `RollingSwapChannel` contract address for this chain — the
-   * EIP-712 `verifyingContract` the swap node binds into its v2
-   * balance-proof domain at signer construction (issue #101). Required, no
-   * default: a swap pair that targets this chain with no address configured
-   * refuses to boot rather than issue claims nobody can verify.
+   * **Leg A** — the deployed `TokenNetwork` contract for `tokenAddress` on
+   * this chain: the contract a *client* calls
+   * `openChannel(address participant2, uint256 settlementTimeout)` on to open
+   * the payment channel it pays this maker over. This is the address the
+   * kind:10032 `tokenNetworks[chain]` entry carries, because that is the field
+   * a stock client reads to open leg A (`ToonClient.negotiationFromAnnounce`
+   * → `ChannelManager.ensureChannel` → `OnChainChannelClient.openChannel`).
+   *
+   * Fleet-wide agreement: this is the SAME `TokenNetwork` deployment the rest
+   * of the fleet advertises for this chain/token (a claim resolves against one
+   * deployment), so it is normally the registry entry that `registryAddress` +
+   * `tokenAddress` resolve to — NOT a maker-private contract.
+   *
+   * Required, no default, and deliberately NOT defaulted to
+   * {@link SwapNodeEvmChainProvider.channelAddress}: advertising the leg-B
+   * `RollingSwapChannel` here makes every client's `ensureChannel` revert
+   * (different ABI) and the swap fail before a packet is ever sent — an
+   * invisible failure. Refusing to boot is the loud alternative (issue #133).
+   */
+  tokenNetworkAddress: string;
+  /**
+   * **Leg B** — the deployed `RollingSwapChannel` contract address for this
+   * chain: the EIP-712 `verifyingContract` the swap node binds into its v2
+   * balance-proof domain at signer construction (issue #101), i.e. the
+   * contract the claims this maker hands back are signed against. Advertised
+   * under the announce's own `swapVerifyingContracts` key — never under
+   * `tokenNetworks`, which means leg A (above).
+   *
+   * Required, no default: a swap pair that targets this chain with no address
+   * configured refuses to boot rather than issue claims nobody can verify.
    */
   channelAddress: string;
   /** Hex private key used to sign settlement claims. Defaulted by the swap node. */
@@ -714,7 +739,7 @@ function requireEvmChainProvider(
   if (!provider) {
     throw new SwapNodeStartError(
       'INVALID_CONFIG',
-      `SwapNodeConfig.chainProviders is missing an entry for pair.to.chain="${chain}" — a "channelAddress" (deployed RollingSwapChannel address) is required to sign v2 balance proofs on this chain`
+      `SwapNodeConfig.chainProviders is missing an entry for pair.to.chain="${chain}" — a "channelAddress" (deployed RollingSwapChannel address) is required to sign v2 balance proofs on this chain, and a "tokenNetworkAddress" (deployed TokenNetwork address) is required so clients can open the leg-A payment channel they pay this maker over`
     );
   }
   return provider;
@@ -937,6 +962,11 @@ const SWAP_REQUIRED_PROVIDER_FIELDS: Record<
     'rpcUrl',
     'registryAddress',
     'tokenAddress',
+    // Leg A (kind:10032 `tokenNetworks`) and leg B (the EIP-712
+    // `verifyingContract`) are two DIFFERENT contracts — see the field docs on
+    // `SwapNodeEvmChainProvider`. Both are required; neither defaults to the
+    // other (issue #133).
+    'tokenNetworkAddress',
     'channelAddress',
   ],
   solana: ['chainId', 'rpcUrl', 'programId'],
@@ -1041,11 +1071,20 @@ export async function startSwapNode(
   const distinctTargetChains = Array.from(
     new Set(config.swapPairs.map((p) => p.to.chain))
   );
-  // Issue #102 — the kind:10032 `tokenNetworks` map, filled in THIS loop from
-  // the same `provider.channelAddress` (and under the same chain key) each EVM
-  // signer binds into its EIP-712 domain, so what the node advertises can never
-  // drift from what its claims are signed under.
+  // Issue #133 — the kind:10032 `tokenNetworks` map is **leg A**: the deployed
+  // `TokenNetwork` a CLIENT calls `openChannel(address,uint256)` on to open the
+  // channel it pays this maker over. It is NOT the maker's own
+  // `RollingSwapChannel` (whose `openChannel` takes a different signature) —
+  // advertising that here reverts every client's lazy `ensureChannel` and the
+  // swap dies before a packet is sent.
   const tokenNetworks: Record<string, string> = {};
+  // Issue #102/#133 — **leg B**: the `verifyingContract` this node binds into
+  // its v2 EIP-712 balance-proof domain, advertised under its own announce key
+  // so it can never be mistaken for leg A. Filled in THIS loop from the same
+  // `provider.channelAddress` (and under the same chain key) each EVM signer
+  // binds, so what the node advertises can never drift from what its claims
+  // are signed under.
+  const swapVerifyingContracts: Record<string, string> = {};
   // Issue #114 — the kind:10032 `preferredTokens` map: the settlement-token
   // address/mint/id for each chain, sourced from the SAME chainProviders
   // entry as everything else in this loop (no second lookup to drift from).
@@ -1073,7 +1112,8 @@ export async function startSwapNode(
         chainId: parseEvmChainId(chain),
         verifyingContract: provider.channelAddress,
       });
-      tokenNetworks[chain] = provider.channelAddress;
+      tokenNetworks[chain] = provider.tokenNetworkAddress;
+      swapVerifyingContracts[chain] = provider.channelAddress;
       preferredTokens[chain] = provider.tokenAddress;
     } else if (chain.startsWith('solana:')) {
       if (!swapNodeKeys.solana) {
@@ -2136,7 +2176,17 @@ export async function startSwapNode(
     config.publisher ?? ilpPublisher ?? wsPublisher;
 
   try {
-    const ownIlpInfo: IlpPeerInfo = {
+    const ownIlpInfo: IlpPeerInfo & {
+      /**
+       * Issue #133 — leg-B extension key. `@toon-protocol/core`'s
+       * `IlpPeerInfo` has no field for a swap maker's EIP-712
+       * `verifyingContract`, and `buildIlpPeerInfoEvent` serializes the info
+       * object verbatim, so the extra key rides along in the kind:10032
+       * content. Named distinctly from `tokenNetworks` (leg A) precisely so
+       * the two can never be confused again.
+       */
+      swapVerifyingContracts?: Record<string, string>;
+    } = {
       // The SWAP_MNEMONIC-derived identity pubkey — the authoritative
       // `swapPubkey` streamSwap callers discover here and gift-wrap to. Signed
       // below with the matching `identity.secretKey`. (issues #80/#88)
@@ -2146,12 +2196,21 @@ export async function startSwapNode(
       btpEndpoint: config.btpEndpoint ?? '',
       assetCode: config.advertisedAsset?.assetCode ?? 'USD',
       assetScale: config.advertisedAsset?.assetScale ?? 6,
-      // Issue #102 — what a stock client needs to reconstruct the EIP-712
-      // domain of a leg-B claim: this node's per-chain payout address, and the
-      // `verifyingContract` (see `tokenNetworks` above). Both maps are keyed by
-      // `pair.to.chain`, the same key the claims themselves are signed under.
+      // Issue #102 — this node's per-chain payout address: the counterparty a
+      // client's leg-A `openChannel` names, and the address a leg-B claim must
+      // recover to. Keyed by `pair.to.chain`, the same key the claims
+      // themselves are signed under.
       settlementAddresses: { ...signerAddresses },
+      // Issue #133 — LEG A. The deployed `TokenNetwork` a client opens its
+      // payment channel against (`ToonClient.negotiationFromAnnounce` reads
+      // exactly this key, then `ChannelManager.ensureChannel` calls
+      // `TokenNetwork.openChannel(participant2, settlementTimeout)` on it).
       tokenNetworks: { ...tokenNetworks },
+      // Issue #133 — LEG B. This maker's `RollingSwapChannel` per chain: the
+      // EIP-712 `verifyingContract` a received v2 balance-proof claim verifies
+      // under. Deliberately a separate key from `tokenNetworks`: the two are
+      // different contracts with different ABIs.
+      swapVerifyingContracts: { ...swapVerifyingContracts },
       // Issue #114 — a stock client's apex `addApex` onboarding hard-refuses
       // an announce with no `supportedChains` ("announced no supportedChains
       // — cannot settle"). `distinctTargetChains` is the same chain set
