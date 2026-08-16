@@ -76,6 +76,12 @@ import {
 } from './inventory-reconciler.js';
 import type { ReconcileResult } from './inventory-reconciler.js';
 import { registerAdminRoutes } from './admin-surface.js';
+import { createSwapIntakeMeter } from './intake-classification.js';
+import type {
+  SwapIntakeArrival,
+  SwapIntakeMeter,
+  SwapIntakeReport,
+} from './intake-classification.js';
 import {
   EvmPaymentChannelSigner,
   MinaPaymentChannelSigner,
@@ -615,6 +621,18 @@ export interface SwapNodeInstance {
    * result and leave that channel's capacity blocked.
    */
   reconcileInventory(): Promise<ReconcileResult>;
+  /**
+   * Issue #152 — per-protocol-class counts of what the dispatch seam has
+   * admitted since this process started: `legacy`, `rolling-rfq`,
+   * `rolling-fill` and `refused`, with the peers still arriving on the legacy
+   * path. Also served, unauthenticated, as `GET /admin/intake`.
+   *
+   * The counters are **in-process** and restart at zero when the container is
+   * recreated, which is why the report always carries `since`/`windowSec`.
+   * For a multi-day gate reading (ADR 0003's "no legacy traffic for N days"),
+   * count the `swap.intake` log lines over the window instead.
+   */
+  intakeReport(): SwapIntakeReport;
   /** @internal — AC-10 test hook. */
   readonly _handlerRegistry?: HandlerRegistry;
   /** @internal — issue #47 test hook (rolling-engine introspection). */
@@ -1089,6 +1107,14 @@ export async function startSwapNode(
 
   const logger = config.logger ?? noopLogger();
   const startedAt = Date.now();
+
+  // Issue #152 — per-protocol-class accounting for the dispatch seam. Created
+  // here rather than at the seam so `GET /admin/intake` and the instance's
+  // `intakeReport()` read the same counters the log lines were bumped from.
+  // No config knob of any kind: verbosity is `SWAP_LOG_LEVEL` (optional) and
+  // nothing else, because `:release` auto-deploys and swap#134 proved what a
+  // newly-required key costs.
+  const intakeMeter: SwapIntakeMeter = createSwapIntakeMeter({ logger });
 
   // 2/3. swap node key derivation (BIP-32) REQUIRES a mnemonic (D12-011). Check
   //      this before resolving identity so callers passing only a secretKey
@@ -1959,17 +1985,16 @@ export async function startSwapNode(
     return new Uint8Array(buf);
   };
 
-  const handlePacket = async (
+  /**
+   * The dispatch seam proper — the issue #47 matrix, byte-for-byte the
+   * decisions it always made. `intake` is write-only from here: it records
+   * which row was taken and is never read back, so removing it would change
+   * nothing on the wire.
+   */
+  const dispatchPacket = async (
     request: HandlePacketRequest,
-    /**
-     * The peer id the connector bound this packet's arrival under — for a BTP
-     * arrival, the `peerId` the session authenticated with
-     * (connector `btp/btp-server.ts` `authenticatePeer`), surfaced as
-     * `LocalDeliveryRequest.sourcePeer`. Undefined when the connector does not
-     * report one (legacy `setPacketHandler` wiring / test doubles), which is
-     * exactly the pre-fix behaviour.
-     */
-    sourcePeer?: string
+    sourcePeer: string | undefined,
+    intake: SwapIntakeArrival
   ): Promise<HandlePacketResponse> => {
     const requestExt = request as HandlePacketRequest & {
       executionCondition?: string;
@@ -1984,6 +2009,9 @@ export async function startSwapNode(
       // Self-identified rolling/1 traffic that violates the fill shape:
       // reject F01 rather than letting it fall through to the legacy TOON
       // parser's misleading F06.
+      intake.classify('refused', {
+        reason: ROLLING_REJECT_REASONS.MALFORMED_FILL,
+      });
       return buildRollingReject({
         code: 'F01',
         semantic: 'invalid_request',
@@ -1993,6 +2021,9 @@ export async function startSwapNode(
     }
     if (senderCondition) {
       if (rollingFill === null) {
+        intake.classify('refused', {
+          reason: ROLLING_REJECT_REASONS.CONDITION_UNSUPPORTED_LEGACY,
+        });
         return buildRollingReject({
           code: 'F99',
           semantic: 'application_error',
@@ -2001,6 +2032,7 @@ export async function startSwapNode(
           reason: ROLLING_REJECT_REASONS.CONDITION_UNSUPPORTED_LEGACY,
         }) as HandlePacketResponse;
       }
+      intake.classify('rolling-fill');
       return (await rollingEngine.handleFill({
         amount: request.amount,
         destination: request.destination,
@@ -2015,6 +2047,9 @@ export async function startSwapNode(
       // A rolling fill without a sender-chosen condition has NO coupling
       // (spec R2: a zero condition is skipped by every verifier) — refuse
       // rather than fill uncoupled.
+      intake.classify('refused', {
+        reason: ROLLING_REJECT_REASONS.CONDITION_REQUIRED,
+      });
       return buildRollingReject({
         code: 'F99',
         semantic: 'application_error',
@@ -2029,16 +2064,42 @@ export async function startSwapNode(
     // by unwrapping and reading that kind. `handle()` returns null for
     // everything it cannot positively identify as an RFQ (including any unwrap
     // failure), so the legacy path below stays byte-for-byte as it was.
+    //
+    // Issue #152: the same unwrap is the ONLY place the inner kind is ever
+    // visible, so the intake records what it saw through `sniff` rather than
+    // decrypting a second time on the legacy branch.
     const rfq = await rfqIntake.handle(request.data, {
       ...(sourcePeer !== undefined ? { sourcePeer } : {}),
+      sniff: (s) =>
+        intake.note({
+          innerKind: s.rumorKind,
+          ...(s.senderPubkey !== undefined
+            ? { senderPubkey: s.senderPubkey }
+            : {}),
+          ...(s.pair !== undefined ? { pair: s.pair } : {}),
+          ...(s.senderIlpAddress !== undefined
+            ? { senderIlpAddress: s.senderIlpAddress }
+            : {}),
+        }),
     });
-    if (rfq) return rfq as HandlePacketResponse;
+    if (rfq) {
+      intake.classify('rolling-rfq');
+      return rfq as HandlePacketResponse;
+    }
 
     // Legacy path (zero-condition gift-wrap) — unchanged below.
+    //
+    // Everything that reaches here is on the legacy row of the dispatch
+    // table: it is about to be handed to `createSwapHandler`. The `innerKind`
+    // the sniff recorded above says whether it was a real legacy swap request
+    // (20032), some other rumor, or an envelope that would not open at all.
+    intake.classify('legacy');
+
     let meta;
     try {
       meta = shallowParseToon(Buffer.from(request.data, 'base64'));
     } catch {
+      intake.note({ reason: 'invalid_toon' });
       return {
         accept: false,
         code: 'F06',
@@ -2050,6 +2111,7 @@ export async function startSwapNode(
     try {
       amount = BigInt(request.amount);
     } catch {
+      intake.note({ reason: 'invalid_amount' });
       return { accept: false, code: 'T00', message: 'Invalid payment amount' };
     }
 
@@ -2066,6 +2128,7 @@ export async function startSwapNode(
       result = (await registry.dispatch(ctx)) as HandlePacketResponse;
     } catch (err) {
       logger.error?.('swap.packet.dispatch_failed', { err: errSummary(err) });
+      intake.note({ reason: 'dispatch_failed' });
       return { accept: false, code: 'T00', message: 'Internal error' };
     }
 
@@ -2106,6 +2169,49 @@ export async function startSwapNode(
     }
 
     return result;
+  };
+
+  const handlePacket = async (
+    request: HandlePacketRequest,
+    /**
+     * The peer id the connector bound this packet's arrival under — for a BTP
+     * arrival, the `peerId` the session authenticated with
+     * (connector `btp/btp-server.ts` `authenticatePeer`), surfaced as
+     * `LocalDeliveryRequest.sourcePeer`. Undefined when the connector does not
+     * report one (legacy `setPacketHandler` wiring / test doubles), which is
+     * exactly the pre-fix behaviour.
+     */
+    sourcePeer?: string
+  ): Promise<HandlePacketResponse> => {
+    // Issue #152 — open the intake record for this arrival. Every `return` in
+    // `dispatchPacket` is preceded by a `classify()`, and the `finally` here
+    // emits exactly one `swap.intake` record however the dispatch ends —
+    // including an unexpected throw, which is why this is a `finally` and not
+    // a line after the call. Nothing here changes a packet's outcome: no
+    // classify call is on the critical path of a decision, and the meter
+    // swallows its own errors.
+    const intake = intakeMeter.begin({
+      amount: request.amount,
+      destination: request.destination,
+      ...(typeof request.sourceAccount === 'string'
+        ? { sourceAccount: request.sourceAccount }
+        : {}),
+      ...(sourcePeer !== undefined ? { sourcePeer } : {}),
+    });
+    let outcome: HandlePacketResponse | undefined;
+    try {
+      outcome = await dispatchPacket(request, sourcePeer, intake);
+      return outcome;
+    } finally {
+      intake.finish(
+        outcome === undefined
+          ? undefined
+          : {
+              accept: outcome.accept,
+              ...(!outcome.accept ? { code: outcome.code } : {}),
+            }
+      );
+    }
   };
 
   // Register the handler as the connector's local-delivery callback.
@@ -2259,6 +2365,9 @@ export async function startSwapNode(
   registerAdminRoutes(app, {
     inventory,
     reconciler,
+    // Issue #152 — `GET /admin/intake`: the same counters the `swap.intake`
+    // log lines bump, readable without shell-parsing the log stream.
+    intake: intakeMeter,
     ...(config.adminToken !== undefined && { adminToken: config.adminToken }),
   });
 
@@ -2507,6 +2616,7 @@ export async function startSwapNode(
       rollingEngine.registerSession(session);
     },
     reconcileInventory: () => reconciler.reconcile(),
+    intakeReport: () => intakeMeter.report(),
     recordSettlement: (event: SettlementEvent): bigint => {
       // Resolve the (assetCode, chain) pool via the provisioned channel
       // state: stored keys are `${assetCode}:${chain}:${channelId}`.

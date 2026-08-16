@@ -49,6 +49,26 @@ export type {
   AdminSurfaceDeps,
 } from './admin-surface.js';
 
+// swap#152 — per-protocol-class intake accounting (ADR 0003 Stage 0).
+export {
+  createSwapIntakeMeter,
+  formatIntakePair,
+  intakePairFromTags,
+  SWAP_INTAKE_CLASSES,
+  SWAP_INTAKE_EVENT,
+} from './intake-classification.js';
+export type {
+  SwapIntakeArrival,
+  SwapIntakeClass,
+  SwapIntakeClassCounts,
+  SwapIntakeDetails,
+  SwapIntakeMeter,
+  SwapIntakeMeterOptions,
+  SwapIntakeOrigin,
+  SwapIntakePeerCount,
+  SwapIntakeReport,
+} from './intake-classification.js';
+
 // Payment-channel signing (Story 12.4)
 export type {
   PaymentChannelSigner,

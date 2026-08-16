@@ -56,4 +56,15 @@ describe('@toon-protocol/swap public API exports (Story 12.4 AC-9)', () => {
   it('[P2] re-exports createSwapHandler from @toon-protocol/sdk (Story 12.7)', () => {
     expect(typeof swapNode.createSwapHandler).toBe('function');
   });
+
+  it('[P2] exports the intake meter and its class list (swap#152)', () => {
+    expect(typeof swapNode.createSwapIntakeMeter).toBe('function');
+    expect(swapNode.SWAP_INTAKE_EVENT).toBe('swap.intake');
+    expect([...swapNode.SWAP_INTAKE_CLASSES]).toEqual([
+      'legacy',
+      'rolling-rfq',
+      'rolling-fill',
+      'refused',
+    ]);
+  });
 });

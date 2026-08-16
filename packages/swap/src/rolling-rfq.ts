@@ -49,6 +49,10 @@ import {
   type RollingSession,
 } from './rolling-engine.js';
 import type { LegBReturnPath } from './leg-b-return-path.js';
+import {
+  formatIntakePair,
+  intakePairFromTags,
+} from './intake-classification.js';
 
 /** Inner rumor kind of an RFQ request (spec §2.2). */
 export const ROLLING_RFQ_REQUEST_KIND = 20033;
@@ -302,6 +306,31 @@ export interface RollingRfqIntakeConfig {
   };
 }
 
+/**
+ * What the intake learned while deciding whether a packet was an RFQ
+ * (issue #152).
+ *
+ * The sniff is a **read-only by-product** of a decision the intake was already
+ * making. It exists because the inner rumor kind is the ONLY thing separating
+ * a legacy swap request (20032) from a rolling RFQ (20033), it is visible only
+ * after NIP-59 decryption, and this function is the only place on the seam
+ * that decrypts. Without it the caller would have to unwrap a second time to
+ * classify a legacy arrival.
+ *
+ * Nothing here is payload content: the rumor's `content` is never surfaced,
+ * only its kind, its sender, and the `swap-from`/`swap-to` routing tags.
+ */
+export interface RollingRfqSniff {
+  /** Inner rumor kind, or `null` when the gift wrap could not be opened. */
+  rumorKind: number | null;
+  /** Gift-wrap sender pubkey, when the wrap opened. */
+  senderPubkey?: string;
+  /** Requested pair as `from>to`, when the packet named one. */
+  pair?: string;
+  /** Sender's advertised ILP address — well-formed RFQs only. */
+  senderIlpAddress?: string;
+}
+
 /** Accept/reject shape the packet handler returns, structurally. */
 export type RollingRfqOutcome =
   | { accept: true; data: string; message?: string }
@@ -327,7 +356,17 @@ export function createRollingRfqIntake(config: RollingRfqIntakeConfig): {
   /** `null` ⇒ not an RFQ, fall through to legacy. */
   handle(
     dataB64: string,
-    arrival?: { sourcePeer?: string }
+    arrival?: {
+      sourcePeer?: string;
+      /**
+       * Issue #152 — called at most once per `handle()` call, on every path
+       * that got as far as attempting to open the wrap, with what the sniff
+       * saw. Never called when the intake declined to look at all (disabled,
+       * or empty data). Purely observational: throwing from it is the
+       * caller's problem, not the packet's, so callers must not throw.
+       */
+      sniff?: (sniff: RollingRfqSniff) => void;
+    }
   ): Promise<RollingRfqOutcome | null>;
 } {
   const enabled = config.rfq?.enabled ?? true;
@@ -352,7 +391,10 @@ export function createRollingRfqIntake(config: RollingRfqIntakeConfig): {
   return {
     async handle(
       dataB64: string,
-      arrival?: { sourcePeer?: string }
+      arrival?: {
+        sourcePeer?: string;
+        sniff?: (sniff: RollingRfqSniff) => void;
+      }
     ): Promise<RollingRfqOutcome | null> {
       if (!enabled) return null;
       if (typeof dataB64 !== 'string' || dataB64.length === 0) return null;
@@ -371,14 +413,32 @@ export function createRollingRfqIntake(config: RollingRfqIntakeConfig): {
         rumor = unwrapped.rumor;
         senderPubkey = unwrapped.senderPubkey;
       } catch {
+        // Issue #152: an unopenable wrap still fell through to the legacy
+        // branch, so it still has to be counted — with `null` for the kind,
+        // which is what "we could not tell" looks like.
+        arrival?.sniff?.({ rumorKind: null });
         return null;
       }
-      if (rumor?.kind !== ROLLING_RFQ_REQUEST_KIND) return null;
+      if (rumor?.kind !== ROLLING_RFQ_REQUEST_KIND) {
+        // Not an RFQ. This is the legacy row (inner kind 20032) and everything
+        // else that reaches it — the discriminator issue #152 needs.
+        const taggedPair = intakePairFromTags(rumor?.tags);
+        arrival?.sniff?.({
+          rumorKind: typeof rumor?.kind === 'number' ? rumor.kind : null,
+          senderPubkey,
+          ...(taggedPair !== undefined ? { pair: taggedPair } : {}),
+        });
+        return null;
+      }
 
       const parsed = parseRollingRfqRequest(
         typeof rumor.content === 'string' ? rumor.content : ''
       );
       if (parsed === null || parsed === 'malformed') {
+        arrival?.sniff?.({
+          rumorKind: ROLLING_RFQ_REQUEST_KIND,
+          senderPubkey,
+        });
         // Kind:20033 is unambiguously rolling traffic. Falling through would
         // hand it to the legacy handler, whose error would misdescribe the
         // failure, so reject here with the actionable reason.
@@ -390,6 +450,17 @@ export function createRollingRfqIntake(config: RollingRfqIntakeConfig): {
           ROLLING_RFQ_REJECT_REASONS.MALFORMED_RFQ
         );
       }
+
+      // Issue #152 — the fully-identified case: a well-formed RFQ names its
+      // own pair and return address, so the intake record is at its richest
+      // here. Emitted before the pair/rate/session checks so an RFQ that is
+      // subsequently REFUSED is still counted as a rolling arrival.
+      arrival?.sniff?.({
+        rumorKind: ROLLING_RFQ_REQUEST_KIND,
+        senderPubkey,
+        pair: formatIntakePair(parsed.pair),
+        senderIlpAddress: parsed.senderIlpAddress,
+      });
 
       const pair = findRfqPair(config.swapPairs, parsed.pair);
       if (!pair) {

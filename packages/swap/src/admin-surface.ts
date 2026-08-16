@@ -10,10 +10,15 @@
  * `nonce`/`cumulativeAmount` BELOW claims already issued and invites a
  * replay — see `state-store.ts`).
  *
- * Four routes, mounted on the existing BLS server under `/admin`:
+ * Five routes, mounted on the existing BLS server under `/admin`:
  *
  * - `GET  /admin/inventory`           — read: per-pool buckets, per-channel
  *   issued-vs-redeemed, and an explicit reason when issuance is blocked.
+ * - `GET  /admin/intake`              — read (swap#152): per-protocol-class
+ *   counts of what the dispatch seam admitted — `legacy`, `rolling-rfq`,
+ *   `rolling-fill`, `refused` — and which peers are still on legacy. This is
+ *   the reading ADR 0003's "no legacy traffic for N days" gate is taken from.
+ *   See `intake-classification.ts`.
  * - `POST /admin/inventory/reconcile` — write: force a chain-truth pass now.
  * - `POST /admin/inventory/credit`    — write: recycle burned capital, and
  *   ONLY the amount an on-chain redemption corroborates.
@@ -55,10 +60,11 @@
  *    ability to protect itself. The token is optional config, so no
  *    deployment can crash-loop on it (swap#134).
  *
- * The read route is not token-gated: it discloses strictly less than the
+ * The read routes are not token-gated: they disclose strictly less than the
  * pre-existing unauthenticated `GET /health` (same inventory numbers plus
- * on-chain watermarks, which are public), and an operator diagnosing a dead
- * maker should not be blocked on a secret they may not have set.
+ * on-chain watermarks, which are public; and for `/admin/intake`, arrival
+ * counts and peer ILP addresses), and an operator diagnosing a dead maker
+ * should not be blocked on a secret they may not have set.
  */
 
 import { createHash, timingSafeEqual } from 'node:crypto';
@@ -73,6 +79,7 @@ import type {
   ReconcileResult,
   SwapInventoryReconciler,
 } from './inventory-reconciler.js';
+import type { SwapIntakeReport } from './intake-classification.js';
 
 export interface AdminChannelView {
   channelId: string;
@@ -130,12 +137,20 @@ export interface AdminSurfaceDeps {
   /** Operator token; absent ⇒ writes disabled. */
   adminToken?: string;
   clock?: () => number;
+  /**
+   * Issue #152 — per-protocol-class intake accounting. Absent ⇒
+   * `GET /admin/intake` answers 503 with a reason rather than 404, so an
+   * operator can tell "this build has no meter" from "nginx ate the route".
+   */
+  intake?: { report(): SwapIntakeReport };
 }
 
 const WRITES_DISABLED_REASON =
   'no admin token configured — set SWAP_ADMIN_TOKEN (or SwapNodeConfig.adminToken) to enable inventory writes';
 const WRITES_ENABLED_REASON =
   'token required in Authorization: Bearer <token> or X-Swap-Admin-Token';
+const INTAKE_UNAVAILABLE_REASON =
+  'this node registered its admin routes without an intake meter; per-protocol-class counts are unavailable — count the `swap.intake` log lines instead';
 
 function constantTimeEquals(a: string, b: string): boolean {
   // Hash first so the comparison operands are always the same length (and so
@@ -414,6 +429,25 @@ export function registerAdminRoutes(app: Hono, deps: AdminSurfaceDeps): void {
   app.get('/admin/inventory', (c: Context) =>
     c.json(buildInventoryReport(deps))
   );
+
+  // Issue #152 — the legacy-removal gate reading. A read, so it follows the
+  // same rule `GET /admin/inventory` set: unauthenticated behind the box
+  // nginx's `^~ /admin` 404, because it discloses strictly less than the
+  // pre-existing unauthenticated `GET /health` (traffic counts and peer ILP
+  // addresses, no balances, no keys, no payload) and the person checking
+  // "has any legacy swap arrived today" is diagnosing, not mutating.
+  app.get('/admin/intake', (c: Context) => {
+    if (!deps.intake) {
+      return c.json(
+        {
+          error: 'intake_accounting_unavailable',
+          reason: INTAKE_UNAVAILABLE_REASON,
+        },
+        503
+      );
+    }
+    return c.json(deps.intake.report());
+  });
 
   app.post('/admin/inventory/reconcile', async (c: Context) => {
     const denied = denyWrite(c);

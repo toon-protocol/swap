@@ -88,7 +88,86 @@ the kind:10032 fields — it *does* have an override, `TOON_ILP_ADDRESS`.)
 - `btpServerPort` (config field, no default in standalone mode — the
   maker.mjs wiring uses `3400`): BTP WebSocket server. The image declares no
   `EXPOSE`; publish it with `-p` to make the maker directly dialable.
-- `blsPort`: `/health` + `/admin/inventory*` HTTP.
+- `blsPort`: `/health` + `/admin/inventory*` + `/admin/intake` HTTP.
+
+## Which protocol served a swap (swap#152)
+
+The maker classifies **every** arrival at its dispatch seam and emits one
+JSON-line record for it. This is the reading ADR 0003's *"no legacy traffic
+observed for N consecutive days"* gate is taken from — before it, a maker
+serving legacy all day and a maker serving none looked identical, because the
+node logged only refusals.
+
+| class | what arrived |
+| --- | --- |
+| `legacy` | a zero-condition gift wrap that reached the legacy handler (inner rumor kind `20032`, reported as `innerKind`) |
+| `rolling-rfq` | the same envelope whose inner rumor is kind `20033` |
+| `rolling-fill` | a coupled fill under a real 32-byte sender-chosen condition |
+| `refused` | the dispatch table rejected the shape before any handler, with the reason discriminator already on the wire |
+
+The class is the **row of the dispatch table** the packet landed on, not its
+outcome: a rolling fill the engine later rejects is still `rolling-fill`, with
+`accepted:false` and the reject `code` saying what happened to it.
+
+**Reading 1 — the log stream (this is the gate reading).** Survives a
+Watchtower recreate, because it is not in the process:
+
+```sh
+C=$(docker ps -qf name=swap-node)
+
+# per-class counts over the last 24h
+docker logs --since 24h "$C" 2>&1 | grep '"event":"swap.intake"' \
+  | grep -o '"class":"[a-z-]*"' | sort | uniq -c
+
+# the gate itself: how many legacy arrivals today?
+docker logs --since 24h "$C" 2>&1 | grep '"event":"swap.intake"' \
+  | grep -c '"class":"legacy"'
+
+# and WHO is still on legacy
+docker logs --since 24h "$C" 2>&1 | grep '"event":"swap.intake"' \
+  | grep '"class":"legacy"' | grep -o '"peer":"[^"]*"' | sort | uniq -c
+```
+
+Each record carries `class`, `accepted`, the reject `code`/`reason`, the
+arrival `peer` and `sourceAccount`, the sender's `senderPubkey`, the requested
+`pair` (`from>to`) and the inner rumor `innerKind`. **No payload** — the gift
+wrap is not logged, only routing metadata. Verbosity is the existing optional
+`SWAP_LOG_LEVEL` env var (records are `info`, the default level); there is no
+new config key.
+
+**Reading 2 — `GET /admin/intake`.** The same counts without shell-parsing.
+Unauthenticated, same as `GET /admin/inventory`, behind the box nginx's
+`^~ /admin` 404:
+
+```sh
+curl -s http://127.0.0.1:<blsPort>/admin/intake | jq
+```
+
+```jsonc
+{
+  "since": "2026-08-16T09:00:00.000Z",  // process start — the counts cover no more than this
+  "windowSec": 7200,
+  "total": 12,
+  "classes": {
+    "legacy":       { "total": 0, "accepted": 0, "rejected": 0, "lastAt": null },
+    "rolling-rfq":  { "total": 6, "accepted": 6, "rejected": 0, "lastAt": "…" },
+    "rolling-fill": { "total": 6, "accepted": 6, "rejected": 0, "lastAt": "…" },
+    "refused":      { "total": 0, "accepted": 0, "rejected": 0, "lastAt": null }
+  },
+  "reasons": {},
+  "legacyPeers": [],
+  "legacyPeersTruncated": false
+}
+```
+
+These counters are **in-process** and restart at zero whenever the container
+is recreated — which is every `:release` move. That is why `since` and
+`windowSec` are always present: a reset is visible rather than silent. For a
+multi-day gate reading use the log lines, not these totals.
+
+A healthy post-cutover baseline is `classes.legacy.total: 0` with a non-empty
+`legacyPeers: []` staying empty, and `rolling-rfq`/`rolling-fill` accounting
+for all served traffic.
 
 ## Inventory recycling & the operator surface (issue #138)
 
@@ -113,6 +192,7 @@ the chain key of the `chainProviders` entry you already have.
 
 | Route | Auth | Purpose |
 | --- | --- | --- |
+| `GET /admin/intake` | none | **swap#152.** Per-protocol-class counts of what the dispatch seam admitted, and which peers are still on the legacy path. See above. |
 | `GET /admin/inventory` | none | Per-pool `available`/`total`/`unsettled`/`inFlight`/`free`, per-channel issued-vs-redeemed-on-chain, and a `blockedReason` naming what is holding the capacity when `free` is 0. |
 | `POST /admin/inventory/reconcile` | token | Force a chain-truth pass now; returns what it recycled. |
 | `POST /admin/inventory/credit` | token | `{ assetCode, chain, amount? }` — recycle burned capital. Applies **only** what an on-chain redemption corroborates: an uncorroborated request (or one larger than the chain backs) is refused `409` with nothing applied. |
