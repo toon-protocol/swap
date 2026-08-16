@@ -43,7 +43,10 @@ export type {
   ReleaseLogger,
   // Issue #113 — the `SwapChannelStateInit.onChainReader` seam.
   ChannelOnChainReader,
+  // swap#136 — structured rebind refusals (channelId + unredeemed delta).
+  ChannelRebindRefusal,
 } from './channel-state.js';
+export { describeChannelRebindRefusal } from './channel-state.js';
 
 // Claim issuer (Story 12.4)
 export { MultiChainClaimIssuer } from './claim-issuer.js';
@@ -74,7 +77,35 @@ export type {
 
 // Errors (Story 12.4)
 export { SwapInventoryError, SwapWalletError } from './errors.js';
-export type { SwapInventoryErrorCode, SwapWalletErrorCode } from './errors.js';
+export type {
+  SwapInventoryErrorCode,
+  SwapWalletErrorCode,
+  SwapWalletErrorDetails,
+} from './errors.js';
+
+// swap#136 — claim-refusal contract (the diagnosable replacement for the SDK
+// swap handler's blanket `T00 Internal error`).
+export {
+  CLAIM_REFUSAL_REASONS,
+  classifyClaimIssuerError,
+  buildClaimRefusalReject,
+  createClaimRefusalDiagnostics,
+} from './claim-refusal.js';
+export type {
+  ClaimRefusal,
+  ClaimRefusalReason,
+  ClaimRefusalReject,
+  ClaimRefusalDiagnostics,
+} from './claim-refusal.js';
+
+// swap#136 — the process-level structured logger the CLI installs.
+export {
+  createConsoleLogger,
+  resolveLogLevel,
+  DEFAULT_SWAP_LOG_LEVEL,
+  SWAP_LOG_LEVEL_ENV,
+} from './logger.js';
+export type { SwapLogLevel, ConsoleLoggerOptions } from './logger.js';
 
 // Runtime entrypoint (Story 12.7)
 export { startSwapNode } from './swap-node.js';

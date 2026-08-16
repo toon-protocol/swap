@@ -45,17 +45,41 @@ export class SwapInventoryError extends Error {
   }
 }
 
+/**
+ * Machine-readable payload attached to a {@link SwapWalletError}.
+ *
+ * swap#136: `code` alone is too coarse to refuse a swap actionably —
+ * `UNSUPPORTED_CHAIN` covers both "this swap node has no signer for that
+ * chain" (final) and "every provisioned channel still carries unredeemed
+ * value" (temporary, and the sender fixes it by redeeming). `details.reason`
+ * discriminates them, and the remaining fields carry the numbers an operator
+ * or a client needs — the channel id and its unredeemed delta — all the way
+ * out to the ILP reject `data`. See `claim-refusal.ts`.
+ */
+export interface SwapWalletErrorDetails {
+  /** Discriminator — see `CLAIM_REFUSAL_REASONS` in `claim-refusal.ts`. */
+  reason: string;
+  [key: string]: unknown;
+}
+
 export class SwapWalletError extends Error {
   public readonly code: SwapWalletErrorCode;
+
+  /**
+   * swap#136 — optional structured diagnosis. Absent on legacy throw sites;
+   * consumers MUST treat it as best-effort and fall back to `code`.
+   */
+  public readonly details?: SwapWalletErrorDetails;
 
   constructor(
     code: SwapWalletErrorCode,
     message: string,
-    options?: { cause?: unknown }
+    options?: { cause?: unknown; details?: SwapWalletErrorDetails }
   ) {
     super(message, options as ErrorOptions | undefined);
     this.name = 'SwapWalletError';
     this.code = code;
+    if (options?.details) this.details = options.details;
   }
 }
 

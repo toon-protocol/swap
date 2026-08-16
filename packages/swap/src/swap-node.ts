@@ -71,6 +71,7 @@ import {
 } from './payment-channel-signer.js';
 import type { PaymentChannelSigner } from './payment-channel-signer.js';
 import { MultiChainClaimIssuer } from './claim-issuer.js';
+import { createClaimRefusalDiagnostics } from './claim-refusal.js';
 import { SwapNodeStartError } from './errors.js';
 import {
   JsonFileSwapStateStore,
@@ -664,6 +665,17 @@ export function buildSignerAddresses(
   return result;
 }
 
+/**
+ * Library default: silence. An embedded swap node must not print into its
+ * host's stdout uninvited.
+ *
+ * swap#136 — this is NOT the right default for a *process*, and the CLI
+ * (`cli.ts`, the entrypoint the published image runs) used to inherit it,
+ * which is why a maker that refused every swap for hours logged nothing at
+ * all. `cli.ts`'s `installDefaultLogger()` now replaces it with
+ * `createConsoleLogger()` (`logger.ts`). If you add another entrypoint, do
+ * the same there — do not make this function print.
+ */
 function noopLogger(): SwapNodeLogger {
   return {
     debug: () => undefined,
@@ -1421,10 +1433,18 @@ export async function startSwapNode(
       ? normalizeRateProvider(config.rateProvider)
       : undefined;
 
+  // swap#136 — reclaim the diagnosis the SDK handler throws away. `instrument`
+  // logs (and captures) whatever `issueClaim` threw; `wrap` (applied
+  // outermost, below) turns the SDK's blanket `T00 Internal error` into that
+  // captured refusal's code/message/data. See `claim-refusal.ts`.
+  const refusalDiagnostics = createClaimRefusalDiagnostics({ logger });
+
   const swapHandler = createSwapHandler({
     recipientSecretKey: identity.secretKey,
     swapPairs: [...config.swapPairs],
-    claimIssuer,
+    claimIssuer: refusalDiagnostics.instrument(
+      claimIssuer
+    ) as unknown as typeof claimIssuer,
     ...(sdkRateProvider && { rateProvider: sdkRateProvider }),
     // Issue #46 — prefer the operator's set (verbatim, SDK contract), else
     // the swap-node-owned persistent replay set when persistence is enabled,
@@ -1456,10 +1476,15 @@ export async function startSwapNode(
       })
     : swapHandler;
 
+  // swap#136 — outermost, so it sees the final response of whatever ran
+  // inside (the staleness gate never produces the SDK's generic T00, so
+  // decorating outside the gate is safe and covers every dispatch path).
+  const diagnosedSwapHandler = refusalDiagnostics.wrap(gatedSwapHandler);
+
   // 9/10. HandlerRegistry — register on kind:1059 (NIP-59 gift-wrap).
   const registry = new HandlerRegistry();
   try {
-    registry.on(1059, gatedSwapHandler);
+    registry.on(1059, diagnosedSwapHandler);
   } catch (err) {
     throw new SwapNodeStartError(
       'HANDLER_REGISTRATION_FAILED',
