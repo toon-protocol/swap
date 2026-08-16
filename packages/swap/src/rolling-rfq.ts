@@ -49,6 +49,8 @@ import {
   type RollingSession,
 } from './rolling-engine.js';
 import type { LegBReturnPath } from './leg-b-return-path.js';
+import { SWAP_INTAKE_EVENT, formatPairLabel } from './intake-event.js';
+import type { SwapIntakeClass } from './intake-event.js';
 
 /** Inner rumor kind of an RFQ request (spec §2.2). */
 export const ROLLING_RFQ_REQUEST_KIND = 20033;
@@ -299,6 +301,8 @@ export interface RollingRfqIntakeConfig {
   logger?: {
     debug?: (msg: string, meta?: Record<string, unknown>) => void;
     warn?: (msg: string, meta?: Record<string, unknown>) => void;
+    /** swap#152 — carries the `rolling-rfq` intake classification event. */
+    info?: (msg: string, meta?: Record<string, unknown>) => void;
   };
 }
 
@@ -378,6 +382,23 @@ export function createRollingRfqIntake(config: RollingRfqIntakeConfig): {
       const parsed = parseRollingRfqRequest(
         typeof rumor.content === 'string' ? rumor.content : ''
       );
+
+      // swap#152 (ADR 0003's removal gate) — kind:20033 is unambiguous:
+      // whatever `parsed` turns out to be, this arrival IS the `rolling-rfq`
+      // class. Emitted here (not by the caller) because this is the only
+      // place that has already paid for the unwrap; `sender` is the BTP peer
+      // id, matching the ILP-level identity every other intake class logs
+      // (never the gift-wrap's Nostr `senderPubkey`).
+      const requestedPair =
+        parsed === null || parsed === 'malformed'
+          ? undefined
+          : formatPairLabel(parsed.pair);
+      logger?.info?.(SWAP_INTAKE_EVENT, {
+        class: 'rolling-rfq' satisfies SwapIntakeClass,
+        sender: arrival?.sourcePeer,
+        ...(requestedPair !== undefined && { pair: requestedPair }),
+      });
+
       if (parsed === null || parsed === 'malformed') {
         // Kind:20033 is unambiguously rolling traffic. Falling through would
         // hand it to the legacy handler, whose error would misdescribe the
