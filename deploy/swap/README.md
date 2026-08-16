@@ -116,6 +116,49 @@ the chain key of the `chainProviders` entry you already have.
 | `GET /admin/inventory` | none | Per-pool `available`/`total`/`unsettled`/`inFlight`/`free`, per-channel issued-vs-redeemed-on-chain, and a `blockedReason` naming what is holding the capacity when `free` is 0. |
 | `POST /admin/inventory/reconcile` | token | Force a chain-truth pass now; returns what it recycled. |
 | `POST /admin/inventory/credit` | token | `{ assetCode, chain, amount? }` — recycle burned capital. Applies **only** what an on-chain redemption corroborates: an uncorroborated request (or one larger than the chain backs) is refused `409` with nothing applied. |
+| `POST /admin/inventory/deposit` | token | **swap#142.** `{ assetCode, chain, amount?, dryRun? }` — book genuinely NEW capital. Applies **only** what the pool's on-chain channel funding corroborates. |
+
+### Adding capital (swap#142)
+
+`credit` recycles capital the pool already counted — it can restore
+`available`, never raise `total`. Genuinely *adding* capital (funding a new
+channel, topping up a deposit) is `deposit`, and it is the only route that
+raises `total`. Editing the configured inventory is not a substitute: the
+persisted snapshot wins over config for pool keys the node has already seen
+(issue #130), so a config bump silently does nothing.
+
+Procedure — **fund the channel on chain first**, then tell the node:
+
+```sh
+# 1. Deposit into a channel this maker has provisioned (chain side).
+# 2. See what the node will credit, without changing anything:
+curl -sX POST http://127.0.0.1:<blsPort>/admin/inventory/deposit \
+  -H "authorization: Bearer $SWAP_ADMIN_TOKEN" -H 'content-type: application/json' \
+  -d '{"assetCode":"USDC","chain":"evm:base:8453","dryRun":true}'
+# 3. Same call without dryRun applies it (add "amount" to assert an exact figure).
+```
+
+What it corroborates against is Σ `cumulativePaid + deposit` over the pool's
+channels — **not** the `deposit` field alone, which is the *remaining
+un-paid-out* balance and falls on every redemption. The sum is invariant
+under redemption and rises only when capital actually enters a channel. Only
+the excess of that sum over the pool's `total` is credited, and crediting
+raises `total` — so the gap a repeat call measures has already closed, and
+double-crediting is impossible without any extra bookkeeping to lose.
+
+Refusals, all with nothing applied:
+
+| Status | Meaning |
+| --- | --- |
+| `409 uncorroborated` | the chain shows no more capital than the pool already booked — the deposit has not landed, or it went somewhere this node does not read |
+| `409 exceeds_corroborated` | `amount` is larger than the chain backs |
+| `503 chain_unreadable` | a channel read failed; the corroborated total would be incomplete |
+| `503 funding_unreadable` | no on-chain reader, or one that cannot read funding positions (non-EVM until swap#141) |
+| `404 unknown_pool` | no channel state for that pool |
+
+Capital sitting in the payout wallet but not yet placed in a channel is **not**
+creditable — the chain shows no channel holding it. Move it into a channel and
+it becomes corroborable.
 
 **Protection.** Two layers:
 
@@ -133,6 +176,36 @@ the chain key of the `chainProviders` entry you already have.
 `GET` is unauthenticated because it discloses strictly less than the
 already-unauthenticated `GET /health`, and an operator diagnosing a stalled
 maker should not be blocked on a secret they may not have set.
+
+### Known: a small historical `total` inflation
+
+Before swap#137, a *failed* swap unwound its inventory hold with `credit()`,
+which raises `available` **and** `total`, so every failure left `total` one
+swap-notional too high. #137 fixed the unwind and #140's reconciler restored
+`available`; the live devnet maker therefore reads `available` 15 000 000
+(correct) against `total` 15 003 500. The error is static — it cannot grow —
+and it is deliberately **not** corrected by any live write path:
+
+- `total` is what kind:10032 advertises, so the maker over-advertises by
+  0.023 %. A counterparty sizing a swap against the inflated figure is refused
+  at issuance with a benign `T04`; it is never handed a claim the maker cannot
+  honor.
+- A reconcile that recomputed `total` from configured inventory would be a
+  *downward* write derived from figures the node does not durably own (config
+  loses to the snapshot for seen keys, issue #130; the state file is the only
+  ledger of additions and the documented reset deletes it). Firing wrongly, it
+  would shrink `total` below capital the maker really holds — turning a
+  bounded cosmetic error into an unbounded one, automatically, on a
+  `:release` auto-deploy.
+- It self-heals: `POST /admin/inventory/deposit` converges `total` onto chain
+  truth **from below**, so the next genuine top-up credits the top-up minus
+  the 3 500 and lands `total` exactly on the chain's figure. The residue moves
+  into `available` being 3 500 low, which is the under-serving (safe)
+  direction.
+
+If it must be exact sooner, do it with the node **down** — stop the maker,
+edit the persisted pool entry in `swap-node-state.json`, restart. That is a
+deliberate human action, not a route that can be fired by accident.
 
 ## Runtime user & filesystem
 
