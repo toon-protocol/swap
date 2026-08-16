@@ -274,10 +274,29 @@ jobs:
           echo "::warning::the fleet config did not reach a running state on this build (exit $STATUS), but not with INVALID_CONFIG."
           echo "::warning::Not treated as a config-schema break — most likely an unreachable RPC from this runner. Output above."
 
+  # Fleet no-op merge guard (toon-meta#405), wired INTO this repo's aggregate
+  # required check so that it blocks a HUMAN merge and not just the fleet
+  # auto-merge pass (toon-meta#408). connector#1008 merged green, closed its
+  # ticket and changed zero files -- and it was a human who merged it, because
+  # a red NON-required check is only a warning on the merge button. This
+  # replaces the stand-alone empty-pr-guard-shim.yml, deleted in the same
+  # commit; running both would put two identical "No-op merge guard" check
+  # runs on every PR. Canonical caller snippet and full rationale:
+  # toon-meta scripts/factory/empty-pr-guard-gate-job.yml.
+  #
+  # No `secrets: inherit` -- the guard makes no API call and no write of any
+  # kind, so handing it FACTORY_OPS_TOKEN would widen a monitored credential
+  # for nothing. No `if:` either: this workflow also runs on push, where the
+  # guard passes with a plain "no merge result to evaluate"; a job-level `if:`
+  # would make it `skipped` there, and a skipped gating job must never read as
+  # a pass (toon-meta#279).
+  no-op-merge:
+    uses: toon-protocol/toon-meta/.github/workflows/empty-pr-guard.yml@main
+
   ci-ok:
     name: CI OK
     runs-on: ubuntu-latest
-    needs: [build, devbox-validate, swap-image-build]
+    needs: [build, devbox-validate, swap-image-build, no-op-merge]
     if: always()
     steps:
       # Fleet-wide aggregate required check (toon-meta#279): this job is the
@@ -291,7 +310,8 @@ jobs:
           echo "build: ${{ needs.build.result }}"
           echo "devbox-validate: ${{ needs.devbox-validate.result }}"
           echo "swap-image-build: ${{ needs.swap-image-build.result }}"
-          if [ "${{ needs.build.result }}" != "success" ] || [ "${{ needs.devbox-validate.result }}" != "success" ] || [ "${{ needs.swap-image-build.result }}" != "success" ]; then
+          echo "no-op-merge: ${{ needs.no-op-merge.result }}"
+          if [ "${{ needs.build.result }}" != "success" ] || [ "${{ needs.devbox-validate.result }}" != "success" ] || [ "${{ needs.swap-image-build.result }}" != "success" ] || [ "${{ needs.no-op-merge.result }}" != "success" ]; then
             echo "One or more gating jobs did not succeed (failure, cancelled, and skipped all fail)."
             exit 1
           fi
