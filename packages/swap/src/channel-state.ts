@@ -38,7 +38,9 @@
  * The safety condition is on-chain, not temporal: an optional
  * {@link ChannelOnChainReader} (constructor `onChainReader`, wired by
  * `startSwapNode()` from `SwapNodeConfig.chainProviders` — no config knob,
- * on whenever an EVM chain provider is configured) lets `reserve()` rebind
+ * on whenever a chain provider of a readable family is configured; issue
+ * #141 added Solana alongside EVM and documents why `mina:*` has no reader,
+ * see `channel-reader.ts`) lets `reserve()` rebind
  * a bound-but-unavailable channel to a fresh sender ONLY when the chain's
  * live `cumulativePaid` for that channel is `>=` the off-chain
  * `cumulativeAmount` watermark this state holds — i.e. every claim issued
