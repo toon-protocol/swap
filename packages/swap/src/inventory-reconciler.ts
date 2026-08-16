@@ -44,6 +44,7 @@
  */
 
 import type { ChannelEntry, ChannelOnChainReader } from './channel-state.js';
+import { channelFundedTotal } from './channel-state.js';
 import type { SwapInventory } from './inventory.js';
 
 /** Default reconcile cadence — chosen to be far cheaper than the RPC budget of a live maker. */
@@ -119,6 +120,46 @@ export interface SwapInventoryReconcilerConfig {
   clock?: () => number;
   /** Periodic cadence; `0` disables the timer (boot pass still runs). */
   intervalMs?: number;
+}
+
+/** swap#142 — one channel's on-chain capital position, or why it is unknown. */
+export interface ChannelFundingObservation {
+  /** `${assetCode}:${chain}:${channelId}` — the channel-state storage key. */
+  storedKey: string;
+  channelId: string;
+  /** Cumulative paid out, or `null` when the read failed. */
+  cumulativePaid: bigint | null;
+  /** Remaining un-paid-out deposit, or `null` when the read failed. */
+  deposit: bigint | null;
+  /** `cumulativePaid + deposit` — capital in this channel; `null` on failure. */
+  funded: bigint | null;
+  observedAt: number;
+  error?: string;
+}
+
+/**
+ * swap#142 — a pool's on-chain capital position: the sum the operator credit
+ * surface corroborates against.
+ *
+ * `chainFundedTotal` counts ONLY channels that read successfully, so a failed
+ * read always makes it smaller — under-crediting, the safe direction. Callers
+ * that are about to move value must still refuse outright when `errors` is
+ * non-empty (an operator asking "did my top-up land?" deserves a complete
+ * answer, not a partial one), and MUST refuse when `supported` is false.
+ */
+export interface PoolFundingReading {
+  /** `${assetCode}:${chain}`. */
+  pool: string;
+  assetCode: string;
+  chain: string;
+  /** `false` when no reader, or one with no `getFundingPosition` capability. */
+  supported: boolean;
+  /** Σ `funded` over the channels that read successfully. */
+  chainFundedTotal: bigint;
+  channels: readonly ChannelFundingObservation[];
+  /** Read failures — non-empty ⇒ `chainFundedTotal` is incomplete. */
+  errors: readonly string[];
+  readAt: number;
 }
 
 export interface ReconcileOptions {
@@ -370,6 +411,113 @@ export class SwapInventoryReconciler {
   }
 
   /**
+   * swap#142 — read one pool's on-chain capital position: Σ over its channels
+   * of `cumulativePaid + deposit`, each pair from ONE atomic chain read.
+   *
+   * Deliberately read-only and deliberately NOT wired into {@link reconcile}'s
+   * periodic pass: the recycle loop's job is redemptions, and adding a second
+   * RPC per channel per minute to it would double a live maker's read budget
+   * for a number only an operator action consumes. This is called on demand,
+   * by the operator surface.
+   *
+   * Channels are de-duplicated by `channelId`: `(chain, channelId)` names one
+   * on-chain object, and counting it twice — were the same id ever to appear
+   * under two channel-state keys — would corroborate capital that does not
+   * exist.
+   *
+   * Never throws: a per-channel failure is recorded and excluded from the sum
+   * (making it smaller, never larger).
+   */
+  async readPoolFunding(p: {
+    assetCode: string;
+    chain: string;
+  }): Promise<PoolFundingReading> {
+    const readAt = this.clock();
+    const pool = `${p.assetCode}:${p.chain}`;
+    const getFundingPosition = this.reader?.getFundingPosition;
+    if (!this.reader || !getFundingPosition) {
+      return {
+        pool,
+        assetCode: p.assetCode,
+        chain: p.chain,
+        supported: false,
+        chainFundedTotal: 0n,
+        channels: [],
+        errors: [
+          this.reader
+            ? `the on-chain reader for chain '${p.chain}' cannot read channel funding positions, so new capital cannot be corroborated`
+            : 'no on-chain reader configured (no EVM chainProviders entry) — channel funding cannot be read, so no capital can be corroborated',
+        ],
+        readAt,
+      };
+    }
+
+    const { channels: live } = this.channelState.snapshot();
+    const channels: ChannelFundingObservation[] = [];
+    const errors: string[] = [];
+    const seenChannelIds = new Set<string>();
+    let chainFundedTotal = 0n;
+
+    for (const [storedKey, entry] of Object.entries(live)) {
+      const parsed = parseChannelStoredKey(storedKey, entry.channelId);
+      if (!parsed) continue;
+      if (parsed.assetCode !== p.assetCode || parsed.chain !== p.chain) {
+        continue;
+      }
+      if (seenChannelIds.has(entry.channelId)) continue;
+      seenChannelIds.add(entry.channelId);
+
+      try {
+        const position = await getFundingPosition.call(this.reader, {
+          assetCode: parsed.assetCode,
+          chain: parsed.chain,
+          channelId: entry.channelId,
+        });
+        const funded = channelFundedTotal(position);
+        chainFundedTotal += funded;
+        channels.push({
+          storedKey,
+          channelId: entry.channelId,
+          cumulativePaid: position.cumulativePaid,
+          deposit: position.deposit,
+          funded,
+          observedAt: this.clock(),
+        });
+      } catch (err) {
+        const detail = err instanceof Error ? err.message : String(err);
+        const message = `${storedKey}: on-chain funding read failed (${detail})`;
+        errors.push(message);
+        channels.push({
+          storedKey,
+          channelId: entry.channelId,
+          cumulativePaid: null,
+          deposit: null,
+          funded: null,
+          observedAt: this.clock(),
+          error: message,
+        });
+        this.logger?.warn?.('swap.funding.read_failed', {
+          storedKey,
+          channelId: entry.channelId,
+          chain: parsed.chain,
+          err: detail,
+        });
+      }
+    }
+
+    return {
+      pool,
+      assetCode: p.assetCode,
+      chain: p.chain,
+      supported: true,
+      chainFundedTotal,
+      channels,
+      errors,
+      readAt,
+    };
+  }
+
+  /**
    * Start the periodic pass. No-op when no reader is configured or the
    * interval is non-positive. The timer is unref'd so it can never hold the
    * process open, and overlapping passes are suppressed (a slow RPC must not
@@ -381,6 +529,38 @@ export class SwapInventoryReconciler {
       void this.runGuarded();
     }, this.intervalMs);
     (this.timer as { unref?: () => void }).unref?.();
+  }
+
+  /**
+   * Best-effort snapshot of node state (`SwapStatePersister.persist`), for
+   * callers that mutated inventory outside a reconcile pass — swap#142's
+   * operator credit raises `total`, which IS the anti-double-credit watermark
+   * and so must survive a restart.
+   *
+   * Honors the same {@link stopped} guard as {@link reconcile}: after
+   * `SwapNodeInstance.stop()` has zeroed the in-memory channel watermarks
+   * (`releaseAll()`, state-store crash rule 5), persisting would write those
+   * zeros over the real ones and invite a claim replay. Returns the failure
+   * rather than throwing — a persist problem must not turn a successful
+   * in-memory credit into a 500.
+   */
+  persistState(): { persisted: boolean; error?: string } {
+    if (this.stopped || !this.persist) {
+      return {
+        persisted: false,
+        ...(this.stopped && {
+          error: 'node is stopping — state not persisted',
+        }),
+      };
+    }
+    try {
+      this.persist();
+      return { persisted: true };
+    } catch (err) {
+      const detail = err instanceof Error ? err.message : String(err);
+      this.logger?.error?.('swap.persist_failed', { err: detail });
+      return { persisted: false, error: detail };
+    }
   }
 
   stop(): void {

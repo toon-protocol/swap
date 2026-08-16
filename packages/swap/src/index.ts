@@ -19,6 +19,8 @@ export type {
   SwapWindowSnapshotEntry,
   // Issue #138 — chain-corroborated settle-and-recycle outcome.
   ChainRedemptionResult,
+  // swap#142 — chain-corroborated NEW-capital credit outcome.
+  FundingCreditResult,
 } from './inventory.js';
 
 // Chain-truth inventory reconciliation + operator surface (issue #138)
@@ -35,6 +37,9 @@ export type {
   PoolReconcileTotals,
   ReconcileResult,
   ReconcileOptions,
+  // swap#142 — the pool's on-chain capital position.
+  ChannelFundingObservation,
+  PoolFundingReading,
 } from './inventory-reconciler.js';
 export { buildInventoryReport, registerAdminRoutes } from './admin-surface.js';
 export type {
@@ -70,8 +75,13 @@ export type {
   ChannelOnChainReader,
   // swap#136 — structured rebind refusals (channelId + unredeemed delta).
   ChannelRebindRefusal,
+  // swap#142 — the optional funding-read capability on the reader seam.
+  ChannelFundingPosition,
 } from './channel-state.js';
-export { describeChannelRebindRefusal } from './channel-state.js';
+export {
+  describeChannelRebindRefusal,
+  channelFundedTotal,
+} from './channel-state.js';
 
 // Claim issuer (Story 12.4)
 export { MultiChainClaimIssuer } from './claim-issuer.js';

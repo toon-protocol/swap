@@ -86,12 +86,78 @@ export interface ReleaseLogger {
  * rightful recipient, which is exactly the bug this interface exists to
  * prevent.
  */
+/**
+ * swap#142 — one channel's on-chain capital position, read atomically.
+ *
+ * `deposit` on `RollingSwapChannel` is the **remaining, un-paid-out** deposit,
+ * NOT the cumulative amount ever deposited: `updateBalance` does
+ * `deposit -= delta; cumulativePaid += delta` on every redemption. Reading
+ * `deposit` alone would therefore see a *falling* number on a busy maker and
+ * is useless as a corroboration of added capital.
+ *
+ * The quantity that behaves is the **sum**:
+ *
+ * ```
+ * funded(channel) = cumulativePaid + deposit
+ * ```
+ *
+ * which is invariant under redemption (one word falls by exactly what the
+ * other rises by) and rises only when capital actually enters the channel —
+ * `openChannel` and `deposit()`. It falls only when the funder reclaims the
+ * unspent remainder on close (`cooperativeClose` / `withdrawRemainder` zero
+ * `deposit`), which is a genuine capital *withdrawal* and must credit nothing.
+ * See {@link channelFundedTotal}.
+ */
+export interface ChannelFundingPosition {
+  /** Cumulative value already paid out of this channel (monotone). */
+  cumulativePaid: bigint;
+  /** Remaining, un-paid-out deposit — FALLS as claims are redeemed. */
+  deposit: bigint;
+}
+
+/**
+ * `cumulativePaid + deposit` — the capital the chain shows has been placed
+ * into this channel and not yet reclaimed. See {@link ChannelFundingPosition}
+ * for why neither word alone is usable.
+ */
+export function channelFundedTotal(p: ChannelFundingPosition): bigint {
+  return p.cumulativePaid + p.deposit;
+}
+
 export interface ChannelOnChainReader {
   getCumulativePaid(params: {
     assetCode: string;
     chain: string;
     channelId: string;
   }): Promise<bigint>;
+  /**
+   * swap#142 — OPTIONAL capability: the channel's full funding position.
+   *
+   * Optional so a chain family that has a `getCumulativePaid` implementation
+   * but no funding read (swap#141's Solana/Mina readers) still satisfies this
+   * interface; callers MUST feature-detect and fail closed (refuse to credit)
+   * when it is absent, never guess a funding level.
+   *
+   * A reader that WRAPS or DISPATCHES to other readers (e.g. a chain-family
+   * dispatcher over per-family readers) MUST forward this method whenever any
+   * reader it delegates to implements it. Returning a bare object with only
+   * `getCumulativePaid` silently drops the capability, and the operator
+   * credit surface then refuses every request with `503 funding_unreadable` —
+   * fail-closed, but the route is dead and nothing says why.
+   *
+   * IMPLEMENTATIONS MUST return both words from ONE atomic chain read (a
+   * single `eth_call` / one account fetch). Two separate reads straddling a
+   * redemption can observe the pre-redemption `deposit` together with the
+   * post-redemption `cumulativePaid`, which OVERSTATES `funded` by the
+   * redeemed delta — and overstated funding is exactly what would let the
+   * operator credit surface invent capital. Same freshness rule as
+   * `getCumulativePaid`: never cache.
+   */
+  getFundingPosition?(params: {
+    assetCode: string;
+    chain: string;
+    channelId: string;
+  }): Promise<ChannelFundingPosition>;
 }
 
 export interface SwapChannelStateInit {

@@ -9,6 +9,15 @@ import { describe, it, expect, afterEach } from 'vitest';
 import { createServer, type Server } from 'node:http';
 
 import { createEvmChannelOnChainReader } from './evm-channel-reader.js';
+import { channelFundedTotal } from './channel-state.js';
+
+/** Non-null narrowing without `!` (the repo's eslint gate forbids it). */
+function must<T>(value: T | null | undefined, what: string): T {
+  if (value === null || value === undefined) {
+    throw new Error(`expected ${what} to be present`);
+  }
+  return value;
+}
 
 const CHANNEL_ADDRESS = '0x' + '33'.repeat(20);
 const CHAIN = 'evm:31337';
@@ -240,5 +249,59 @@ describe('createEvmChannelOnChainReader (issue #113)', () => {
     ]);
     expect(a).toBe(1n);
     expect(b).toBe(2n);
+  });
+});
+
+describe('createEvmChannelOnChainReader.getFundingPosition (swap#142)', () => {
+  it('[P0] returns both capital words from ONE eth_call, so they share a block', async () => {
+    let calls = 0;
+    const rpcUrl = await startRpcServer((req) => {
+      calls += 1;
+      expect(req.method).toBe('eth_call');
+      return encodeChannelStruct({ cumulativePaid: 8_000n, deposit: 2_000n });
+    });
+    const reader = createEvmChannelOnChainReader([
+      { chainId: CHAIN, rpcUrl, channelAddress: CHANNEL_ADDRESS },
+    ]);
+
+    const position = await must(
+      reader.getFundingPosition,
+      'getFundingPosition capability'
+    ).call(reader, { assetCode: 'ETH', chain: CHAIN, channelId: CHANNEL_ID });
+
+    // Two eth_calls could straddle a redemption and overstate the sum.
+    expect(calls).toBe(1);
+    expect(position).toEqual({ cumulativePaid: 8_000n, deposit: 2_000n });
+    expect(channelFundedTotal(position)).toBe(10_000n);
+  });
+
+  it('[P0] decodes `deposit` from word index 4, distinct from cumulativePaid', async () => {
+    const rpcUrl = await startRpcServer(() =>
+      encodeChannelStruct({ cumulativePaid: 0n, deposit: 15_000_000n })
+    );
+    const reader = createEvmChannelOnChainReader([
+      { chainId: CHAIN, rpcUrl, channelAddress: CHANNEL_ADDRESS },
+    ]);
+
+    const position = await must(
+      reader.getFundingPosition,
+      'getFundingPosition capability'
+    ).call(reader, { assetCode: 'ETH', chain: CHAIN, channelId: CHANNEL_ID });
+    expect(position.deposit).toBe(15_000_000n);
+    expect(position.cumulativePaid).toBe(0n);
+  });
+
+  it('[P1] a truncated response throws rather than decoding a short word', async () => {
+    const rpcUrl = await startRpcServer(() => '0x' + '00'.repeat(32 * 4));
+    const reader = createEvmChannelOnChainReader([
+      { chainId: CHAIN, rpcUrl, channelAddress: CHANNEL_ADDRESS },
+    ]);
+
+    await expect(
+      must(reader.getFundingPosition, 'getFundingPosition capability').call(
+        reader,
+        { assetCode: 'ETH', chain: CHAIN, channelId: CHANNEL_ID }
+      )
+    ).rejects.toThrow(/deposit/);
   });
 });

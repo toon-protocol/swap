@@ -43,6 +43,54 @@
  * unredeemed stays blocked, which is the same capacity block the unified
  * model expresses as `unsettled`.
  *
+ * ## Adding genuinely new capital (swap#142)
+ *
+ * {@link recordChainRedemption} recycles capital that was already counted and
+ * therefore never raises `total`. {@link creditCorroboratedFunding} is the
+ * other direction — capital the pool did not have before — and is likewise
+ * corroborated, against Σ `cumulativePaid + deposit` over the pool's channels
+ * rather than against a redemption. See its docblock for the model and for
+ * why a repeat call cannot double-credit.
+ *
+ * ## The historical `total` inflation, and why it is NOT corrected here
+ *
+ * Before swap#137, a FAILED swap unwound its `debit()` with {@link credit},
+ * which raises `available` AND `total`. Every failure therefore left `total`
+ * one swap-notional too high. #137 fixed the unwind ({@link refundDebit}, and
+ * since #138 the unwind is `releaseReservation` — no debit to undo at all) so
+ * the error cannot grow, and #140's reconciler restored `available`; the live
+ * devnet maker consequently sits at `available` 15 000 000 (correct) against
+ * `total` 15 003 500 — 3 500 units, 0.023 %, static.
+ *
+ * Nothing in this module corrects that, deliberately:
+ *
+ * - **What it actually costs is bounded and one-directional.** `total` is
+ *   what kind:10032 advertises, so the maker over-advertises by 3 500; a
+ *   counterparty that sizes a swap against the inflated figure is refused at
+ *   issuance with a benign T04, never handed a claim the maker cannot honor.
+ *   It also loosens the recycle cap in {@link recordChainRedemption} by the
+ *   same 3 500 — but that cap only binds against an on-chain redemption delta
+ *   `unsettled` does not absorb, i.e. a pre-#138 legacy burn, and by
+ *   construction there is at most as much of that as was actually burned.
+ * - **Every recompute is a DOWNWARD write derived from data the node does not
+ *   durably own.** `total = configured inventory + Σ corroborated additions`
+ *   looks exact, but the configured figure is not authoritative at runtime
+ *   (the persisted snapshot wins over config for keys it has already seen —
+ *   issue #130) and the additions ledger IS `total` itself, which the
+ *   documented state-file reset destroys. A recompute firing after such a
+ *   reset would shrink `total` below capital the maker really holds, turning
+ *   a 3 500 over-advertisement into an unbounded under-capitalisation — and
+ *   it would do so automatically, on a `:release` auto-deploy.
+ * - **It self-heals the moment it matters.** {@link creditCorroboratedFunding}
+ *   converges `total` onto chain truth from BELOW: the next genuine top-up
+ *   credits `chainFundedTotal − total`, which is the top-up minus the 3 500,
+ *   landing `total` exactly on the chain's figure. The residue moves into
+ *   `available` being 3 500 low, which is the safe direction (under-serving).
+ *
+ * If an operator ever does want it exact before then, the safe procedure is a
+ * deliberate one with the node DOWN — stop the maker, edit the persisted pool
+ * entry, restart — not a live write path that exists to be fired by accident.
+ *
  * ## Capacity formula (spec §8)
  *
  * ```
@@ -185,6 +233,30 @@ export interface ChainRedemptionResult {
    * `available` never exceeds `total`.
    */
   availableRestored: bigint;
+}
+
+/**
+ * swap#142 — what a pool's on-chain funding position does (or would do) to
+ * its `total`. See {@link SwapInventory.creditCorroboratedFunding}.
+ */
+export interface FundingCreditResult {
+  /** `total` BEFORE this operation — the watermark the credit is measured against. */
+  total: bigint;
+  /** Σ `cumulativePaid + deposit` over the pool's channels, read from chain. */
+  chainFundedTotal: bigint;
+  /** `max(0, chainFundedTotal − total)` — the most the chain can back. */
+  corroborated: bigint;
+  /** What the operator asked for (absent ⇒ "all of it"). */
+  requested?: bigint;
+  /** Actually applied to `available` AND `total` (0 on any refusal). */
+  credited: bigint;
+  /**
+   * Why nothing was applied. `uncorroborated`: the chain shows no capital the
+   * pool has not already booked. `exceeds_corroborated`: the request is larger
+   * than the chain backs — refused whole rather than clamped, so an operator
+   * never silently gets less than they asked for.
+   */
+  refused?: 'uncorroborated' | 'exceeds_corroborated';
 }
 
 /** Fresh zero result — never a shared instance a caller could mutate. */
@@ -583,6 +655,133 @@ export class SwapInventory {
       this.settledWatermarks.get(`${k}:${p.channelId}`) ?? 0n,
       p.redeemedCumulative
     );
+  }
+
+  // -------------------------------------------------------------------------
+  // swap#142 — operator route for genuinely NEW capital
+  // -------------------------------------------------------------------------
+
+  /**
+   * swap#142 — credit new capital, and ONLY what the chain corroborates.
+   *
+   * ## The problem
+   *
+   * {@link recordChainRedemption} recycles capital that was already counted:
+   * it can restore `available` but never raises `total`, because a redemption
+   * is not new money. An operator who genuinely ADDS capital — funds a new
+   * channel, tops up an existing one — therefore had no route at all
+   * (`credit` has no caller), and editing config does not reliably take: the
+   * persisted snapshot wins over config inventory for keys it has already
+   * seen (issue #130).
+   *
+   * ## The corroboration, and why it cannot double-credit
+   *
+   * The chain-side quantity is **Σ over the pool's channels of
+   * `cumulativePaid + deposit`** (`channelFundedTotal`), NOT the raw `deposit`
+   * field. `deposit` is the *remaining un-paid-out* balance and falls on every
+   * redemption (`deposit -= delta; cumulativePaid += delta`), so it is neither
+   * monotone nor a measure of capital added. Their sum is invariant under
+   * redemption and rises only when capital actually enters a channel.
+   *
+   * The node-side quantity it is compared against is **`total` itself** — the
+   * pool's own record of the capital it holds. The credit is the excess of
+   * proof over claim:
+   *
+   * ```
+   * corroborated = max(0, chainFundedTotal − total)
+   * ```
+   *
+   * and applying it uses {@link credit}, which raises `available` AND `total`
+   * by the same amount. **`total` is therefore its own watermark**, and the
+   * credit is a fixed-point step that closes exactly the gap it measured:
+   *
+   * - Repeated calls cannot double-credit. Crediting `c` makes `total' =
+   *   total + c`, so the next read of the same `chainFundedTotal` computes
+   *   `max(0, chainFundedTotal − total') = corroborated − c = 0`. There is no
+   *   separate ledger that could drift, be lost, or be replayed — nothing to
+   *   persist beyond `total`, which the state file already carries.
+   * - Over the pool's whole life, Σ credited = `total_final − total_initial`
+   *   ≤ `sup(chainFundedTotal) − total_initial`. The node can never book more
+   *   capital than the chain has, at any moment, shown to be in its channels.
+   * - Capital that *leaves* (a funder reclaiming an unspent remainder on
+   *   close) makes `chainFundedTotal` fall below `total`; the `max(0, …)`
+   *   makes that a refusal, not a negative credit, and `total` is deliberately
+   *   never lowered here — this route only ever adds, so it can only ever
+   *   under-serve, never over-serve. Re-funding back to a previously credited
+   *   level correctly credits nothing.
+   * - A channel the node cannot read, or does not know about, is simply absent
+   *   from the sum, which UNDER-states `chainFundedTotal` and under-credits.
+   *   Under-crediting is the safe failure; the caller additionally refuses
+   *   outright when any read fails (see the admin route).
+   *
+   * Note what this deliberately cannot corroborate: capital sitting in the
+   * payout wallet but not yet placed in a channel. The chain shows no channel
+   * holding it, so the node will not book it. That is the invariant working,
+   * not a gap — move it into a channel and it becomes creditable.
+   *
+   * ## Atomicity
+   *
+   * Synchronous, like every other mutator here, and it re-reads `total` at
+   * the moment it credits. A caller MUST therefore do its chain read first
+   * and then call this — never cache a `total` across the `await`. Two
+   * concurrent operator requests that both read the same `chainFundedTotal`
+   * are safe: the first credits the gap, the second finds it closed and is
+   * refused as `uncorroborated`.
+   *
+   * @param p.chainFundedTotal Σ `cumulativePaid + deposit` over the pool's
+   *   channels, from a LIVE chain read — never a cached or asserted value.
+   * @param p.requested Optional operator assertion. Larger than the chain
+   *   backs ⇒ refused whole (`exceeds_corroborated`), nothing applied.
+   *   Smaller ⇒ exactly that much is credited and the remainder stays
+   *   creditable, since `total` still trails `chainFundedTotal`.
+   */
+  creditCorroboratedFunding(p: {
+    assetCode: string;
+    chain: string;
+    chainFundedTotal: bigint;
+    requested?: bigint;
+  }): FundingCreditResult {
+    const outcome = this.previewCorroboratedFunding(p);
+    if (outcome.credited > 0n) {
+      this.credit(p.assetCode, p.chain, outcome.credited);
+    }
+    return outcome;
+  }
+
+  /**
+   * What {@link creditCorroboratedFunding} WOULD do, without mutating
+   * anything — the dry-run behind the operator surface's `dryRun` flag.
+   */
+  previewCorroboratedFunding(p: {
+    assetCode: string;
+    chain: string;
+    chainFundedTotal: bigint;
+    requested?: bigint;
+  }): FundingCreditResult {
+    const k = key(p.assetCode, p.chain);
+    const entry = this.entries.get(k);
+    if (!entry) {
+      throw new SwapInventoryError(
+        'INVENTORY_NOT_INITIALIZED',
+        `Inventory not initialized for ${k}`
+      );
+    }
+    const total = entry.total;
+    const corroborated =
+      p.chainFundedTotal > total ? p.chainFundedTotal - total : 0n;
+    const base = {
+      total,
+      chainFundedTotal: p.chainFundedTotal,
+      corroborated,
+      ...(p.requested !== undefined && { requested: p.requested }),
+    };
+    if (corroborated === 0n) {
+      return { ...base, credited: 0n, refused: 'uncorroborated' };
+    }
+    if (p.requested !== undefined && p.requested > corroborated) {
+      return { ...base, credited: 0n, refused: 'exceeds_corroborated' };
+    }
+    return { ...base, credited: p.requested ?? corroborated };
   }
 
   private applyRedemption(
