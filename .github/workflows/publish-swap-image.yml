@@ -207,9 +207,39 @@ jobs:
           # on to open sockets and dial a relay and would run forever — hence
           # the timeout. Surviving it IS the pass: the question is "was this
           # config refused", not "does this node work".
+          #
+          # ── The config file alone is NOT what the box runs ─────────────────
+          # The relay box's service is `swap.config.json` PLUS the environment
+          # and the writable state volume that
+          # `infra/linode-relay/docker-compose.relay.swap.yml` supplies. In
+          # particular `SWAP_AUTOGEN_IDENTITY=1`, without which the file alone
+          # fails `[INVALID_CONFIG] SwapNodeConfig: one of mnemonic or secretKey
+          # is required` — because #127 made the maker self-generate and persist
+          # its own BIP-39 mnemonic to `statePath` on first boot rather than
+          # read a committed one. (Found by this gate's own first run, on
+          # toon-protocol/connector#1000.)
+          #
+          # So reproduce the SERVICE, not just the file. Mirrored from that
+          # overlay; connector's `fleet_release_gate.rs` asserts the overlay
+          # still declares exactly this environment, so a variable added there
+          # and not here is a build failure rather than a gate that validates
+          # something the box never runs.
+          #
+          # NOT mirrored: the overlay's `working_dir: /app/state`. It pairs with
+          # an entrypoint override naming an ABSOLUTE `/app/dist/cli.js`, and
+          # this image's own ENTRYPOINT resolves `dist/cli.js` relative to its
+          # workdir -- so setting one without the other fails MODULE_NOT_FOUND.
+          # Replicating both would couple this gate to the overlay's command
+          # shape for no gain: all it suppresses is a few non-fatal
+          # `EACCES ... mkdir './data'` cache warnings, which do not affect
+          # whether the config is accepted, and that is the only question here.
+          STATE=$(mktemp -d)
+          chmod 777 "$STATE"
           set +e
           OUTPUT=$(timeout 45 docker run --rm \
             -v "$PWD/$CONFIG":/app/config/swap.config.json:ro \
+            -v "$STATE":/app/state \
+            -e SWAP_AUTOGEN_IDENTITY=1 \
             "$IMAGE_TAG" 2>&1)
           STATUS=$?
           set -e
