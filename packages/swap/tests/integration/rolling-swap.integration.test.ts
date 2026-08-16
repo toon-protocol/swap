@@ -537,10 +537,16 @@ describe('swap#47 — rolling coupled-leg engine (integration)', () => {
       expect(metadata['rate']).toBe('0.0004');
       expect(metadata['rateTimestamp']).toBeTypeOf('number');
 
-      // Legacy fill debits inventory as before (1 USDC · 0.0004 = 4e14 wei).
-      expect(instance.health().inventoryAvailable[INVENTORY_KEY]).toBe(
-        (BigInt(before!) - 4n * 10n ** 14n).toString()
-      );
+      // Issue #138 — the legacy fill books its 4e14 wei (1 USDC · 0.0004) as
+      // unsettled channel liability instead of permanently debiting
+      // `available`, exactly like the rolling path above: the capacity is
+      // spoken for (free shrinks) but the capital comes back when the chain
+      // shows the claim redeemed. Before #138 this was an unrecoverable debit.
+      expect(instance.health().inventoryAvailable[INVENTORY_KEY]).toBe(before);
+      expect(instance.health().inventoryWindow[INVENTORY_KEY]).toMatchObject({
+        unsettled: (4n * 10n ** 14n).toString(),
+        free: (BigInt(before!) - 4n * 10n ** 14n).toString(),
+      });
       // And no leg-B traffic was generated for it.
       expect(daemon.advances).toHaveLength(0);
     } finally {
