@@ -15,7 +15,8 @@
  * credit.
  */
 
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, afterEach } from 'vitest';
+import { createServer, type Server } from 'node:http';
 import { Hono } from 'hono';
 
 import { SwapInventory } from './inventory.js';
@@ -26,6 +27,8 @@ import type {
 } from './channel-state.js';
 import { SwapInventoryReconciler } from './inventory-reconciler.js';
 import { registerAdminRoutes } from './admin-surface.js';
+import { createEvmChannelOnChainReader } from './evm-channel-reader.js';
+import { composeChannelOnChainReaders } from './channel-reader.js';
 
 const ASSET = 'USDC';
 const CHAIN = 'evm:base:8453';
@@ -679,5 +682,116 @@ describe('POST /admin/inventory/deposit — never credits on trust', () => {
       (await post(app, { assetCode: ASSET, chain: CHAIN, dryRun: 'yes' }))
         .status
     ).toBe(400);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The production wiring, end to end
+// ---------------------------------------------------------------------------
+
+describe('the route against the REAL reader behind the REAL dispatcher', () => {
+  const servers: Server[] = [];
+
+  afterEach(async () => {
+    await Promise.all(
+      servers
+        .splice(0)
+        .map((s) => new Promise<void>((resolve) => s.close(() => resolve())))
+    );
+  });
+
+  /** Serves a `channels()` struct whose capital words the test mutates live. */
+  async function startChannelRpc(position: ChannelFundingPosition) {
+    const w = (hex: string) => hex.toLowerCase().padStart(64, '0');
+    const server = createServer((req, res) => {
+      let body = '';
+      req.on('data', (chunk: Buffer) => {
+        body += chunk.toString();
+      });
+      req.on('end', () => {
+        const { id } = JSON.parse(body) as { id: number };
+        const words = [
+          w('11'.repeat(20)),
+          w('22'.repeat(20)),
+          w('3'),
+          w(position.cumulativePaid.toString(16)),
+          w(position.deposit.toString(16)),
+          w('0'),
+          w('1'),
+        ];
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(
+          JSON.stringify({ jsonrpc: '2.0', id, result: '0x' + words.join('') })
+        );
+      });
+    });
+    servers.push(server);
+    await new Promise<void>((resolve) =>
+      server.listen(0, '127.0.0.1', resolve)
+    );
+    const address = server.address();
+    if (address === null || typeof address === 'string') {
+      throw new Error('expected a bound TCP address');
+    }
+    return `http://127.0.0.1:${address.port}`;
+  }
+
+  it('[P0] the funding capability survives composition, so the route is not silently dead', async () => {
+    // swap#141 composes per-family readers into one dispatching reader. A
+    // dispatcher that forwarded only the capabilities it happened to NAME
+    // would drop `getFundingPosition` and make this route answer 503 on every
+    // chain — fail-closed, but dead with nothing explaining why. #141's
+    // dispatcher forwards by capability union; #141's own tests pin that with
+    // STUB readers, which would still pass if the real EVM reader lost the
+    // method. This pins the real one, through the real dispatcher.
+    const chain = 'evm:31337';
+    const rpcUrl = await startChannelRpc({
+      cumulativePaid: 1_000n,
+      deposit: 14_999_000n,
+    });
+    const composed = composeChannelOnChainReaders({
+      evm: createEvmChannelOnChainReader([
+        { chainId: chain, rpcUrl, channelAddress: '0x' + '33'.repeat(20) },
+      ]),
+    });
+    expect(typeof composed?.getFundingPosition).toBe('function');
+
+    const inventory = new SwapInventory({
+      balances: {
+        [`${ASSET}:${chain}`]: { available: 15_000_000n, total: 15_000_000n },
+      },
+    });
+    const reconciler = new SwapInventoryReconciler({
+      inventory,
+      channelState: new SwapChannelState({
+        channels: {
+          [`${ASSET}:${chain}:${CHANNEL}`]: {
+            channelId: CHANNEL,
+            cumulativeAmount: 1_000n,
+            nonce: 1n,
+            updatedAt: 0,
+          },
+        },
+      }),
+      ...(composed && { reader: composed }),
+    });
+    const app = makeAdminApp({ inventory, reconciler, adminToken: TOKEN });
+
+    const res = await app.request('/admin/inventory/deposit', {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        authorization: `Bearer ${TOKEN}`,
+      },
+      body: JSON.stringify({ assetCode: ASSET, chain }),
+    });
+
+    // Reaching a corroboration verdict at all is the point: a dropped
+    // capability would have produced 503 `funding_unreadable` instead.
+    expect(res.status).toBe(409);
+    const body = (await res.json()) as DepositJsonBody;
+    expect(body.error).toBe('uncorroborated');
+    // ...and the sum is cumulativePaid + deposit, decoded off a real eth_call.
+    expect(body.chainFundedTotal).toBe('15000000');
   });
 });
