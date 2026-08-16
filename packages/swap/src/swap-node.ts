@@ -525,6 +525,51 @@ export interface SwapNodeConfig {
   peerInfoPricePerByte?: bigint;
 
   /**
+   * NIP-40 time-to-live stamped on the kind:10032 announce, in seconds.
+   *
+   * Optional with a safe default of {@link DEFAULT_PEER_INFO_TTL_SECONDS}
+   * (600s, the fleet-wide `[announce] ttl_secs` convention). The announce
+   * carries `["expiration", created_at + ttl]`, so a NIP-40-aware relay stops
+   * serving it once this node stops republishing.
+   *
+   * Set to `0` (or any non-positive value) to publish a NON-expiring announce.
+   * That is the pre-existing behaviour and it is a footgun: the event is
+   * replaceable, so once this node's signing key is gone nobody — not the
+   * operator, not the relay's author, not a NIP-09 delete — can retract it.
+   * Doing so logs at `warn`.
+   *
+   * MUST be comfortably longer than
+   * {@link SwapNodeConfig.peerInfoRefreshIntervalMs}; a TTL shorter than the
+   * refresh cadence expires a live node out of discovery between its own
+   * announces. A violation is logged at `error` rather than thrown — see that
+   * field's note on why nothing here may fail boot.
+   */
+  peerInfoTtlSeconds?: number;
+  /**
+   * Interval between kind:10032 republishes, in milliseconds.
+   *
+   * Optional with a safe default of
+   * {@link DEFAULT_PEER_INFO_REFRESH_INTERVAL_MS} (240s, the fleet-wide
+   * `REFRESH_SECS` convention). Before this existed the announce was published
+   * exactly once at boot, so stamping it with a TTL alone would have made a
+   * long-lived maker silently vanish from discovery one TTL after start-up.
+   * The tag and the loop are one change, not two.
+   *
+   * Set to `0` (or any non-positive value) to publish once at boot and never
+   * refresh. Only sane alongside a non-positive `peerInfoTtlSeconds`, or when
+   * some OTHER publisher on the same identity owns the refresh (the devnet
+   * fleet's `connector announce` sidecar is exactly that case). Doing so logs
+   * at `warn`.
+   *
+   * Neither this nor `peerInfoTtlSeconds` is ever required, and neither can
+   * fail `validateConfig`: every service on the fleet auto-deploys on green
+   * main, so a newly-required key is an outage (see the swap#134 post-mortem in
+   * the connector repo's `infra/linode-relay/swap.config.json`). Bad values are
+   * corrected and logged, never thrown.
+   */
+  peerInfoRefreshIntervalMs?: number;
+
+  /**
    * Story 12.8 AC-13 — optional injectable relay publisher.
    *
    * When omitted, the default implementation uses a
@@ -537,10 +582,13 @@ export interface SwapNodeConfig {
   publisher?: Publisher;
 
   /**
-   * @internal — test hook. When supplied, called exactly once with the
-   * signed kind:10032 event immediately after `buildIlpPeerInfoEvent`
-   * returns. Used by AC-6 tests to capture the event without reaching
-   * into implementation internals. NOT part of the public contract.
+   * @internal — test hook. When supplied, called with the signed kind:10032
+   * event immediately after `buildIlpPeerInfoEvent` returns — once at boot and
+   * once per refresh thereafter (see
+   * `SwapNodeConfig.peerInfoRefreshIntervalMs`, default 240s, so in practice
+   * once for any test that does not deliberately wait). Used by AC-6 tests to
+   * capture the event without reaching into implementation internals. NOT part
+   * of the public contract.
    */
   __testHooks?: {
     onPeerInfoBuilt?: (event: unknown) => void;
@@ -1014,6 +1062,38 @@ export function validateConfig(config: SwapNodeConfig): void {
     requireEvmChainProvider(config.chainProviders, chain);
   }
 }
+
+/**
+ * Default NIP-40 time-to-live stamped on this node's kind:10032 announce, in
+ * seconds.
+ *
+ * 600s is not a fresh number: it is the fleet-wide convention the Rust
+ * connector's `[announce] ttl_secs` already defaults to
+ * (`crates/connector-config/src/announce.rs`'s `DEFAULT_TTL_SECS`), which is
+ * what every node on the live devnet is stamped with today. An announce is a
+ * liveness signal, not a permanent record — a kind:10032 with no expiration
+ * outlives the node it describes and, being replaceable, can only ever be
+ * retracted by the key that signed it. When that key is gone (a throwaway proof
+ * rig, a rotated identity) the litter is permanent by construction and clients
+ * keep dialing a dead BTP endpoint.
+ *
+ * @see DEFAULT_PEER_INFO_REFRESH_INTERVAL_MS — the republish cadence that keeps
+ *   a LIVE node inside this window.
+ */
+const DEFAULT_PEER_INFO_TTL_SECONDS = 600;
+
+/**
+ * Default interval between kind:10032 republishes, in milliseconds.
+ *
+ * 240s, again matching the fleet: every `connector announce` loop overlay on
+ * the devnet boxes (`REFRESH_SECS="${..._REFRESH_SECS:-240}"`) republishes on
+ * this cadence against the same 600s TTL, leaving ~6 minutes of continuous
+ * headroom — measured, not assumed (relay#137). The ratio is the point: the
+ * refresh MUST comfortably beat the TTL, or a live node expires out of
+ * discovery between two of its own announces, which is strictly worse than the
+ * litter this TTL exists to stop.
+ */
+const DEFAULT_PEER_INFO_REFRESH_INTERVAL_MS = 240_000;
 
 /**
  * Required non-empty string fields per chain type, mirroring the connector's
@@ -2291,6 +2371,10 @@ export async function startSwapNode(
   // promptly during teardown instead of retrying for ~24s against a connector
   // that is being closed.
   let stopRequested = false;
+  // The kind:10032 refresh loop's handle, cleared by `stop()`. Declared out
+  // here (rather than beside the loop) because the publish block below is
+  // wrapped in a try/catch whose scope `stop()` cannot see into.
+  let peerInfoRefreshTimer: ReturnType<typeof setInterval> | undefined;
 
   // 13. Publish kind:10032 with swapPairs.
   //
@@ -2426,6 +2510,43 @@ export async function startSwapNode(
   const effectivePublisher: Publisher =
     config.publisher ?? ilpPublisher ?? wsPublisher;
 
+  // NIP-40 TTL + refresh cadence. Resolved here (not at each republish) so the
+  // one-time "you have configured a permanent advertisement" diagnostics fire
+  // once, at boot, where an operator will see them.
+  //
+  // Neither value can fail boot: `swap:release` auto-deploys on green main and
+  // the box's config file is bind-mounted, not baked, so a value this code
+  // rejects becomes a crash loop on a live maker rather than a build failure.
+  const peerInfoTtlSeconds =
+    config.peerInfoTtlSeconds ?? DEFAULT_PEER_INFO_TTL_SECONDS;
+  const peerInfoRefreshIntervalMs =
+    config.peerInfoRefreshIntervalMs ?? DEFAULT_PEER_INFO_REFRESH_INTERVAL_MS;
+  if (peerInfoTtlSeconds <= 0) {
+    logger.warn?.('swap.peerInfo.no_expiration', {
+      reason:
+        'peerInfoTtlSeconds is non-positive, so the kind:10032 carries no NIP-40 expiration tag. It is a replaceable event: once this node stops, nothing but a newer event signed by this same key can retract it, and if the key is lost the advertisement is permanent.',
+    });
+  } else if (
+    peerInfoRefreshIntervalMs > 0 &&
+    peerInfoRefreshIntervalMs >= peerInfoTtlSeconds * 1000
+  ) {
+    // The one failure mode worse than litter: a LIVE node that expires out of
+    // discovery in the gap between two of its own announces.
+    logger.error?.('swap.peerInfo.refresh_slower_than_ttl', {
+      peerInfoTtlSeconds,
+      peerInfoRefreshIntervalMs,
+      reason:
+        'peerInfoRefreshIntervalMs is not shorter than peerInfoTtlSeconds, so this node will expire out of discovery between its own republishes. Lower the refresh interval (the fleet convention is 240s against a 600s TTL) or raise the TTL.',
+    });
+  }
+  if (peerInfoRefreshIntervalMs <= 0 && peerInfoTtlSeconds > 0) {
+    logger.warn?.('swap.peerInfo.refresh_disabled', {
+      peerInfoTtlSeconds,
+      reason:
+        'peerInfoRefreshIntervalMs is non-positive, so the kind:10032 is published once at boot and never renewed. It will expire after peerInfoTtlSeconds and this node will vanish from discovery unless another publisher on this same identity refreshes it.',
+    });
+  }
+
   try {
     const ownIlpInfo: IlpPeerInfo & {
       /**
@@ -2471,23 +2592,65 @@ export async function startSwapNode(
       preferredTokens: { ...preferredTokens },
       swapPairs: [...config.swapPairs],
     };
-    const ilpInfoEvent = buildIlpPeerInfoEvent(ownIlpInfo, identity.secretKey);
-    config.__testHooks?.onPeerInfoBuilt?.(ilpInfoEvent);
-    logger.debug?.('swap.peerInfo.built', {
-      id: ilpInfoEvent.id,
-      swapPairs: config.swapPairs.length,
-      via: ilpPublisher && !config.publisher ? 'ilp' : 'ws',
-      destination: config.peerInfoIlpDestination,
-      relayUrls: config.relayUrls,
-    });
+    // Re-signed on every call rather than signed once and re-sent: the NIP-40
+    // `expiration` tag is `created_at + ttl`, so a cached event would advertise
+    // an expiry that recedes into the past no matter how often it is
+    // republished. `ownIlpInfo` itself is boot-static, so only the timestamps
+    // (and hence id/sig) differ between rounds.
+    const publishPeerInfo = (round: number): void => {
+      try {
+        const ilpInfoEvent = buildIlpPeerInfoEvent(
+          ownIlpInfo,
+          identity.secretKey,
+          // Non-positive → core omits the tag entirely, which is the documented
+          // "never expires" escape hatch already warned about above.
+          { ttlSeconds: peerInfoTtlSeconds }
+        );
+        config.__testHooks?.onPeerInfoBuilt?.(ilpInfoEvent);
+        logger.debug?.('swap.peerInfo.built', {
+          id: ilpInfoEvent.id,
+          round,
+          ttlSeconds: peerInfoTtlSeconds,
+          swapPairs: config.swapPairs.length,
+          via: ilpPublisher && !config.publisher ? 'ilp' : 'ws',
+          destination: config.peerInfoIlpDestination,
+          relayUrls: config.relayUrls,
+        });
 
-    // Fire-and-forget so boot is not blocked on relay I/O. Failures are logged
-    // at error here (the publisher impls already log per-attempt detail).
-    void effectivePublisher.publish(ilpInfoEvent).catch((err) => {
-      logger.error?.('swap.peerInfo.publish_failed', {
-        err: errSummary(err),
-      });
-    });
+        // Fire-and-forget so boot is not blocked on relay I/O. Failures are
+        // logged at error here (the publisher impls already log per-attempt
+        // detail). A failed round is NOT retried out of band: the next refresh
+        // is the retry, and it lands well inside the TTL.
+        void effectivePublisher.publish(ilpInfoEvent).catch((err) => {
+          logger.error?.('swap.peerInfo.publish_failed', {
+            round,
+            err: errSummary(err),
+          });
+        });
+      } catch (err) {
+        logger.error?.('swap.peerInfo.publish_failed', {
+          round,
+          err: errSummary(err),
+        });
+      }
+    };
+
+    publishPeerInfo(0);
+
+    // The refresh loop. Without it the TTL above would be a self-inflicted
+    // outage: one publish at boot, then silent disappearance from discovery
+    // `peerInfoTtlSeconds` later.
+    if (peerInfoRefreshIntervalMs > 0) {
+      let round = 0;
+      peerInfoRefreshTimer = setInterval(() => {
+        if (stopRequested) return;
+        round += 1;
+        publishPeerInfo(round);
+      }, peerInfoRefreshIntervalMs);
+      // Never hold the process (or a test runner) open on account of an
+      // advertisement refresh.
+      peerInfoRefreshTimer.unref?.();
+    }
   } catch (err) {
     logger.error?.('swap.peerInfo.publish_failed', { err: errSummary(err) });
   }
@@ -2571,6 +2734,10 @@ export async function startSwapNode(
       stopped = true;
       stopRequested = true;
       status = 'stopping';
+      if (peerInfoRefreshTimer !== undefined) {
+        clearInterval(peerInfoRefreshTimer);
+        peerInfoRefreshTimer = undefined;
+      }
       reconciler.stop();
       // Withdraw the ephemeral leg-B return routes this node installed, so a
       // connector the caller OWNS (config.connector) is handed back with the

@@ -166,6 +166,13 @@ interface CliRawConfig {
   // see SwapNodeConfig.peerInfoIlpDestination.
   peerInfoIlpDestination?: string;
   peerInfoPricePerByte?: string | number;
+  // NIP-40 expiry on the kind:10032 advertisement, and the cadence that keeps
+  // it alive. Both OPTIONAL with fleet-convention defaults (600s / 240s) —
+  // forwarded verbatim so an operator who needs to override them can, without
+  // either becoming a key a config file must carry. See
+  // SwapNodeConfig.peerInfoTtlSeconds / .peerInfoRefreshIntervalMs.
+  peerInfoTtlSeconds?: number;
+  peerInfoRefreshIntervalMs?: number;
   // Maker staleness bound(s) — swap#48. Forwarded verbatim; startSwapNode()'s
   // validateConfig() enforces the shape AND the rateProvider requirement
   // (see the maxRateAge NOTE in the header).
@@ -290,6 +297,12 @@ function parseRawConfig(raw: CliRawConfig): SwapNodeConfig {
   }
   if (raw.peerInfoPricePerByte !== undefined) {
     cfg.peerInfoPricePerByte = toBigInt(raw.peerInfoPricePerByte);
+  }
+  if (raw.peerInfoTtlSeconds !== undefined) {
+    cfg.peerInfoTtlSeconds = raw.peerInfoTtlSeconds;
+  }
+  if (raw.peerInfoRefreshIntervalMs !== undefined) {
+    cfg.peerInfoRefreshIntervalMs = raw.peerInfoRefreshIntervalMs;
   }
   if (raw.maxRateAge !== undefined) {
     cfg.maxRateAge = raw.maxRateAge as SwapNodeConfig['maxRateAge'];
