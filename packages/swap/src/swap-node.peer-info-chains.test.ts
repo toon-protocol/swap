@@ -72,6 +72,8 @@ function evmProvider(
     rpcUrl: 'http://127.0.0.1:1',
     registryAddress: '0x' + '11'.repeat(20),
     tokenAddress,
+    // Leg A — distinct from the leg-B `channelAddress` (issue #133).
+    tokenNetworkAddress: '0x' + '44'.repeat(20),
     channelAddress,
   };
 }

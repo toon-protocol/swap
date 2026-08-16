@@ -61,6 +61,7 @@ function validConfig(statePath: string): SwapNodeConfig {
         rpcUrl: 'http://127.0.0.1:1',
         registryAddress: '0x' + '11'.repeat(20),
         tokenAddress: '0x' + '22'.repeat(20),
+        tokenNetworkAddress: '0x' + '44'.repeat(20),
         channelAddress: '0x' + '33'.repeat(20),
       },
     ],

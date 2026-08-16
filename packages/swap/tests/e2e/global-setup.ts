@@ -32,6 +32,7 @@ import {
   type AnvilInstance,
   USDC_TOKEN_ADDRESS,
   TOKEN_NETWORK_REGISTRY_ADDRESS,
+  TOKEN_NETWORK_ADDRESS,
   ROLLING_SWAP_CHANNEL_ADDRESS,
   MAKER_EVM_PRIVATE_KEY,
 } from '../integration/helpers/rolling-e2e-harness.js';
@@ -68,6 +69,9 @@ export default async function globalSetup(): Promise<() => Promise<void>> {
           rpcUrl: `http://127.0.0.1:${ANVIL_PORT}`,
           registryAddress: TOKEN_NETWORK_REGISTRY_ADDRESS,
           tokenAddress: USDC_TOKEN_ADDRESS,
+          // Leg A (client opens its channel here) vs leg B (claims verify
+          // here) — two different deployed contracts, issue #133.
+          tokenNetworkAddress: TOKEN_NETWORK_ADDRESS,
           channelAddress: ROLLING_SWAP_CHANNEL_ADDRESS,
         },
       });

@@ -335,6 +335,7 @@ async function bootRollingNode(daemon: SenderDaemon): Promise<{
         rpcUrl: 'http://127.0.0.1:1',
         registryAddress: '0x' + '11'.repeat(20),
         tokenAddress: '0x' + '22'.repeat(20),
+        tokenNetworkAddress: '0x' + '44'.repeat(20),
         channelAddress: CHANNEL_CONTRACT_ADDRESS,
       },
     ],

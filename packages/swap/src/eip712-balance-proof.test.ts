@@ -194,6 +194,7 @@ describe('issue #101 — boot refuses without a deployed RollingSwapChannel addr
       rpcUrl: 'http://127.0.0.1:1',
       registryAddress: '0x' + '11'.repeat(20),
       tokenAddress: '0x' + '22'.repeat(20),
+      tokenNetworkAddress: '0x' + '44'.repeat(20),
       channelAddress: '0x' + '33'.repeat(20),
     };
   }
@@ -223,6 +224,22 @@ describe('issue #101 — boot refuses without a deployed RollingSwapChannel addr
       ],
     };
     expect(() => validateConfig(config)).toThrow(/channelAddress/);
+  });
+
+  it('[P0] a chainProviders entry present but missing tokenNetworkAddress fails INVALID_CONFIG, naming the setting (#133)', () => {
+    // Leg A has no default and never falls back to `channelAddress`: silently
+    // announcing the RollingSwapChannel as `tokenNetworks` is what broke every
+    // stock client's `ensureChannel`. Refuse to boot instead.
+    const chain = 'evm:8453';
+    const { tokenNetworkAddress: _drop, ...withoutTokenNetwork } =
+      evmProvider(chain);
+    const config: SwapNodeConfig = {
+      ...baseConfig(chain),
+      chainProviders: [
+        withoutTokenNetwork as unknown as SwapNodeEvmChainProvider,
+      ],
+    };
+    expect(() => validateConfig(config)).toThrow(/tokenNetworkAddress/);
   });
 
   it('[P1] a fully-configured chainProviders entry (with channelAddress) boots cleanly, both key shapes', () => {
