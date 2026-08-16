@@ -35,6 +35,18 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          # The App token, NOT the default GITHUB_TOKEN. changesets/action
+          # pushes `changeset-release/main` with the git credentials checkout
+          # persists, and checkout defaults that to GITHUB_TOKEN. A push made
+          # by GITHUB_TOKEN does not trigger workflows, so the Version Packages
+          # PR's `synchronize` event fires no CI at all and the required
+          # `CI OK` context can never appear — leaving the PR permanently
+          # BLOCKED. The PR is still CREATED fine, because creation goes
+          # through the env token below, which was already the App's; that is
+          # why `opened` is green and every later push is not.
+          # With the App as the push credential, the Release PR's pull_request
+          # events fire CI like any human push would. (toon-client#467, toon#208)
+          token: ${{ steps.app-token.outputs.token || github.token }}
 
       - uses: pnpm/action-setup@v4
         with:
