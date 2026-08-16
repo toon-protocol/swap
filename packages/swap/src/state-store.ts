@@ -4,7 +4,7 @@
  * Everything the swap node hands out to counterparties is derived from three
  * pieces of runtime state that were previously in-memory only:
  *
- *   - `SwapInventory` reserves          (`inventory.ts`, keyed `assetCode:chain`)
+ *   - `SwapInventory` reserves + liability (`inventory.ts`, keyed `assetCode:chain`)
  *   - `SwapChannelState` watermarks     (nonce + cumulativeAmount per channel)
  *     and sticky sender→channel bindings
  *   - replay reservations               (the swap handler's `seenPacketIds`)
@@ -21,7 +21,7 @@
  * One JSON snapshot file, written atomically (temp file + `fsync` +
  * `rename`) on every state mutation that can leave the process. Writes are
  * SYNCHRONOUS to preserve the swap node's microtask-atomicity invariants
- * (`debit`/`reserve` are sync; a sync persist keeps the
+ * (`reserve` is sync; a sync persist keeps the
  * reserve→persist→sign ordering un-interleavable). Follows the
  * `JsonFileChannelStore` pattern from toon-client
  * (`packages/client/src/channel/ChannelStore.ts`) with atomic-rename
@@ -30,21 +30,23 @@
  * ## Crash-consistency rules (write-ahead / persist-before-hand-out)
  *
  * 1. **Watermarks are persisted BEFORE a claim can leave the process.**
- *    `MultiChainClaimIssuer.issueClaim` persists immediately after
- *    debit+reserve and BEFORE `signBalanceProof` — so at every instant the
+ *    `MultiChainClaimIssuer.issueClaim` persists immediately after the
+ *    inventory hold + channel reserve and BEFORE `signBalanceProof` — so at every instant the
  *    stored watermark is >= the highest watermark embedded in any claim a
  *    counterparty could hold. If the write-ahead persist fails, the
- *    debit+reserve are rolled back and NO claim is issued.
- * 2. **Crash between debit/reserve and FULFILL**: the persisted state may
+ *    hold + reserve are rolled back and NO claim is issued.
+ * 2. **Crash between the hold and FULFILL**: the persisted state may
  *    include reservations for claims that were never delivered (nonce gap,
- *    inventory debited for nothing). This is the deliberate safe side of
+ *    window capacity held for nothing). This is the deliberate safe side of
  *    the race: on restart the next claim continues monotonically ABOVE the
- *    aborted reservation, and inventory under-reports rather than
- *    over-reports. The aborted amounts are recoverable by the operator via
- *    `SwapInventory.credit` / settlement reconciliation; the swap node never
+ *    aborted reservation, and capacity under-reports rather than
+ *    over-reports. Since issue #138 the hold is a TTL'd window reservation
+ *    on BOTH paths, so the held capacity frees itself at `expiresAt`
+ *    (rule 6) instead of needing an operator credit; the swap node never
  *    hands out a claim that is AHEAD of the stored watermark.
  * 3. **Signer-failure rollback** (`claim-issuer.ts`): the in-memory
- *    credit+release rollback is followed by a best-effort persist. If the
+ *    hold-release + watermark-release rollback is followed by a best-effort
+ *    persist. If the
  *    process crashes between rollback and persist, the stored state simply
  *    retains the (safe, over-reserved) pre-rollback snapshot — see rule 2.
  * 4. **Replay reservations**: `PersistentSeenPacketIds` persists on every
@@ -73,10 +75,16 @@
  *    sender banking a voided in-flight claim is the spec's designed δ·W
  *    exposure (§3.1), and a crash between the leg-B FULFILL and the commit
  *    persist under-reports `unsettled` by at most the packets in flight at
- *    the crash — the same δ·W bound. The alternative (re-checking by
- *    recomputing `unsettled` from channel cumulative − settled watermarks)
- *    is unsound while legacy and rolling traffic share channels: it would
- *    double-count legacy claims that already debited `available`.
+ *    the crash: the same bound.
+ *
+ *    Issue #138 adds the backstop that closes that window from the other
+ *    side. `SwapInventoryReconciler` reads each
+ *    channel's LIVE on-chain `cumulativePaid` and applies it through
+ *    `SwapInventory.recordChainRedemption`, which is monotone per channel and
+ *    capped at `total`. Under-reported liability therefore costs at most one
+ *    reconcile interval of over-advertised capacity, and (now that no path
+ *    permanently debits `available`) a redeemed watermark also recycles the
+ *    capital a pre-#138 legacy debit burned, which nothing else could.
  *
  * ## Rehydration precedence
  *

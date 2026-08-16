@@ -65,6 +65,12 @@ import { SwapChannelState } from './channel-state.js';
 import type { ChannelEntry } from './channel-state.js';
 import { createEvmChannelOnChainReader } from './evm-channel-reader.js';
 import {
+  DEFAULT_RECONCILE_INTERVAL_MS,
+  SwapInventoryReconciler,
+} from './inventory-reconciler.js';
+import type { ReconcileResult } from './inventory-reconciler.js';
+import { registerAdminRoutes } from './admin-surface.js';
+import {
   EvmPaymentChannelSigner,
   MinaPaymentChannelSigner,
   SolanaPaymentChannelSigner,
@@ -450,6 +456,23 @@ export interface SwapNodeConfig {
   logger?: SwapNodeLogger;
 
   /**
+   * Issue #138 — operator token gating the `/admin/inventory/*` WRITE routes
+   * on the BLS server (`SWAP_ADMIN_TOKEN`). OPTIONAL by design: a required
+   * key would crash-loop every `:release`-tracking deployment on the next
+   * auto-deploy (swap#134). When unset, the write routes answer 503
+   * `admin_writes_disabled` — closed, never open. The read route
+   * (`GET /admin/inventory`) is always available and is protected by the
+   * box's nginx `^~ /admin` 404 rule, like the connector's own admin surface.
+   */
+  adminToken?: string;
+  /**
+   * Issue #138 — cadence of the chain-truth inventory reconcile, in ms.
+   * Defaults to `DEFAULT_RECONCILE_INTERVAL_MS` (60s); `0` disables the
+   * periodic pass (the boot pass and the admin routes still work).
+   */
+  reconcileIntervalMs?: number;
+
+  /**
    * Published in kind:10032 as the swap node's ILP address. Used by peers to
    * route packets toward this node. Default: `g.toon.swap.<pubkey16>`.
    */
@@ -527,6 +550,13 @@ export interface SwapNodeConfig {
      * BTP round-trip. NOT part of the public contract.
      */
     onChannelStateBuilt?: (channelState: SwapChannelState) => void;
+    /**
+     * @internal — issue #138 test hook. Called exactly once with the
+     * constructed `MultiChainClaimIssuer`, so tests can drive a REAL legacy
+     * claim through the node's own inventory/channel/persistence wiring and
+     * then observe the chain-truth recycle. NOT part of the public contract.
+     */
+    onClaimIssuerBuilt?: (claimIssuer: MultiChainClaimIssuer) => void;
   };
 }
 
@@ -567,6 +597,16 @@ export interface SwapNodeInstance {
    * is enabled.
    */
   recordSettlement(event: SettlementEvent): bigint;
+  /**
+   * Issue #138 — run one chain-truth reconcile now: read every provisioned
+   * channel's LIVE on-chain `cumulativePaid` and recycle whatever it shows
+   * newly redeemed back into spendable capacity (liability first, then the
+   * `available` a pre-#138 permanent debit burned — capped at `total`).
+   * Idempotent: per-channel watermarks are monotone, so re-running credits
+   * nothing. Never throws; per-channel read failures are reported in the
+   * result and leave that channel's capacity blocked.
+   */
+  reconcileInventory(): Promise<ReconcileResult>;
   /** @internal — AC-10 test hook. */
   readonly _handlerRegistry?: HandlerRegistry;
   /** @internal — issue #47 test hook (rolling-engine introspection). */
@@ -1395,6 +1435,24 @@ export async function startSwapNode(
     }
   }
 
+  // 6c. Issue #138 — chain-truth inventory reconciler. Reads each provisioned
+  //      channel's LIVE on-chain `cumulativePaid` and recycles the redeemed
+  //      value back into spendable capacity. Runs once at boot
+  //      (fire-and-forget: an unreachable RPC must never block boot) and then
+  //      on an unref'd interval. Disabled — with an explanation on the
+  //      operator read surface — when no on-chain reader is configured, since
+  //      the node then has no way to establish chain truth and must not guess.
+  const reconciler = new SwapInventoryReconciler({
+    inventory,
+    channelState,
+    ...(channelOnChainReader && { reader: channelOnChainReader }),
+    ...(persister && { persist: () => persister.persist() }),
+    logger,
+    ...(config.reconcileIntervalMs !== undefined && {
+      intervalMs: config.reconcileIntervalMs,
+    }),
+  });
+
   // 7. signerAddresses map + claim issuer.
   const signerAddresses = buildSignerAddresses(config.swapPairs, swapNodeKeys);
   const claimIssuer = new MultiChainClaimIssuer({
@@ -1411,6 +1469,7 @@ export async function startSwapNode(
       error: logger.error,
     },
   });
+  config.__testHooks?.onClaimIssuerBuilt?.(claimIssuer);
 
   // 8. Swap handler (+ optional maxRateAge staleness guard — swap#48).
   //
@@ -2084,6 +2143,15 @@ export async function startSwapNode(
 
   const app = new Hono();
   app.get('/health', (c: Context) => c.json(getHealth()));
+  // Issue #138 — operator surface. Mounted under `/admin` so the fleet's
+  // existing box-nginx `^~ /admin` 404 rule covers it; writes additionally
+  // require `config.adminToken` and are disabled (503) when none is set.
+  // See `admin-surface.ts` for the full protection rationale.
+  registerAdminRoutes(app, {
+    inventory,
+    reconciler,
+    ...(config.adminToken !== undefined && { adminToken: config.adminToken }),
+  });
 
   const blsServer: ServerType = serve({
     fetch: app.fetch,
@@ -2329,6 +2397,7 @@ export async function startSwapNode(
     registerRollingSession: (session: RollingSession) => {
       rollingEngine.registerSession(session);
     },
+    reconcileInventory: () => reconciler.reconcile(),
     recordSettlement: (event: SettlementEvent): bigint => {
       // Resolve the (assetCode, chain) pool via the provisioned channel
       // state: stored keys are `${assetCode}:${chain}:${channelId}`.
@@ -2393,6 +2462,7 @@ export async function startSwapNode(
       stopped = true;
       stopRequested = true;
       status = 'stopping';
+      reconciler.stop();
       try {
         await new Promise<void>((resolve) => {
           blsServer.close(() => resolve());
@@ -2446,6 +2516,23 @@ export async function startSwapNode(
       status = 'stopped';
     },
   };
+
+  // 15. Issue #138 — boot reconcile + periodic cadence. Fire-and-forget: a
+  //     slow or unreachable RPC must not delay (or fail) boot, and a maker
+  //     that booted with capacity blocked by already-redeemed claims should
+  //     start serving again on its own, without an operator or a redeploy.
+  if (reconciler.enabled) {
+    void reconciler.runGuarded();
+    reconciler.start();
+    logger.debug?.('swap.reconcile.armed', {
+      intervalMs: config.reconcileIntervalMs ?? DEFAULT_RECONCILE_INTERVAL_MS,
+    });
+  } else {
+    logger.warn?.('swap.reconcile.disabled', {
+      reason:
+        'no EVM chainProviders entry, so no on-chain reader: redeemed claims can never be observed and the capacity they hold can never be recycled',
+    });
+  }
 
   return instance;
 }

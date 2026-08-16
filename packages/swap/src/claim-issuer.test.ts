@@ -58,7 +58,7 @@ function makeRumor() {
 // ---------------------------------------------------------------------------
 
 describe('MultiChainClaimIssuer (Story 12.4 AC-6, AC-8, AC-10)', () => {
-  it('[P0] happy path: debit → sign → return { claim, claimId }', async () => {
+  it('[P0] happy path: hold → sign → commit → return { claim, claimId }', async () => {
     const inventory = new SwapInventory({
       balances: { 'ETH:evm:base:8453': { available: 1_000n, total: 1_000n } },
     });
@@ -91,11 +91,17 @@ describe('MultiChainClaimIssuer (Story 12.4 AC-6, AC-8, AC-10)', () => {
     expect(result.claim).toBeInstanceOf(Uint8Array);
     expect(result.claim).toEqual(new Uint8Array([0x01, 0x02, 0x03]));
     expect(typeof result.claimId).toBe('string');
-    expect(inventory.get('ETH', 'evm:base:8453')!.available).toBe(950n);
+    // Issue #138: the hold is unsettled channel liability, NOT a permanent
+    // debit — `available` is untouched and the issued value is recyclable
+    // once the chain shows the claim redeemed.
+    const pool = inventory.snapshot()[0];
+    expect(pool?.available).toBe(1_000n);
+    expect(pool?.unsettled).toBe(50n);
+    expect(inventory.windowSnapshot()[0]?.free).toBe(950n);
     expect(signer.signBalanceProof).toHaveBeenCalledTimes(1);
   });
 
-  it('[P0] debit happens BEFORE the first await (microtask atomicity, AC-8)', async () => {
+  it('[P0] the inventory hold is taken BEFORE the first await (microtask atomicity, AC-8)', async () => {
     const inventory = new SwapInventory({
       balances: { 'ETH:evm:base:8453': { available: 1_000n, total: 1_000n } },
     });
@@ -110,7 +116,7 @@ describe('MultiChainClaimIssuer (Story 12.4 AC-6, AC-8, AC-10)', () => {
       },
     });
 
-    const debitSpy = vi.spyOn(inventory, 'debit');
+    const reserveSpy = vi.spyOn(inventory, 'reserve');
     const signer = {
       chain: 'evm:base:8453',
       chainKind: 'evm' as const,
@@ -132,11 +138,11 @@ describe('MultiChainClaimIssuer (Story 12.4 AC-6, AC-8, AC-10)', () => {
       rumor: makeRumor(),
     });
 
-    const debitOrder = debitSpy.mock.invocationCallOrder[0];
+    const holdOrder = reserveSpy.mock.invocationCallOrder[0];
     const signOrder = signer.signBalanceProof.mock.invocationCallOrder[0];
-    expect(debitOrder).toBeDefined();
+    expect(holdOrder).toBeDefined();
     expect(signOrder).toBeDefined();
-    expect(debitOrder!).toBeLessThan(signOrder!);
+    expect(holdOrder!).toBeLessThan(signOrder!);
   });
 
   it('[P0] insufficient inventory throws SwapInventoryError(INSUFFICIENT_INVENTORY); signer NOT called', async () => {
@@ -295,9 +301,13 @@ describe('MultiChainClaimIssuer (Story 12.4 AC-6, AC-8, AC-10)', () => {
 
     const ids = new Set(results.map((r) => r.claimId));
     expect(ids.size).toBe(N);
-    expect(inventory.get('ETH', 'evm:base:8453')!.available).toBe(
-      10_000n - per * BigInt(N)
+    // Issue #138 — one capital model: N holds become N committed liabilities,
+    // and `available` (the pool's real capital) never moved.
+    expect(inventory.get('ETH', 'evm:base:8453')!.available).toBe(10_000n);
+    expect(inventory.get('ETH', 'evm:base:8453')!.unsettled).toBe(
+      per * BigInt(N)
     );
+    expect(inventory.windowSnapshot()[0]!.free).toBe(10_000n - per * BigInt(N));
     const entry = channelState.get({
       assetCode: 'ETH',
       chain: 'evm:base:8453',
@@ -500,7 +510,8 @@ describe('MultiChainClaimIssuer (Story 12.4 AC-6, AC-8, AC-10)', () => {
       rumor: makeRumor(),
     });
     expect(result.claim).toBeInstanceOf(Uint8Array);
-    expect(inventory.get('ETH', 'evm:base:8453')!.available).toBe(950n);
+    expect(inventory.snapshot()[0]?.available).toBe(1_000n);
+    expect(inventory.snapshot()[0]?.unsettled).toBe(50n);
     expect(
       channelState.get({
         assetCode: 'ETH',
@@ -1295,9 +1306,11 @@ describe('Issue #113 — on-chain-safety-checked sticky-binding rebind (claim-is
       code: 'UNSUPPORTED_CHAIN',
     });
 
-    // SENDER_2's failed attempt debited nothing and left SENDER_1's
-    // unredeemed watermark untouched.
-    expect(inventory.get('ETH', 'evm:base:8453')?.available).toBe(950n);
+    // SENDER_2's failed attempt took no inventory hold and left SENDER_1's
+    // unredeemed watermark untouched — only SENDER_1's own claim is booked
+    // as liability (issue #138: `available` is never permanently debited).
+    expect(inventory.get('ETH', 'evm:base:8453')?.available).toBe(1_000n);
+    expect(inventory.get('ETH', 'evm:base:8453')?.unsettled).toBe(50n);
     const entry = channelState.get({
       assetCode: 'ETH',
       chain: 'evm:base:8453',

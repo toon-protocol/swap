@@ -504,3 +504,160 @@ describe('SwapInventory — in-flight window (issue #49)', () => {
     expect(windowOf(rehydrated).inFlight).toBe(0n);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Issue #138 — chain-corroborated settle-and-recycle
+// ---------------------------------------------------------------------------
+
+describe('SwapInventory.recordChainRedemption (issue #138)', () => {
+  const ASSET = 'ETH';
+  const CHAIN = 'evm:base:8453';
+  const KEY = `${ASSET}:${CHAIN}`;
+  const CHANNEL = 'chan-1';
+
+  /** Non-null narrowing without `!` (the repo's eslint gate forbids it). */
+  function poolOf(inv: SwapInventory) {
+    const entry = inv.get(ASSET, CHAIN);
+    if (!entry) throw new Error('expected a pool balance');
+    return entry;
+  }
+
+  function build(p: { available: bigint; total: bigint; unsettled?: bigint }) {
+    return new SwapInventory({
+      balances: {
+        [KEY]: {
+          available: p.available,
+          total: p.total,
+          ...(p.unsettled !== undefined && { unsettled: p.unsettled }),
+        },
+      },
+    });
+  }
+
+  it('[P0] a redemption releases liability first and leaves `available` alone', () => {
+    const inv = build({ available: 1_000n, total: 1_000n, unsettled: 400n });
+
+    const out = inv.recordChainRedemption({
+      assetCode: ASSET,
+      chain: CHAIN,
+      channelId: CHANNEL,
+      redeemedCumulative: 300n,
+    });
+
+    expect(out).toEqual({
+      delta: 300n,
+      liabilityReduced: 300n,
+      availableRestored: 0n,
+    });
+    expect(poolOf(inv).unsettled).toBe(100n);
+    expect(poolOf(inv).available).toBe(1_000n);
+  });
+
+  it('[P0] redeemed value with no liability behind it heals a legacy permanent debit', () => {
+    // The live symptom: `available` burned by pre-#138 legacy debits while
+    // `unsettled` stayed at 0.
+    const inv = build({
+      available: 992_000n,
+      total: 1_000_000n,
+      unsettled: 0n,
+    });
+
+    const out = inv.recordChainRedemption({
+      assetCode: ASSET,
+      chain: CHAIN,
+      channelId: CHANNEL,
+      redeemedCumulative: 8_000n,
+    });
+
+    expect(out.availableRestored).toBe(8_000n);
+    expect(poolOf(inv).available).toBe(1_000_000n);
+  });
+
+  it('[P0] the recycle can NEVER push `available` past `total`', () => {
+    const inv = build({ available: 1_000n, total: 1_000n, unsettled: 0n });
+
+    const out = inv.recordChainRedemption({
+      assetCode: ASSET,
+      chain: CHAIN,
+      channelId: CHANNEL,
+      redeemedCumulative: 999_999n,
+    });
+
+    expect(out.availableRestored).toBe(0n);
+    expect(poolOf(inv).available).toBe(1_000n);
+    expect(poolOf(inv).total).toBe(1_000n);
+  });
+
+  it('[P0] monotone per channel: a replayed or regressing watermark credits nothing', () => {
+    const inv = build({ available: 900n, total: 1_000n, unsettled: 0n });
+
+    expect(
+      inv.recordChainRedemption({
+        assetCode: ASSET,
+        chain: CHAIN,
+        channelId: CHANNEL,
+        redeemedCumulative: 100n,
+      }).availableRestored
+    ).toBe(100n);
+    expect(
+      inv.recordChainRedemption({
+        assetCode: ASSET,
+        chain: CHAIN,
+        channelId: CHANNEL,
+        redeemedCumulative: 100n,
+      })
+    ).toEqual({ delta: 0n, liabilityReduced: 0n, availableRestored: 0n });
+    expect(
+      inv.recordChainRedemption({
+        assetCode: ASSET,
+        chain: CHAIN,
+        channelId: CHANNEL,
+        redeemedCumulative: 40n,
+      }).delta
+    ).toBe(0n);
+    expect(poolOf(inv).available).toBe(1_000n);
+  });
+
+  it('[P0] an unverified SettlementEvent (recordSettlement) never restores `available`', () => {
+    const inv = build({ available: 900n, total: 1_000n, unsettled: 0n });
+
+    // A counterparty-asserted settlement: liability-only, so a lie cannot
+    // manufacture capital.
+    expect(
+      inv.recordSettlement({
+        assetCode: ASSET,
+        chain: CHAIN,
+        channelId: CHANNEL,
+        cumulativeAmount: 100n,
+      })
+    ).toBe(0n);
+    expect(poolOf(inv).available).toBe(900n);
+  });
+
+  it('[P1] preview mutates nothing but reports the same numbers', () => {
+    const inv = build({ available: 950n, total: 1_000n, unsettled: 0n });
+    const args = {
+      assetCode: ASSET,
+      chain: CHAIN,
+      channelId: CHANNEL,
+      redeemedCumulative: 50n,
+    };
+
+    const preview = inv.previewChainRedemption(args);
+    expect(preview.availableRestored).toBe(50n);
+    expect(poolOf(inv).available).toBe(950n);
+    expect(inv.recordChainRedemption(args)).toEqual(preview);
+  });
+
+  it('[P1] an unknown pool throws INVENTORY_NOT_INITIALIZED (fails closed)', () => {
+    const inv = build({ available: 100n, total: 100n });
+    expect(() =>
+      inv.recordChainRedemption({
+        assetCode: 'NOPE',
+        chain: CHAIN,
+        channelId: CHANNEL,
+        redeemedCumulative: 1n,
+      })
+    ).toThrow(SwapInventoryError);
+  });
+});

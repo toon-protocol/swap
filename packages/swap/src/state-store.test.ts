@@ -127,6 +127,10 @@ function makeLiveSwapNode(
             {
               available: BigInt(v.available),
               total: BigInt(v.total),
+              // Rehydrate the liability bucket the way startSwapNode() does —
+              // without it a restart would silently forget every issued-but-
+              // unredeemed claim (issue #138).
+              unsettled: BigInt(v.unsettled ?? '0'),
               updatedAt: v.updatedAt,
             },
           ])
@@ -586,8 +590,14 @@ describe('issue #46 — crash recovery through MultiChainClaimIssuer', () => {
     expect(post.cumulativeAmount).toBe(100n);
     // Sticky binding survived: same channel as before the crash.
     expect(post.channelId).toBe(preCrash.channelId);
-    // Inventory survived the restart too: 1000 - 50 - 30 - 20.
-    expect(boot2.inventory.get('ETH', 'evm:base:8453')!.available).toBe(900n);
+    // Inventory survived the restart too. Issue #138: the three claims are
+    // unsettled channel liability (50 + 30 + 20), not a permanent debit —
+    // `available` is intact and the capacity comes back when the chain shows
+    // the claims redeemed.
+    const pool = boot2.inventory.snapshot()[0];
+    expect(pool?.available).toBe(1_000n);
+    expect(pool?.unsettled).toBe(100n);
+    expect(boot2.inventory.windowSnapshot()[0]?.free).toBe(900n);
   });
 
   it('[P0] write-ahead ordering: watermark is persisted BEFORE the balance proof is signed', async () => {
@@ -604,10 +614,13 @@ describe('issue #46 — crash recovery through MultiChainClaimIssuer', () => {
       return new Uint8Array([0x01]);
     });
     await swapNode.issuer.issueClaim(issueParams());
-    expect(order).toEqual(['persist', 'sign']);
+    // Write-ahead persist strictly precedes the signature. The trailing
+    // persist is issue #138's liability commit (reservation → unsettled),
+    // which by construction can only run once the claim exists.
+    expect(order).toEqual(['persist', 'sign', 'persist']);
   });
 
-  it('[P0] write-ahead persist failure: claim refused (PERSISTENCE_FAILED) and debit+reservation rolled back', async () => {
+  it('[P0] write-ahead persist failure: claim refused (PERSISTENCE_FAILED) and inventory hold + reservation rolled back', async () => {
     const store: SwapStateStore = {
       load: () => null,
       save: () => {
@@ -648,12 +661,12 @@ describe('issue #46 — crash recovery through MultiChainClaimIssuer', () => {
     const loaded = store.load()!;
     expect(loaded.inventory['ETH:evm:base:8453']!.available).toBe('1000');
     expect(loaded.channels['ETH:evm:base:8453:chan-a']!.nonce).toBe('0');
-    expect(
-      loaded.channels['ETH:evm:base:8453:chan-a']!.cumulativeAmount
-    ).toBe('0');
+    expect(loaded.channels['ETH:evm:base:8453:chan-a']!.cumulativeAmount).toBe(
+      '0'
+    );
   });
 
-  it('[P0] crash between debit and FULFILL: restored state is over-reserved (never behind a handed-out claim) and stays monotone', async () => {
+  it('[P0] crash between the inventory hold and FULFILL: restored state is over-reserved (never behind a handed-out claim) and stays monotone', async () => {
     const path = join(makeTmpDir(), 'state.json');
     const realStore = new JsonFileSwapStateStore(path);
     // Store wrapper that fails every save AFTER the first (the write-ahead
@@ -676,11 +689,18 @@ describe('issue #46 — crash recovery through MultiChainClaimIssuer', () => {
       swapNode.issuer.issueClaim(issueParams())
     ).rejects.toBeInstanceOf(SwapWalletError);
 
-    // Disk kept the write-ahead (over-reserved) snapshot: nonce 1, debit 50 —
-    // ahead of any claim a counterparty could hold (none was delivered).
+    // Disk kept the write-ahead (over-reserved) snapshot: nonce 1 plus a live
+    // 50-unit window reservation — ahead of any claim a counterparty could
+    // hold (none was delivered). Issue #138: the hold is a reservation, not a
+    // permanent debit, so `available` is untouched and the leaked capacity
+    // frees itself at the reservation TTL (crash rule 6).
     const persisted = realStore.load()!;
     expect(persisted.channels['ETH:evm:base:8453:chan-a']!.nonce).toBe('1');
-    expect(persisted.inventory['ETH:evm:base:8453']!.available).toBe('950');
+    expect(persisted.inventory['ETH:evm:base:8453']!.available).toBe('1000');
+    const reserved = Object.values(persisted.reservations);
+    expect(reserved).toHaveLength(1);
+    expect(reserved[0]?.amount).toBe('50');
+    expect(reserved[0]?.key).toBe('ETH:evm:base:8453');
 
     // Recovery: reboot from that snapshot; the next claim continues ABOVE the
     // aborted reservation — monotone, no possible watermark regression.

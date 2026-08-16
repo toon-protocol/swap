@@ -17,7 +17,32 @@ export type {
   SwapInventoryInit,
   SwapInventoryReservation,
   SwapWindowSnapshotEntry,
+  // Issue #138 — chain-corroborated settle-and-recycle outcome.
+  ChainRedemptionResult,
 } from './inventory.js';
+
+// Chain-truth inventory reconciliation + operator surface (issue #138)
+export {
+  SwapInventoryReconciler,
+  parseChannelStoredKey,
+  DEFAULT_RECONCILE_INTERVAL_MS,
+} from './inventory-reconciler.js';
+export type {
+  SwapInventoryReconcilerConfig,
+  SwapInventoryReconcilerLogger,
+  ChannelStateSnapshotSource,
+  ChannelRedemptionObservation,
+  PoolReconcileTotals,
+  ReconcileResult,
+  ReconcileOptions,
+} from './inventory-reconciler.js';
+export { buildInventoryReport, registerAdminRoutes } from './admin-surface.js';
+export type {
+  AdminInventoryReport,
+  AdminPoolView,
+  AdminChannelView,
+  AdminSurfaceDeps,
+} from './admin-surface.js';
 
 // Payment-channel signing (Story 12.4)
 export type {
