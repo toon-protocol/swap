@@ -138,6 +138,13 @@ export interface ChannelOnChainReader {
    * interface; callers MUST feature-detect and fail closed (refuse to credit)
    * when it is absent, never guess a funding level.
    *
+   * A reader that WRAPS or DISPATCHES to other readers (e.g. a chain-family
+   * dispatcher over per-family readers) MUST forward this method whenever any
+   * reader it delegates to implements it. Returning a bare object with only
+   * `getCumulativePaid` silently drops the capability, and the operator
+   * credit surface then refuses every request with `503 funding_unreadable` —
+   * fail-closed, but the route is dead and nothing says why.
+   *
    * IMPLEMENTATIONS MUST return both words from ONE atomic chain read (a
    * single `eth_call` / one account fetch). Two separate reads straddling a
    * redemption can observe the pre-redemption `deposit` together with the
