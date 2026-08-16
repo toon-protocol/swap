@@ -124,13 +124,12 @@ export {
   CLAIM_REFUSAL_REASONS,
   classifyClaimIssuerError,
   buildClaimRefusalReject,
-  createClaimRefusalDiagnostics,
+  createClaimRefusalMapper,
 } from './claim-refusal.js';
 export type {
   ClaimRefusal,
   ClaimRefusalReason,
   ClaimRefusalReject,
-  ClaimRefusalDiagnostics,
 } from './claim-refusal.js';
 
 // swap#136 — the process-level structured logger the CLI installs.
