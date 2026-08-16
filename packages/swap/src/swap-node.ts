@@ -94,6 +94,8 @@ import {
   parseRollingFillPayload,
 } from './rolling-engine.js';
 import type { LegBSender, RollingSession } from './rolling-engine.js';
+import { createRollingRfqIntake } from './rolling-rfq.js';
+import type { RollingRfqConfig } from './rolling-rfq.js';
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -373,6 +375,13 @@ export interface SwapNodeConfig {
      * slot right after they could no longer fulfill). Default 5s.
      */
     reservationGraceMs?: number;
+    /**
+     * RFQ intake knobs (spec §2.2). Entirely optional and defaulted — the
+     * intake is ON by default because the path it adds is only reachable by a
+     * packet whose inner rumor kind is 20033, a kind that has no other handler
+     * at all, so it cannot regress traffic that works today.
+     */
+    rfq?: RollingRfqConfig;
   };
   /**
    * Leg-B egress override (tests / custom connectors). When omitted, the
@@ -1733,6 +1742,37 @@ export async function startSwapNode(
     }),
   });
 
+  // 10c. Rolling RFQ intake (spec §2.2) — the transport that mints a session.
+  //
+  // Without it `rollingSessions` can only ever be populated by the in-process
+  // `registerRollingSession`, which `cli.ts` (what the container runs) never
+  // calls — so every rolling fill reaching a deployed maker F06s
+  // `unknown_session` and the rolling protocol is unreachable on the wire.
+  //
+  // Quote source mirrors the engine's: the timestamped `rateProvider` when the
+  // operator configured one, else the pair's static advertised rate.
+  const rfqIntake = createRollingRfqIntake({
+    swapPairs: config.swapPairs,
+    secretKey: identity.secretKey,
+    signerAddresses,
+    registerSession: (session) => rollingEngine.registerSession(session),
+    ...(stalenessGuard && {
+      maxRateAgeMs: (pair: SwapPair) =>
+        stalenessGuard.resolveMaxRateAgeMs(pair),
+    }),
+    quote: async (pair: SwapPair) => {
+      if (config.rateProvider) {
+        const quoted = await config.rateProvider(pair);
+        return typeof quoted === 'string'
+          ? { rate: quoted, rateTimestamp: Date.now() }
+          : { rate: quoted.rate, rateTimestamp: quoted.at };
+      }
+      return { rate: pair.rate, rateTimestamp: Date.now() };
+    },
+    ...(config.rolling?.rfq && { rfq: config.rolling.rfq }),
+    logger: { debug: logger.debug, warn: logger.warn },
+  });
+
   // 11a. Wire the HandlerRegistry to the connector's local-delivery path.
   //
   // Story 50.3 (SOL settlement leg, AC#4): inbound kind:1059 (NIP-59 gift-wrap)
@@ -1843,6 +1883,15 @@ export async function startSwapNode(
         reason: ROLLING_REJECT_REASONS.CONDITION_REQUIRED,
       }) as HandlePacketResponse;
     }
+
+    // Rolling RFQ (spec §2.2) — a zero-condition kind:1059 gift wrap, exactly
+    // like a legacy swap request, distinguished ONLY by its inner rumor kind
+    // (20033). It therefore has to be sniffed here, before the legacy branch,
+    // by unwrapping and reading that kind. `handle()` returns null for
+    // everything it cannot positively identify as an RFQ (including any unwrap
+    // failure), so the legacy path below stays byte-for-byte as it was.
+    const rfq = await rfqIntake.handle(request.data);
+    if (rfq) return rfq as HandlePacketResponse;
 
     // Legacy path (zero-condition gift-wrap) — unchanged below.
     let meta;

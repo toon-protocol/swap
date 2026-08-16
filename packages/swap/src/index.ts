@@ -153,6 +153,26 @@ export type {
   ConnectorLegBSenderOptions,
 } from './rolling-engine.js';
 
+// Rolling RFQ intake — the kind:20033/20034 session transport (spec §2.2)
+export {
+  createRollingRfqIntake,
+  parseRollingRfqRequest,
+  findRfqPair,
+  ROLLING_RFQ_REQUEST_KIND,
+  ROLLING_RFQ_RESPONSE_KIND,
+  ROLLING_RFQ_REJECT_REASONS,
+  DEFAULT_RFQ_QUOTE_TTL_MS,
+} from './rolling-rfq.js';
+export type {
+  RollingRfqRequest,
+  RollingRfqResponse,
+  RollingRfqAsset,
+  RollingRfqConfig,
+  RollingRfqIntakeConfig,
+  RollingRfqOutcome,
+  RfqQuote,
+} from './rolling-rfq.js';
+
 // HTTP rate provider — CLI `rateProvider` wiring (issue #47 AC-3)
 export {
   createHttpRateProvider,
