@@ -14,9 +14,11 @@ import { createServer, type Server } from 'node:http';
 import { base58Encode } from '@toon-protocol/sdk';
 
 import {
+  composeChannelOnChainReaders,
   createChannelOnChainReader,
   MINA_UNREADABLE_REASON,
 } from './channel-reader.js';
+import type { ChannelOnChainReader } from './channel-state.js';
 
 const EVM_CHAIN = 'evm:8453';
 const SOLANA_CHAIN = 'solana:devnet';
@@ -243,5 +245,152 @@ describe('createChannelOnChainReader (issue #141)', () => {
         channelId: 'whatever',
       })
     ).rejects.toThrow(/unknown chain family/);
+  });
+});
+
+/**
+ * `ChannelOnChainReader` grows OPTIONAL capabilities (swap#142's
+ * `getFundingPosition`, EVM-only, backs `POST /admin/inventory/deposit`). A
+ * dispatcher that returned a fixed object literal would silently drop any
+ * capability it did not name — the route would go dark on every chain,
+ * fail-closed but unexplained — and would drop the NEXT one the same way. The
+ * dispatch is therefore built from the union of the families' actual
+ * callables; these tests pin that shape, not one field name.
+ */
+describe('composeChannelOnChainReaders forwards every capability, not a fixed list', () => {
+  /** A stub family reader carrying an extra, optional capability. */
+  function stubReader(
+    label: string,
+    extras: Record<string, ChannelRead> = {}
+  ): ChannelOnChainReader {
+    return {
+      getCumulativePaid: async () => 1n,
+      ...extras,
+      // Recorded so a test can prove which family actually served the call.
+      whichFamily: async () => label,
+    } as unknown as ChannelOnChainReader;
+  }
+
+  type ChannelRead = (params: {
+    assetCode: string;
+    chain: string;
+    channelId: string;
+  }) => Promise<unknown>;
+
+  /** Call an optional capability off the composed reader without `as any`. */
+  function callCapability(
+    reader: ChannelOnChainReader,
+    capability: string,
+    chain: string
+  ): Promise<unknown> {
+    const method = (reader as unknown as Record<string, ChannelRead>)[
+      capability
+    ];
+    if (typeof method !== 'function') {
+      throw new Error(`composed reader does not expose '${capability}'`);
+    }
+    return method({ assetCode: 'USDC', chain, channelId: 'c' });
+  }
+
+  function must<T>(value: T | undefined, what: string): T {
+    if (value === undefined) throw new Error(`expected ${what}`);
+    return value;
+  }
+
+  it('[P0] an EVM-only optional capability survives the dispatcher and reaches the EVM reader', async () => {
+    const reader = must(
+      composeChannelOnChainReaders({
+        evm: stubReader('evm', {
+          getFundingPosition: async () => ({
+            cumulativePaid: 7n,
+            deposit: 100n,
+          }),
+        }),
+        solana: stubReader('solana'),
+      }),
+      'a composed reader'
+    );
+
+    expect(
+      typeof (reader as unknown as Record<string, unknown>)[
+        'getFundingPosition'
+      ]
+    ).toBe('function');
+    await expect(
+      callCapability(reader, 'getFundingPosition', EVM_CHAIN)
+    ).resolves.toEqual({ cumulativePaid: 7n, deposit: 100n });
+  });
+
+  it('[P0] a family whose reader lacks the capability fails closed with a named reason', async () => {
+    const reader = must(
+      composeChannelOnChainReaders({
+        evm: stubReader('evm', { getFundingPosition: async () => ({}) }),
+        solana: stubReader('solana'),
+      }),
+      'a composed reader'
+    );
+
+    await expect(
+      callCapability(reader, 'getFundingPosition', SOLANA_CHAIN)
+    ).rejects.toThrow(/Solana channel reader has no 'getFundingPosition'/);
+    await expect(
+      callCapability(reader, 'getFundingPosition', MINA_CHAIN)
+    ).rejects.toThrow(MINA_UNREADABLE_REASON);
+  });
+
+  it('[P0] a capability NO family implements is not invented — the composed reader simply does not expose it', () => {
+    const reader = must(
+      composeChannelOnChainReaders({ solana: stubReader('solana') }),
+      'a composed reader'
+    );
+
+    expect(
+      (reader as unknown as Record<string, unknown>)['getFundingPosition']
+    ).toBeUndefined();
+  });
+
+  it('[P1] the dispatch routes each capability to the RIGHT family, not just the first one', async () => {
+    const reader = must(
+      composeChannelOnChainReaders({
+        evm: stubReader('evm'),
+        solana: stubReader('solana'),
+      }),
+      'a composed reader'
+    );
+
+    await expect(
+      callCapability(reader, 'whichFamily', EVM_CHAIN)
+    ).resolves.toBe('evm');
+    await expect(
+      callCapability(reader, 'whichFamily', SOLANA_CHAIN)
+    ).resolves.toBe('solana');
+  });
+
+  it("[P1] a class-based reader's prototype methods are forwarded too", async () => {
+    class ClassReader {
+      async getCumulativePaid(): Promise<bigint> {
+        return 3n;
+      }
+      async getFundingPosition(): Promise<{ deposit: bigint }> {
+        return { deposit: 42n };
+      }
+    }
+    const reader = must(
+      composeChannelOnChainReaders({
+        evm: new ClassReader() as unknown as ChannelOnChainReader,
+      }),
+      'a composed reader'
+    );
+
+    await expect(
+      reader.getCumulativePaid({
+        assetCode: 'USDC',
+        chain: EVM_CHAIN,
+        channelId: 'c',
+      })
+    ).resolves.toBe(3n);
+    await expect(
+      callCapability(reader, 'getFundingPosition', EVM_CHAIN)
+    ).resolves.toEqual({ deposit: 42n });
   });
 });
