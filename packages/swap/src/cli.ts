@@ -106,6 +106,13 @@ interface CliRawConfig {
    * (rolling-swap §8). Same keying as `inventory`.
    */
   windowBudget?: Record<string, string | number>;
+  /**
+   * Rolling-path knobs, forwarded verbatim to `startSwapNode()` (which owns
+   * every default). Entirely optional — a config file that omits it gets the
+   * shipped defaults, including RFQ intake ON. File-only, no env overlay,
+   * matching `peerInfoIlpDestination`/`btpEndpoint`.
+   */
+  rolling?: SwapNodeConfig['rolling'];
   relayUrls?: string[];
   blsPort?: number;
   btpServerPort?: number;
@@ -221,6 +228,7 @@ function parseRawConfig(raw: CliRawConfig): SwapNodeConfig {
     relayUrls: raw.relayUrls ?? [],
   };
   if (windowBudget) cfg.windowBudget = windowBudget;
+  if (raw.rolling) cfg.rolling = raw.rolling;
   if (raw.mnemonic) cfg.mnemonic = raw.mnemonic;
   if (raw.secretKey) {
     // Strict 64-char hex validation — `Buffer.from(str, 'hex')` silently
