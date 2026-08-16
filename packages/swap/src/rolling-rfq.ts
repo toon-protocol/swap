@@ -48,6 +48,7 @@ import {
   buildRollingReject,
   type RollingSession,
 } from './rolling-engine.js';
+import type { LegBReturnPath } from './leg-b-return-path.js';
 
 /** Inner rumor kind of an RFQ request (spec §2.2). */
 export const ROLLING_RFQ_REQUEST_KIND = 20033;
@@ -70,6 +71,14 @@ export const ROLLING_RFQ_REJECT_REASONS = {
   RATE_UNAVAILABLE: 'rate_unavailable',
   /** Session store full, or the nonce collided with a live session. */
   SESSION_REJECTED: 'session_rejected',
+  /**
+   * The maker has no way to deliver leg B back to the sender: the RFQ did not
+   * arrive on a BTP session it can reply on (or advertised a different
+   * address than the one that session authenticated under) and the routing
+   * table has no route to `senderIlpAddress`. Refusing here is what keeps the
+   * failure free — see `leg-b-return-path.ts`.
+   */
+  NO_RETURN_PATH: 'no_return_path',
 } as const;
 
 /**
@@ -267,6 +276,18 @@ export interface RollingRfqIntakeConfig {
   quote: (pair: SwapPair) => Promise<RfqQuote | null> | RfqQuote | null;
   /** Commits the session. Throwing → `session_rejected` (store full, etc.). */
   registerSession: (session: RollingSession) => void;
+  /**
+   * Resolve — and where possible install — the leg-B return path for the
+   * session about to be minted (`leg-b-return-path.ts`). Called BEFORE
+   * {@link registerSession}, so an `'unreachable'` verdict refuses the RFQ
+   * without ever creating a session that could not be filled.
+   *
+   * Absent (or `'unavailable'`) leaves the pre-fix behaviour untouched.
+   */
+  bindReturnPath?: (args: {
+    senderIlpAddress: string;
+    sourcePeer?: string;
+  }) => LegBReturnPath;
   /** Maker's Nostr secret key: unwraps the request, seals the response. */
   secretKey: Uint8Array;
   /** Per-chain on-chain signer addresses, keyed as `pair.to.chain`. */
@@ -304,7 +325,10 @@ export type RollingRfqOutcome =
  */
 export function createRollingRfqIntake(config: RollingRfqIntakeConfig): {
   /** `null` ⇒ not an RFQ, fall through to legacy. */
-  handle(dataB64: string): Promise<RollingRfqOutcome | null>;
+  handle(
+    dataB64: string,
+    arrival?: { sourcePeer?: string }
+  ): Promise<RollingRfqOutcome | null>;
 } {
   const enabled = config.rfq?.enabled ?? true;
   const quoteTtlMs = config.rfq?.quoteTtlMs ?? DEFAULT_RFQ_QUOTE_TTL_MS;
@@ -326,7 +350,10 @@ export function createRollingRfqIntake(config: RollingRfqIntakeConfig): {
     }) as RollingRfqOutcome;
 
   return {
-    async handle(dataB64: string): Promise<RollingRfqOutcome | null> {
+    async handle(
+      dataB64: string,
+      arrival?: { sourcePeer?: string }
+    ): Promise<RollingRfqOutcome | null> {
       if (!enabled) return null;
       if (typeof dataB64 !== 'string' || dataB64.length === 0) return null;
 
@@ -399,6 +426,33 @@ export function createRollingRfqIntake(config: RollingRfqIntakeConfig): {
       // Quote validity only. The session's own lifetime is left to the store's
       // TTL (see `RollingRfqConfig.quoteTtlMs`) by omitting `expiresAt` below.
       const quoteExpiresAt = now() + quoteTtlMs;
+
+      // Leg-B deliverability, BEFORE anything is committed (spec §3 R4/R5:
+      // a maker that cannot return leg B can never fulfil a fill, and every
+      // such fill would burn a sender-minted condition for nothing). This is
+      // the only point at which failing is free.
+      const returnPath = config.bindReturnPath?.({
+        senderIlpAddress: parsed.senderIlpAddress,
+        ...(arrival?.sourcePeer !== undefined
+          ? { sourcePeer: arrival.sourcePeer }
+          : {}),
+      });
+      if (returnPath?.status === 'unreachable') {
+        logger?.warn?.('swap.rfq.no_return_path', {
+          streamNonce: parsed.streamNonce,
+          senderIlpAddress: parsed.senderIlpAddress,
+          sourcePeer: arrival?.sourcePeer,
+          reason: returnPath.reason,
+        });
+        return reject(
+          'F02',
+          'unreachable',
+          `no leg-B return path to ${parsed.senderIlpAddress}: ${returnPath.reason}. ` +
+            'Connect to this maker over BTP, or use the legacy swap path ' +
+            '(`rolling: "off"`).',
+          ROLLING_RFQ_REJECT_REASONS.NO_RETURN_PATH
+        );
+      }
 
       // Commit the session BEFORE answering: a sender that receives a quote
       // must be able to send fill seq 1 immediately. Registering after the
@@ -474,6 +528,10 @@ export function createRollingRfqIntake(config: RollingRfqIntakeConfig): {
         streamNonce: parsed.streamNonce,
         pair: `${pair.from.assetCode}:${pair.from.chain}→${pair.to.assetCode}:${pair.to.chain}`,
         quoteExpiresAt,
+        returnPath: returnPath?.status ?? 'unavailable',
+        ...(returnPath && 'nextHop' in returnPath
+          ? { returnNextHop: returnPath.nextHop }
+          : {}),
       });
 
       return {

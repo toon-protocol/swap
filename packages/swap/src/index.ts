@@ -239,6 +239,19 @@ export type {
   RfqQuote,
 } from './rolling-rfq.js';
 
+// Leg-B return path — how a maker addresses a direct-dialled sender's daemon
+export {
+  createLegBReturnRouteBinder,
+  DEFAULT_MAX_RETURN_ROUTE_BINDINGS,
+  DEFAULT_RETURN_ROUTE_PRIORITY,
+} from './leg-b-return-path.js';
+export type {
+  LegBReturnPath,
+  LegBReturnRouteBinder,
+  LegBReturnRouteBinderOptions,
+  ReturnRouteConnectorLike,
+} from './leg-b-return-path.js';
+
 // HTTP rate provider — CLI `rateProvider` wiring (issue #47 AC-3)
 export {
   createHttpRateProvider,

@@ -28,8 +28,13 @@ import type { NostrEvent } from 'nostr-tools/pure';
 import {
   ConnectorNode,
   createLogger as createConnectorLogger,
+  createPaymentHandlerAdapter,
 } from '@toon-protocol/connector';
-import type { TransportConfig } from '@toon-protocol/connector';
+import type {
+  LocalDeliveryHandler,
+  LocalDeliveryRequest,
+  TransportConfig,
+} from '@toon-protocol/connector';
 
 import {
   HandlerRegistry,
@@ -104,6 +109,8 @@ import {
 import type { LegBSender, RollingSession } from './rolling-engine.js';
 import { createRollingRfqIntake } from './rolling-rfq.js';
 import type { RollingRfqConfig } from './rolling-rfq.js';
+import { createLegBReturnRouteBinder } from './leg-b-return-path.js';
+import type { LegBReturnRouteBinder } from './leg-b-return-path.js';
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -1766,6 +1773,12 @@ export async function startSwapNode(
         peers: [],
         routes: [{ prefix: ilpAddress, nextHop: nodeId, priority: 100 }],
         localDelivery: { enabled: false },
+        // Zero fees on our own egress, mirroring the embedded-with-parent
+        // branch. Without it the connector's default fee shaves the ILP
+        // `amount` of the ONE thing a standalone maker ever forwards — its
+        // own rolling leg-B PREPARE — so the packet would understate the
+        // chain-B claim it carries (3000 → 2997).
+        settlement: { connectorFeePercentage: 0 },
         ...(resolvedChainProviders &&
           resolvedChainProviders.length > 0 && {
             chainProviders: resolvedChainProviders,
@@ -1860,8 +1873,23 @@ export async function startSwapNode(
   //
   // Quote source mirrors the engine's: the timestamped `rateProvider` when the
   // operator configured one, else the pair's static advertised rate.
+  // 10b-bis. Leg-B return path (see `leg-b-return-path.ts`). A direct-dialled
+  // sender is an inbound BTP session, not a routing-table entry, so without
+  // this every leg B is F02'd inside the maker's own connector and the
+  // rolling protocol is undeliverable. Driven purely off the connector's
+  // public routing API — NO new config key, and no operator route.
+  const legBReturnRoutes: LegBReturnRouteBinder = createLegBReturnRouteBinder(
+    effectiveConnector,
+    {
+      ilpAddress:
+        config.ilpAddress ?? `g.toon.swap.${identity.pubkey.slice(0, 16)}`,
+      logger: { debug: logger.debug, warn: logger.warn },
+    }
+  );
+
   const rfqIntake = createRollingRfqIntake({
     swapPairs: config.swapPairs,
+    bindReturnPath: (args) => legBReturnRoutes.bind(args),
     secretKey: identity.secretKey,
     signerAddresses,
     registerSession: (session) => rollingEngine.registerSession(session),
@@ -1939,7 +1967,16 @@ export async function startSwapNode(
   };
 
   const handlePacket = async (
-    request: HandlePacketRequest
+    request: HandlePacketRequest,
+    /**
+     * The peer id the connector bound this packet's arrival under — for a BTP
+     * arrival, the `peerId` the session authenticated with
+     * (connector `btp/btp-server.ts` `authenticatePeer`), surfaced as
+     * `LocalDeliveryRequest.sourcePeer`. Undefined when the connector does not
+     * report one (legacy `setPacketHandler` wiring / test doubles), which is
+     * exactly the pre-fix behaviour.
+     */
+    sourcePeer?: string
   ): Promise<HandlePacketResponse> => {
     const requestExt = request as HandlePacketRequest & {
       executionCondition?: string;
@@ -1999,7 +2036,9 @@ export async function startSwapNode(
     // by unwrapping and reading that kind. `handle()` returns null for
     // everything it cannot positively identify as an RFQ (including any unwrap
     // failure), so the legacy path below stays byte-for-byte as it was.
-    const rfq = await rfqIntake.handle(request.data);
+    const rfq = await rfqIntake.handle(request.data, {
+      ...(sourcePeer !== undefined ? { sourcePeer } : {}),
+    });
     if (rfq) return rfq as HandlePacketResponse;
 
     // Legacy path (zero-condition gift-wrap) — unchanged below.
@@ -2076,12 +2115,64 @@ export async function startSwapNode(
     return result;
   };
 
-  // Register the handler as the connector's local-delivery callback. Guarded
-  // because `setPacketHandler` is optional on EmbeddableConnectorLike (HTTP-mode
-  // connectors and test doubles may omit it).
-  if (effectiveConnector?.setPacketHandler) {
+  // Register the handler as the connector's local-delivery callback.
+  //
+  // PREFER `setLocalDeliveryHandler`: `setPacketHandler` is the same slot
+  // wrapped in the connector's own `createPaymentHandlerAdapter`, and that
+  // adapter DROPS `LocalDeliveryRequest.sourcePeer` when it narrows the
+  // request to a `PaymentRequest` (connector `core/payment-handler.ts`). The
+  // arrival peer is the only evidence the maker has of which BTP session to
+  // return leg B on, so the swap node applies the SAME adapter itself and
+  // threads `sourcePeer` through. Behaviour is otherwise byte-identical —
+  // it is literally the connector's own adapter.
+  //
+  // Both calls stay guarded: `setPacketHandler` is optional on
+  // `EmbeddableConnectorLike` (HTTP-mode connectors and test doubles may omit
+  // it) and `setLocalDeliveryHandler` is not on that interface at all.
+  const connectorWithLocalDelivery = effectiveConnector as
+    | (EmbeddableConnectorLike & {
+        setLocalDeliveryHandler?: (handler: LocalDeliveryHandler) => void;
+      })
+    | undefined;
+  if (connectorWithLocalDelivery?.setLocalDeliveryHandler) {
+    const adapterLogger = createConnectorLogger(
+      'swap-local-delivery',
+      (process.env['TOON_CONNECTOR_LOG_LEVEL'] as
+        | 'debug'
+        | 'info'
+        | 'warn'
+        | 'error'
+        | undefined) ?? 'warn'
+    );
+    type ConnectorPaymentHandler = Parameters<
+      typeof createPaymentHandlerAdapter
+    >[0];
+    const localDeliveryHandler: LocalDeliveryHandler = (
+      request: LocalDeliveryRequest,
+      sourcePeerId: string | undefined
+    ) => {
+      const arrivalPeer = sourcePeerId ?? request.sourcePeer;
+      // Built per packet so the arrival peer is captured in the closure
+      // rather than in shared mutable state (packets interleave).
+      const adapter = createPaymentHandlerAdapter(
+        ((paymentRequest: unknown) =>
+          handlePacket(
+            paymentRequest as HandlePacketRequest,
+            arrivalPeer
+          )) as unknown as ConnectorPaymentHandler,
+        adapterLogger
+      );
+      return adapter(request, sourcePeerId as string);
+    };
+    connectorWithLocalDelivery.setLocalDeliveryHandler(localDeliveryHandler);
+    logger.debug?.('swap.connector.packet_handler_wired', {
+      via: 'setLocalDeliveryHandler',
+    });
+  } else if (effectiveConnector?.setPacketHandler) {
     effectiveConnector.setPacketHandler(handlePacket);
-    logger.debug?.('swap.connector.packet_handler_wired', {});
+    logger.debug?.('swap.connector.packet_handler_wired', {
+      via: 'setPacketHandler',
+    });
   } else {
     logger.warn?.('swap.connector.packet_handler_unavailable', {
       reason:
@@ -2488,6 +2579,10 @@ export async function startSwapNode(
       stopRequested = true;
       status = 'stopping';
       reconciler.stop();
+      // Withdraw the ephemeral leg-B return routes this node installed, so a
+      // connector the caller OWNS (config.connector) is handed back with the
+      // routing table it came with.
+      legBReturnRoutes.release();
       try {
         await new Promise<void>((resolve) => {
           blsServer.close(() => resolve());
