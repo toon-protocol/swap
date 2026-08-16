@@ -128,8 +128,8 @@ importers:
         specifier: ^2.1.0
         version: 2.1.0(@toon-protocol/connector@3.30.0)(typescript@5.9.3)
       '@toon-protocol/sdk':
-        specifier: ^3.1.8
-        version: 3.1.8(@toon-protocol/connector@3.30.0)(mina-signer@3.1.0)(typescript@5.9.3)
+        specifier: ^3.2.0
+        version: 3.2.0(@toon-protocol/connector@3.30.0)(mina-signer@3.1.0)(typescript@5.9.3)
       '@toon-protocol/settlement-digest':
         specifier: ^1.0.0
         version: 1.0.0
@@ -5223,7 +5223,7 @@ packages:
       '@scure/bip32': 1.7.0
       '@scure/bip39': 1.6.0
       '@toon-protocol/core': 3.3.0(@toon-protocol/connector@3.30.0)(typescript@5.9.3)
-      '@toon-protocol/sdk': 3.1.8(@toon-protocol/connector@3.30.0)(mina-signer@3.1.0)(typescript@5.9.3)
+      '@toon-protocol/sdk': 3.2.0(@toon-protocol/connector@3.30.0)(mina-signer@3.1.0)(typescript@5.9.3)
       nostr-tools: 2.23.1(typescript@5.9.3)
       viem: 2.47.2(typescript@5.9.3)(zod@3.25.76)
     optionalDependencies:
@@ -5516,8 +5516,8 @@ packages:
     dependencies:
       o1js: 2.14.0
 
-  /@toon-protocol/sdk@3.1.8(@toon-protocol/connector@3.30.0)(mina-signer@3.1.0)(typescript@5.9.3):
-    resolution: {integrity: sha512-aPJ5r9iL5j1dYhU1Oo2+oWsw2KLgNB4jlg214tcmCNs73GuKRx8S/biTsML9s4F2twZjUaoNyRabVK8mhvSQ1Q==}
+  /@toon-protocol/sdk@3.2.0(@toon-protocol/connector@3.30.0)(mina-signer@3.1.0)(typescript@5.9.3):
+    resolution: {integrity: sha512-KsHLiAiJc4DqCXdgnl3+Gh0uFsuP+Js4ALDZfI9gV8en0qZHJY55n3/HhkCoS6R3fVRNbcJgJW7w0r0DyJcY/Q==}
     engines: {node: '>=22'}
     peerDependencies:
       '@toon-protocol/connector': '>=3.3.3'
