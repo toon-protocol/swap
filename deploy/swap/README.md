@@ -70,6 +70,12 @@ inject the secret from a mount rather than baking it into the config file.
 | `SWAP_RATE_URL`, `SWAP_RATE_TIMEOUT_MS` | HTTP JSON rate feed (issue #47 AC-3). |
 | `SWAP_AUTOGEN_IDENTITY` | `1`/`true` (issue #126) — overlay for `identityAutogen`. |
 | `SWAP_IDENTITY_FILE` | Overrides the self-generated identity file path (default: beside `statePath`, or the cwd when `statePath` is unset). |
+| `SWAP_LOG_LEVEL` | swap#136 — verbosity of the JSON-line logger the CLI installs: `debug`\|`info`\|`warn`\|`error`\|`silent` (default `info`). Optional; an unrecognised value degrades to the default. |
+
+Refusals show up in `docker logs` as one JSON object per line — grep
+`swap.claim.refused` for a swap the maker turned away, and `reason` for why
+(e.g. `channel_unredeemed`). Before swap#136 the container logged nothing at
+all for a refused swap.
 
 `peerInfoIlpDestination` / `peerInfoPricePerByte` are config-file-only (no
 env override), matching `btpEndpoint`. (`ilpAddress` is the exception among

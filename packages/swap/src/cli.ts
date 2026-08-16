@@ -14,6 +14,12 @@
  *   SWAP_SECRET_KEY_HEX    — 64-char hex-encoded 32-byte secret key
  *   SWAP_BLS_PORT          — numeric port for /health server
  *   SWAP_RELAYS            — comma-separated relay WebSocket URLs
+ *   SWAP_LOG_LEVEL         — swap#136: verbosity of the JSON-line console
+ *                            logger this CLI installs
+ *                            (debug|info|warn|error|silent, default info).
+ *                            OPTIONAL — an unset or unrecognised value
+ *                            degrades to the default; the maker never
+ *                            fails boot over it.
  *   SWAP_STATE_PATH        — durable state snapshot path (issue #46);
  *                            enables persistence of inventory, channel
  *                            watermarks, sticky bindings + replay
@@ -84,6 +90,7 @@ import { fromMnemonic, generateMnemonic } from '@toon-protocol/sdk';
 import { startSwapNode } from './swap-node.js';
 import type { SwapNodeConfig, SwapNodeInstance } from './swap-node.js';
 import { createHttpRateProvider } from './rate-provider.js';
+import { createConsoleLogger } from './logger.js';
 import { deriveSwapNodeKeys } from './wallet.js';
 
 interface CliRawConfig {
@@ -504,6 +511,28 @@ export class CliHelpRequested extends Error {
   }
 }
 
+/**
+ * swap#136 — install the process-level logger.
+ *
+ * `startSwapNode()` defaults `config.logger` to a NO-OP (correct for
+ * embedders: a library must not print uninvited), and this CLI — the
+ * entrypoint the published image runs, `ENTRYPOINT ["node", "dist/cli.js"]` —
+ * never replaced it. Result: a live maker refused every swap after the first
+ * and `docker logs` showed nothing at all, because both the swap node's own
+ * `logger.warn?.(...)` calls AND the logger forwarded into the SDK swap
+ * handler were the no-op.
+ *
+ * Verbosity comes from the optional `SWAP_LOG_LEVEL` env var, NOT a config
+ * key: `:release` auto-deploys on green main, so a newly *required* config
+ * key would crash-loop the live maker (swap#134).
+ *
+ * Exported so `cli.test.ts` can assert the wiring without booting a node.
+ */
+export function installDefaultLogger(config: SwapNodeConfig): SwapNodeConfig {
+  if (config.logger) return config;
+  return { ...config, logger: createConsoleLogger() };
+}
+
 export async function main(argv: string[]): Promise<SwapNodeInstance> {
   const { values } = parseArgs({
     args: argv,
@@ -527,7 +556,9 @@ export async function main(argv: string[]): Promise<SwapNodeInstance> {
   const raw = JSON.parse(rawText) as CliRawConfig;
   const parsed = parseRawConfig(raw);
   const overlaid = applyEnvOverlay(parsed);
-  const config = await resolveIdentityConfig(overlaid, raw);
+  const config = installDefaultLogger(
+    await resolveIdentityConfig(overlaid, raw)
+  );
 
   const instance = await startSwapNode(config);
 

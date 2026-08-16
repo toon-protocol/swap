@@ -147,12 +147,37 @@ function poolPrefix(p: { assetCode: string; chain: string }): string {
   return `${p.assetCode}:${p.chain}:`;
 }
 
+/**
+ * One refused rebind candidate (swap#136 — structured, so the numbers reach
+ * the log line and the ILP reject `data` instead of only a prose string).
+ */
+export interface ChannelRebindRefusal {
+  channelId: string;
+  /**
+   * `'unredeemed'` — the candidate's off-chain watermark is ahead of its
+   * on-chain `cumulativePaid`, so rebinding would strand a claim.
+   * `'read_failed'` — the on-chain read threw; fail closed for that candidate.
+   */
+  reason: 'unredeemed' | 'read_failed';
+  /** `'unredeemed'` only: off-chain watermark − on-chain cumulativePaid. */
+  unredeemed?: bigint;
+  /** `'read_failed'` only: the reader's error message. */
+  detail?: string;
+}
+
+/** Human-readable rendering of one refusal (kept byte-stable — see swap#113 tests). */
+export function describeChannelRebindRefusal(r: ChannelRebindRefusal): string {
+  return r.reason === 'unredeemed'
+    ? `${r.channelId}: ${(r.unredeemed ?? 0n).toString()} unredeemed`
+    : `${r.channelId}: on-chain read failed (${r.detail ?? 'unknown'})`;
+}
+
 /** Result of a rebind attempt — see {@link SwapChannelState.reclaimFullyRedeemedChannel}. */
 interface ReclaimResult {
   /** The rebound channel, or `null` when no candidate was safe to rebind. */
   entry: ChannelEntry | null;
-  /** One human-readable reason per refused candidate (empty on success). */
-  refusals: string[];
+  /** One refusal per refused candidate (empty on success). */
+  refusals: ChannelRebindRefusal[];
 }
 
 export class SwapChannelState {
@@ -290,7 +315,7 @@ export class SwapChannelState {
     if (candidateKeys.length === 0) return { entry: null, refusals: [] };
     for (const storedKey of candidateKeys) this.reclaiming.add(storedKey);
     try {
-      const refusals: string[] = [];
+      const refusals: ChannelRebindRefusal[] = [];
       for (const storedKey of candidateKeys) {
         const channelId = this.channels.get(storedKey)?.channelId;
         if (channelId === undefined) continue; // dropped since the scan above
@@ -308,7 +333,7 @@ export class SwapChannelState {
             chain: p.chain,
             err,
           });
-          refusals.push(`${channelId}: on-chain read failed (${detail})`);
+          refusals.push({ channelId, reason: 'read_failed', detail });
           continue; // fail closed for this candidate; try the next
         }
         // The read was in flight across an await: the entry may have been
@@ -318,7 +343,7 @@ export class SwapChannelState {
         if (!entry || !this.boundChannels.has(storedKey)) continue;
         if (onChainCumulativePaid < entry.cumulativeAmount) {
           const unredeemed = entry.cumulativeAmount - onChainCumulativePaid;
-          refusals.push(`${channelId}: ${unredeemed.toString()} unredeemed`);
+          refusals.push({ channelId, reason: 'unredeemed', unredeemed });
           continue;
         }
         this.rebind(bindingKey(p), storedKey);
@@ -357,9 +382,44 @@ export class SwapChannelState {
       const reclaimed = await this.reclaimFullyRedeemedChannel(p);
       entry = reclaimed.entry;
       if (!entry) {
+        const unredeemed = reclaimed.refusals.filter(
+          (r) => r.reason === 'unredeemed'
+        );
+        // swap#136 — the refusal is thrown WITH its numbers, and logged here
+        // as well. Before this the only record of "1000 unredeemed" was the
+        // message string of an exception the SDK swap handler swallowed into
+        // a no-op logger, so a live maker refused every swap in total silence.
+        this.logger?.warn?.('swap.channelState.reserve_refused', {
+          chain: p.chain,
+          assetCode: p.assetCode,
+          senderPubkey: p.senderPubkey,
+          reason:
+            unredeemed.length > 0
+              ? 'channel_unredeemed'
+              : 'no_channel_available',
+          refusals: reclaimed.refusals.map((r) => ({
+            channelId: r.channelId,
+            reason: r.reason,
+            ...(r.unredeemed !== undefined && {
+              unredeemed: r.unredeemed.toString(),
+            }),
+            ...(r.detail !== undefined && { detail: r.detail }),
+          })),
+        });
         throw new SwapWalletError(
           'UNSUPPORTED_CHAIN',
-          buildNoChannelMessage(p.chain, reclaimed.refusals)
+          buildNoChannelMessage(p.chain, reclaimed.refusals),
+          {
+            details: {
+              reason:
+                unredeemed.length > 0
+                  ? 'channel_unredeemed'
+                  : 'no_channel_available',
+              chain: p.chain,
+              assetCode: p.assetCode,
+              refusals: reclaimed.refusals,
+            },
+          }
         );
       }
     }
@@ -466,12 +526,15 @@ export class SwapChannelState {
 }
 
 /** Issue #113 — actionable UNSUPPORTED_CHAIN message for a failed reserve(). */
-function buildNoChannelMessage(chain: string, refusals: string[]): string {
+function buildNoChannelMessage(
+  chain: string,
+  refusals: ChannelRebindRefusal[]
+): string {
   const base = `No channel provisioned for sender on ${chain}`;
   if (refusals.length === 0) return base;
   return (
     `${base} — ${refusals.length} bound channel(s) are not safe to rebind ` +
-    `(${refusals.join('; ')}). Wait for the sender to redeem, ` +
+    `(${refusals.map(describeChannelRebindRefusal).join('; ')}). Wait for the sender to redeem, ` +
     `cooperativeClose the channel, or provision another channel in ` +
     `config.channels.`
   );

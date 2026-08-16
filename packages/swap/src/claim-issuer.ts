@@ -235,8 +235,12 @@ export class MultiChainClaimIssuer implements ClaimIssuer {
       //    exhausted — Story 12.3's handler maps this to ILP T04.
       this.inventory.debit(targetAsset, targetChain, targetAmount);
       return {
+        // swap#136: `refundDebit`, NOT `credit`. `credit` is the operator
+        // refill (available += n AND total += n); using it to unwind a
+        // failed issuance leaked `total` upward on every failure. The
+        // rollback must restore exactly what `debit` took: `available`.
         undo: () =>
-          this.inventory.credit(targetAsset, targetChain, targetAmount),
+          this.inventory.refundDebit(targetAsset, targetChain, targetAmount),
       };
     });
     return result;
@@ -339,6 +343,20 @@ export class MultiChainClaimIssuer implements ClaimIssuer {
       });
     } catch (err) {
       hold.undo();
+      // swap#136 — this catch used to be completely silent: it unwound the
+      // hold and rethrew into the SDK swap handler, which collapsed the
+      // error into `T00 Internal error` and logged it to a NO-OP logger.
+      // A live maker refused every swap after the first one and wrote not a
+      // single line. The reason (`<channelId>: <n> unredeemed`) is already
+      // on the error — log it here, at the boundary that owns it.
+      this.logger?.warn?.('swap.issueClaim.channel_reserve_failed', {
+        chain: targetChain,
+        asset: targetAsset,
+        senderPubkey,
+        reason: (err as { details?: { reason?: string } })?.details?.reason,
+        code: (err as { code?: string })?.code,
+        err: err instanceof Error ? err.message : String(err),
+      });
       throw err;
     }
 

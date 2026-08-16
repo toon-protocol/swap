@@ -248,8 +248,40 @@ export class SwapInventory {
   }
 
   /**
+   * swap#136 — exact inverse of {@link debit}: restore `amount` to
+   * `available` ONLY, leaving `total` untouched.
+   *
+   * This is the rollback of a failed legacy issuance, NOT an operator refill.
+   * {@link credit} adds NEW capital and therefore raises `total` as well; using
+   * it as the unwind ratcheted `total` upward on every failed swap (observed
+   * live: a configured 15 000 000 inventory advertising 15 001 000 after one
+   * failure, since `total` is what kind:10032 advertises — see
+   * `swap-node.ts`'s peer-info builder). A failed swap must be a no-op on
+   * BOTH buckets.
+   *
+   * Deliberately tolerant of a missing entry (a debit always creates/finds
+   * one, so this cannot legitimately happen — but a rollback must never
+   * throw over the error it is unwinding).
+   */
+  refundDebit(assetCode: string, chain: string, amount: bigint): void {
+    if (amount <= 0n) {
+      throw new SwapInventoryError(
+        'UNKNOWN_PAIR',
+        'Refund amount must be positive'
+      );
+    }
+    const entry = this.entries.get(key(assetCode, chain));
+    if (!entry) return;
+    entry.available += amount;
+    entry.updatedAt = this.clock();
+  }
+
+  /**
    * Credit `amount` to `(assetCode, chain).available` and `.total`.
    * Creates the entry if missing. Synchronous — atomic under concurrent use.
+   *
+   * Operator refill / new capital only. To unwind a failed issuance use
+   * {@link refundDebit} — `credit` would inflate `total` (swap#136).
    */
   credit(assetCode: string, chain: string, amount: bigint): void {
     if (amount <= 0n) {

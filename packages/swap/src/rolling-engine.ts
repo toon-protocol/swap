@@ -89,6 +89,7 @@ import type {
   MultiChainClaimIssuer,
   RollingIssueClaimResult,
 } from './claim-issuer.js';
+import { classifyClaimIssuerError } from './claim-refusal.js';
 import {
   buildStaleRateReject,
   StaleRateError,
@@ -917,20 +918,40 @@ export class RollingSwapEngine {
         reservationTtlMs: legBExpiryMs - now + this.#reservationGraceMs,
       });
     } catch (err) {
-      const code =
+      if (
         (err as { code?: string }).code === 'INSUFFICIENT_INVENTORY' ||
         /insufficient/i.test(err instanceof Error ? err.message : '')
-          ? 'T04'
-          : 'T00';
+      ) {
+        this.#logger.warn?.('swap.rolling.insufficient_liquidity', {
+          pair: pairKey(pair),
+          targetAmount: targetAmount.toString(),
+          err: err instanceof Error ? err.message : String(err),
+        });
+        return buildRollingReject({
+          code: 'T04',
+          semantic: 'insufficient_funds',
+          message: 'insufficient liquidity',
+          reason: ROLLING_REJECT_REASONS.INSUFFICIENT_LIQUIDITY,
+        });
+      }
+      // swap#136 — same defect the legacy path had: this collapsed every
+      // diagnosable issuance failure (notably "<channelId>: <n> unredeemed")
+      // into an unlogged, unactionable `T00 claim issuance failed`. Classify
+      // it, log it, and put the reason on the wire.
+      const refusal = classifyClaimIssuerError(err);
+      this.#logger[refusal.level]?.('swap.rolling.claim_refused', {
+        pair: pairKey(pair),
+        reason: refusal.reason,
+        ilpCode: refusal.code,
+        clientMessage: refusal.message,
+        ...refusal.detail,
+      });
       return buildRollingReject({
-        code,
-        semantic: code === 'T04' ? 'insufficient_funds' : 'internal_error',
-        message:
-          code === 'T04' ? 'insufficient liquidity' : 'claim issuance failed',
-        reason:
-          code === 'T04'
-            ? ROLLING_REJECT_REASONS.INSUFFICIENT_LIQUIDITY
-            : ROLLING_REJECT_REASONS.CLAIM_ISSUE_FAILED,
+        code: refusal.code,
+        semantic: refusal.semantic,
+        message: refusal.message,
+        reason: refusal.reason,
+        detail: refusal.detail,
       });
     }
 
