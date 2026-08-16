@@ -58,6 +58,16 @@
  *                            `identityAutogen: true`.
  *   SWAP_IDENTITY_FILE     — overrides the identity-file path used by
  *                            SWAP_AUTOGEN_IDENTITY (default: see above).
+ *   SWAP_ADMIN_TOKEN       — issue #138: operator token for the
+ *                            `/admin/inventory/*` WRITE routes on the BLS
+ *                            server (Authorization: Bearer <token>, or
+ *                            X-Swap-Admin-Token). OPTIONAL: unset means the
+ *                            writes are DISABLED (503), never open. The read
+ *                            route `GET /admin/inventory` needs no token and
+ *                            is protected by the box nginx `^~ /admin` 404.
+ *   SWAP_RECONCILE_INTERVAL_MS — issue #138: cadence of the chain-truth
+ *                            inventory reconcile (default 60000; 0 disables
+ *                            the periodic pass, boot pass still runs).
  *
  * NOTE on maxRateAge (swap#48): the staleness bound applies to the maker's
  * own rate-feed ticks, so it REQUIRES a `rateProvider` returning timestamped
@@ -163,6 +173,9 @@ interface CliRawConfig {
   // Issue #126 — config-file equivalent of SWAP_AUTOGEN_IDENTITY. Consumed
   // entirely by resolveIdentityConfig(); never forwarded to SwapNodeConfig.
   identityAutogen?: boolean;
+  // Issue #138 — operator surface. Both optional; env wins.
+  adminToken?: string;
+  reconcileIntervalMs?: number;
 }
 
 function toBigInt(v: unknown): bigint {
@@ -281,6 +294,10 @@ function parseRawConfig(raw: CliRawConfig): SwapNodeConfig {
   if (raw.maxRateAge !== undefined) {
     cfg.maxRateAge = raw.maxRateAge as SwapNodeConfig['maxRateAge'];
   }
+  if (raw.adminToken) cfg.adminToken = raw.adminToken;
+  if (raw.reconcileIntervalMs !== undefined) {
+    cfg.reconcileIntervalMs = raw.reconcileIntervalMs;
+  }
   return cfg;
 }
 
@@ -368,6 +385,19 @@ function applyEnvOverlay(cfg: SwapNodeConfig): SwapNodeConfig {
     out.rateProvider = createHttpRateProvider(env['SWAP_RATE_URL'], {
       ...(timeoutMs !== undefined && { timeoutMs }),
     });
+  }
+  // Issue #138 — operator surface. BOTH are optional: a required key would
+  // crash-loop every `:release`-tracking deployment on its next auto-deploy
+  // (swap#134). No token ⇒ `/admin/inventory/*` writes answer 503, closed.
+  if (env['SWAP_ADMIN_TOKEN']) out.adminToken = env['SWAP_ADMIN_TOKEN'];
+  if (env['SWAP_RECONCILE_INTERVAL_MS']) {
+    const ms = Number(env['SWAP_RECONCILE_INTERVAL_MS']);
+    if (!Number.isFinite(ms) || !Number.isInteger(ms) || ms < 0) {
+      throw new Error(
+        'SWAP_RECONCILE_INTERVAL_MS must be a non-negative integer (ms; 0 disables the periodic pass)'
+      );
+    }
+    out.reconcileIntervalMs = ms;
   }
   return out;
 }

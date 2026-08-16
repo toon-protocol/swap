@@ -1,13 +1,18 @@
 /**
  * swap#136 defect 2 — a FAILED swap must be a no-op on the inventory.
  *
- * `issueClaim()`'s legacy hold is `inventory.debit()` (available −= n).
- * Its unwind used `inventory.credit()`, which is the operator-REFILL
+ * `issueClaim()`'s legacy hold was `inventory.debit()` (available −= n) and
+ * its unwind used `inventory.credit()`, which is the operator-REFILL
  * primitive: available += n AND **total += n**. So every failed swap
  * ratcheted `total` upward — and `total` is what the maker advertises in
  * kind:10032 (`swap-node.ts`'s peer-info builder) and reports as `inventory`
  * on `/health`. Observed live: a maker configured with 15 000 000 reporting
  * 15 001 000 after one failed swap.
+ *
+ * Issue #138 then replaced the permanent debit with a window reservation on
+ * this path too, so the unwind is `releaseReservation` — but the invariant
+ * these tests pin is the same one and is what keeps it from regressing under
+ * either mechanism.
  *
  * The assertion here is deliberately "byte-identical to before the attempt"
  * across BOTH buckets, on every failure mode the issuer has.

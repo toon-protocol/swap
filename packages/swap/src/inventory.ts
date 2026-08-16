@@ -5,22 +5,43 @@
  * therefore atomic w.r.t. concurrent `issueClaim` callers under `Promise.all`.
  * See Dev Notes "Microtask atomicity argument" in the story doc.
  *
- * ## Two capital models on one surface (issue #49)
+ * ## ONE capital model on one surface (issue #49, unified by issue #138)
  *
- * - **Legacy (gift-wrap path): permanent debit/credit.** `debit` consumes
- *   `available` for good; `credit` is the operator refill / rollback.
- *   Unchanged since Story 12.4.
- * - **Rolling path (toon-meta#145 / rolling-swap.md §8): the in-flight
- *   window reservation lifecycle.** A fill packet `reserve`s its leg-B
- *   amount while the packet is in flight, then either
- *   - **commits** (leg B fulfilled → the amount becomes *unsettled channel
- *     liability*, shrunk later by on-chain settlement confirmations via
- *     {@link recordSettlement}), or
+ * Both claim paths — legacy gift-wrap and rolling coupled-leg — now use the
+ * **in-flight window reservation lifecycle** (toon-meta#145 /
+ * rolling-swap.md §8). A claim `reserve`s its leg-B amount while it is being
+ * issued, then either
+ *   - **commits** (claim handed to the counterparty → the amount becomes
+ *     *unsettled channel liability*, shrunk later when the chain shows the
+ *     claim redeemed — {@link recordChainRedemption}), or
  *   - **releases** (reject / rollback / TTL expiry → capacity returns).
  *
- *   Nothing on the rolling path ever debits `available` permanently: what
- *   was a notional-sized pre-fund becomes working capital cycling through
- *   settlement (spec §8 "settle-and-recycle replaces manual refill").
+ * Nothing ever debits `available` permanently on either path: what was a
+ * notional-sized pre-fund becomes working capital cycling through settlement
+ * (spec §8 "settle-and-recycle replaces manual refill").
+ *
+ * ### Why the legacy permanent debit was removed (issue #138)
+ *
+ * {@link debit} shrinks `available` for good and the legacy path never
+ * populated `unsettled`, so {@link recordSettlement} — the only recycler —
+ * could never give the capital back. A legacy maker's `available` therefore
+ * ratcheted monotonically toward zero over its lifetime and then refused
+ * every request with T04 *no matter how faithfully its counterparties
+ * redeemed on chain*, with no in-process way to restore it. `debit` /
+ * {@link credit} survive as operator-facing primitives (manual write-down /
+ * genuinely new capital) but are no longer on any issuance path.
+ *
+ * ### Healing a maker that already burned inventory
+ *
+ * Deployments upgrading from the permanent-debit build carry a burn:
+ * `total − available` is exactly the sum of past legacy debits (config seeds
+ * `available === total`, and `credit` raises both). Those debits correspond
+ * one-for-one to issued claims, so {@link recordChainRedemption} recycles the
+ * redeemed portion back into `available` — bounded twice over: by the
+ * newly-redeemed delta the chain reports, and by `total` (a recycle can never
+ * push `available` above `total`). Value that was debited but is still
+ * unredeemed stays blocked, which is the same capacity block the unified
+ * model expresses as `unsettled`.
  *
  * ## Capacity formula (spec §8)
  *
@@ -31,10 +52,12 @@
  *
  * `windowBudget` is the operator-advertised in-flight ceiling (δ_max·W_max·R
  * plus a settlement-latency buffer). It is clamped to `available` so a
- * misconfigured budget can never advertise capital the maker does not hold,
- * and legacy debits (which shrink `available`) shrink rolling capacity too —
- * both paths compete for the same real pool. Without an explicit budget the
- * ceiling degrades to `available` (no worse than the pre-#49 notional check).
+ * misconfigured budget can never advertise capital the maker does not hold.
+ * Both paths draw on this one formula against the same real pool (issue
+ * #138), so a legacy claim and a rolling fill compete for identical capacity.
+ * Without an explicit budget the ceiling degrades to `available` — which is
+ * exactly the threshold the legacy `debit` used to enforce, so removing the
+ * permanent debit did not loosen any refusal.
  *
  * ## Reservation TTLs
  *
@@ -54,7 +77,7 @@ export interface SwapInventoryBalance {
   chain: string;
   available: bigint;
   total: bigint;
-  /** Committed-but-unsettled channel liability (rolling path). */
+  /** Committed-but-unsettled channel liability (both claim paths, issue #138). */
   unsettled: bigint;
   /** Operator-configured in-flight window ceiling (absent → `available`). */
   windowBudget?: bigint;
@@ -147,6 +170,44 @@ function parseKey(k: string): { assetCode: string; chain: string } {
   return { assetCode: k.slice(0, i), chain: k.slice(i + 1) };
 }
 
+/**
+ * Issue #138 — what one on-chain redemption watermark did (or would do) to a
+ * pool. All three numbers are for the newly-observed delta only.
+ */
+export interface ChainRedemptionResult {
+  /** Newly redeemed since this channel's last recorded watermark. */
+  delta: bigint;
+  /** Unsettled channel liability released by `delta`. */
+  liabilityReduced: bigint;
+  /**
+   * `available` restored: the part of `delta` that no `unsettled` liability
+   * accounted for (⇒ a pre-#138 permanent legacy debit), capped so
+   * `available` never exceeds `total`.
+   */
+  availableRestored: bigint;
+}
+
+/** Fresh zero result — never a shared instance a caller could mutate. */
+function noRedemption(): ChainRedemptionResult {
+  return { delta: 0n, liabilityReduced: 0n, availableRestored: 0n };
+}
+
+/** Pure delta math shared by the apply and preview paths. */
+function computeRedemption(
+  entry: InternalEntry,
+  lastWatermark: bigint,
+  redeemedCumulative: bigint
+): ChainRedemptionResult {
+  if (redeemedCumulative <= lastWatermark) return noRedemption();
+  const delta = redeemedCumulative - lastWatermark;
+  const liabilityReduced = delta < entry.unsettled ? delta : entry.unsettled;
+  const unabsorbed = delta - liabilityReduced;
+  const headroom =
+    entry.total > entry.available ? entry.total - entry.available : 0n;
+  const availableRestored = unabsorbed < headroom ? unabsorbed : headroom;
+  return { delta, liabilityReduced, availableRestored };
+}
+
 function newReservationId(): string {
   const c = globalThis.crypto as { randomUUID?: () => string } | undefined;
   if (c && typeof c.randomUUID === 'function') return c.randomUUID();
@@ -217,10 +278,12 @@ export class SwapInventory {
    * Atomically debit `amount` from `(assetCode, chain).available`.
    * Synchronous — no `await` — so concurrent callers see a consistent view.
    *
-   * LEGACY PATH ONLY (permanent spend). The rolling engine uses
-   * {@link reserve} / {@link commitReservation} / {@link releaseReservation}
-   * instead — issue #49 AC: no permanent-debit path remains on the
-   * rolling-engine flow.
+   * OPERATOR PRIMITIVE ONLY (permanent write-down). **No issuance path calls
+   * this** — as of issue #138 both the legacy and the rolling flow use
+   * {@link reserve} / {@link commitReservation} / {@link releaseReservation},
+   * so every hold is recyclable by {@link recordChainRedemption}. A permanent
+   * debit is unrecoverable without an operator credit and is what made a
+   * legacy maker degrade to permanently unusable.
    */
   debit(assetCode: string, chain: string, amount: bigint): void {
     if (amount <= 0n) {
@@ -251,13 +314,18 @@ export class SwapInventory {
    * swap#136 — exact inverse of {@link debit}: restore `amount` to
    * `available` ONLY, leaving `total` untouched.
    *
-   * This is the rollback of a failed legacy issuance, NOT an operator refill.
+   * This is the rollback of a permanent {@link debit}, NOT an operator refill.
    * {@link credit} adds NEW capital and therefore raises `total` as well; using
    * it as the unwind ratcheted `total` upward on every failed swap (observed
    * live: a configured 15 000 000 inventory advertising 15 001 000 after one
    * failure, since `total` is what kind:10032 advertises — see
    * `swap-node.ts`'s peer-info builder). A failed swap must be a no-op on
    * BOTH buckets.
+   *
+   * Issue #138 took the permanent debit off the issuance path entirely, so
+   * the failed-swap unwind is now `releaseReservation` and this method is —
+   * like `debit` itself — an operator primitive: the way to undo a manual
+   * write-down without inventing capital.
    *
    * Deliberately tolerant of a missing entry (a debit always creates/finds
    * one, so this cannot legitimately happen — but a rollback must never
@@ -431,13 +499,18 @@ export class SwapInventory {
   }
 
   /**
-   * Apply an on-chain settlement confirmation: liability shrinks by the
+   * Apply a *reported* settlement confirmation: liability shrinks by the
    * watermark delta (`cumulativeAmount − lastSettled(channel)`), clamped to
    * the current unsettled bucket. Monotone per channel — a stale or replayed
    * confirmation (cumulative ≤ last settled) is a no-op returning 0n.
    *
    * Freed liability recycles into window capacity automatically
    * (`free = budget − inFlight − unsettled`): spec §8 settle-and-recycle.
+   *
+   * This entrypoint does NOT restore `available` (issue #138): its input is a
+   * `SettlementEvent` the node did not verify against the chain, so it may
+   * only free capacity the node itself booked as liability. Use
+   * {@link recordChainRedemption} for watermarks read from the chain.
    */
   recordSettlement(p: {
     assetCode: string;
@@ -445,6 +518,82 @@ export class SwapInventory {
     channelId: string;
     cumulativeAmount: bigint;
   }): bigint {
+    return this.applyRedemption(p, false).liabilityReduced;
+  }
+
+  /**
+   * Issue #138 — apply a settlement watermark the node read from the CHAIN
+   * ITSELF. Same monotone per-channel delta as {@link recordSettlement}, plus
+   * the legacy-burn recycle: any part of the newly-redeemed delta that is NOT
+   * absorbed by `unsettled` must have been taken out of `available` by a
+   * permanent {@link debit} (the pre-#138 legacy path), so it is restored to
+   * `available` — capped at `total`, which a recycle can never exceed.
+   *
+   * The two caps make over-crediting structurally impossible:
+   *   1. only value the chain reports as newly redeemed is ever recycled
+   *      (monotone per-channel watermark ⇒ no replay, no double count);
+   *   2. `available` can never rise above `total`, so the recycle can never
+   *      return more than was actually debited.
+   *
+   * SAFETY: pass ONLY a `redeemedCumulative` obtained by reading the chain
+   * (`ChannelOnChainReader`). A counterparty-asserted settlement must go
+   * through {@link recordSettlement}, which releases liability but never
+   * restores `available`.
+   */
+  recordChainRedemption(p: {
+    assetCode: string;
+    chain: string;
+    channelId: string;
+    /** LIVE on-chain `cumulativePaid` for this channel. */
+    redeemedCumulative: bigint;
+  }): ChainRedemptionResult {
+    return this.applyRedemption(
+      {
+        assetCode: p.assetCode,
+        chain: p.chain,
+        channelId: p.channelId,
+        cumulativeAmount: p.redeemedCumulative,
+      },
+      true
+    );
+  }
+
+  /**
+   * What {@link recordChainRedemption} WOULD do, without mutating anything —
+   * the corroboration check behind the operator credit surface (a credit the
+   * chain does not corroborate must be refused, not clamped to zero after
+   * the watermark has already moved).
+   */
+  previewChainRedemption(p: {
+    assetCode: string;
+    chain: string;
+    channelId: string;
+    redeemedCumulative: bigint;
+  }): ChainRedemptionResult {
+    const k = key(p.assetCode, p.chain);
+    const entry = this.entries.get(k);
+    if (!entry) {
+      throw new SwapInventoryError(
+        'INVENTORY_NOT_INITIALIZED',
+        `Inventory not initialized for ${k}`
+      );
+    }
+    return computeRedemption(
+      entry,
+      this.settledWatermarks.get(`${k}:${p.channelId}`) ?? 0n,
+      p.redeemedCumulative
+    );
+  }
+
+  private applyRedemption(
+    p: {
+      assetCode: string;
+      chain: string;
+      channelId: string;
+      cumulativeAmount: bigint;
+    },
+    restoreAvailable: boolean
+  ): ChainRedemptionResult {
     const k = key(p.assetCode, p.chain);
     const entry = this.entries.get(k);
     if (!entry) {
@@ -455,13 +604,15 @@ export class SwapInventory {
     }
     const wmKey = `${k}:${p.channelId}`;
     const last = this.settledWatermarks.get(wmKey) ?? 0n;
-    if (p.cumulativeAmount <= last) return 0n;
+    const outcome = computeRedemption(entry, last, p.cumulativeAmount);
+    if (outcome.delta === 0n) return outcome;
     this.settledWatermarks.set(wmKey, p.cumulativeAmount);
-    const delta = p.cumulativeAmount - last;
-    const reduced = delta < entry.unsettled ? delta : entry.unsettled;
-    entry.unsettled -= reduced;
+    entry.unsettled -= outcome.liabilityReduced;
+    if (restoreAvailable) {
+      entry.available += outcome.availableRestored;
+    }
     entry.updatedAt = this.clock();
-    return reduced;
+    return restoreAvailable ? outcome : { ...outcome, availableRestored: 0n };
   }
 
   /** Three-bucket window view per (assetCode, chain) — spec §8 / health. */

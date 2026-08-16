@@ -71,6 +71,8 @@ inject the secret from a mount rather than baking it into the config file.
 | `SWAP_AUTOGEN_IDENTITY` | `1`/`true` (issue #126) — overlay for `identityAutogen`. |
 | `SWAP_IDENTITY_FILE` | Overrides the self-generated identity file path (default: beside `statePath`, or the cwd when `statePath` is unset). |
 | `SWAP_LOG_LEVEL` | swap#136 — verbosity of the JSON-line logger the CLI installs: `debug`\|`info`\|`warn`\|`error`\|`silent` (default `info`). Optional; an unrecognised value degrades to the default. |
+| `SWAP_ADMIN_TOKEN` | **Issue #138.** Operator token for the `/admin/inventory/*` **write** routes. Optional — unset means the writes are refused with 503, never left open. |
+| `SWAP_RECONCILE_INTERVAL_MS` | **Issue #138.** Cadence of the chain-truth inventory reconcile (default `60000`; `0` disables the periodic pass — the boot pass and the admin routes still work). |
 
 Refusals show up in `docker logs` as one JSON object per line — grep
 `swap.claim.refused` for a swap the maker turned away, and `reason` for why
@@ -86,7 +88,42 @@ the kind:10032 fields — it *does* have an override, `TOON_ILP_ADDRESS`.)
 - `btpServerPort` (config field, no default in standalone mode — the
   maker.mjs wiring uses `3400`): BTP WebSocket server. The image declares no
   `EXPOSE`; publish it with `-p` to make the maker directly dialable.
-- `blsPort`: `/health` HTTP.
+- `blsPort`: `/health` + `/admin/inventory*` HTTP.
+
+## Inventory recycling & the operator surface (issue #138)
+
+Every issued claim is booked as **unsettled channel liability**, not as a
+permanent debit, and the capacity comes back when the CHAIN shows the claim
+redeemed. The node reads its own channels' on-chain `cumulativePaid` at boot
+and every `SWAP_RECONCILE_INTERVAL_MS` and recycles what it finds, so a maker
+whose capacity is held by already-redeemed claims heals itself with no
+operator action and no redeploy. Reconciliation needs an EVM `chainProviders`
+entry (the same one the rebind check uses); without it the node logs
+`swap.reconcile.disabled` and `GET /admin/inventory` reports
+`reconciler.enabled: false`.
+
+| Route | Auth | Purpose |
+| --- | --- | --- |
+| `GET /admin/inventory` | none | Per-pool `available`/`total`/`unsettled`/`inFlight`/`free`, per-channel issued-vs-redeemed-on-chain, and a `blockedReason` naming what is holding the capacity when `free` is 0. |
+| `POST /admin/inventory/reconcile` | token | Force a chain-truth pass now; returns what it recycled. |
+| `POST /admin/inventory/credit` | token | `{ assetCode, chain, amount? }` — recycle burned capital. Applies **only** what an on-chain redemption corroborates: an uncorroborated request (or one larger than the chain backs) is refused `409` with nothing applied. |
+
+**Protection.** Two layers:
+
+1. The routes live under `/admin`, which the fleet's box nginx already
+   answers with 404 from the internet (`^~ /admin`), the same rule that
+   covers the connector's admin surface. Reach them from the box itself
+   (`curl http://127.0.0.1:<blsPort>/admin/inventory`) or over the private
+   network.
+2. Writes require `SWAP_ADMIN_TOKEN` in `Authorization: Bearer <token>` or
+   `X-Swap-Admin-Token`, compared in constant time. **No token configured =
+   writes disabled (503)**, never open. The token is optional config on
+   purpose: a newly *required* key crash-loops every `:release`-tracking
+   maker on its next auto-deploy (issue #134).
+
+`GET` is unauthenticated because it discloses strictly less than the
+already-unauthenticated `GET /health`, and an operator diagnosing a stalled
+maker should not be blocked on a secret they may not have set.
 
 ## Runtime user & filesystem
 
