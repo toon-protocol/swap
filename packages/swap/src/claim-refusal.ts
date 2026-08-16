@@ -16,15 +16,22 @@
  *
  * Live on devnet the thrown message was a perfectly actionable
  * `0x0124a370…: 1000 unredeemed` (from `channel-state.ts`'s `reserve()`), and
- * the client saw `{"code":"T00","message":"Internal error"}`. The SDK is a
- * pinned dependency, so this module reclaims both halves on our side:
+ * the client saw `{"code":"T00","message":"Internal error"}`.
  *
- *   - **logs** — the issuer wrapper below logs the classified refusal with a
- *     real logger before the SDK ever sees the error;
- *   - **wire** — the handler wrapper rewrites the SDK's generic
- *     `T00 Internal error` into the classified code/message/`data`, using the
- *     refusal captured for *that packet* (an `AsyncLocalStorage` slot, so
- *     concurrent `handlePacket` calls cannot cross-contaminate).
+ * ## The seam (`@toon-protocol/sdk@3.2.0`, toon#205)
+ *
+ * The SDK now offers `CreateSwapHandlerConfig.onFailure`: a synchronous
+ * classifier called *before* the handler rejects on any thrown failure, handed
+ * the thrown value verbatim, the packet context, and the `defaultRejection` it
+ * would otherwise emit. Returning a `SwapHandlerRejection` replaces the wire
+ * code/message and may attach `data` and `rejectReason`.
+ *
+ * `createClaimRefusalMapper()` below is that classifier, and it does both
+ * halves in one place — it logs the classified refusal AND returns the reject
+ * that goes on the wire. It replaced (swap#146) the pre-3.2.0 workaround: an
+ * `AsyncLocalStorage` slot plus a pair of wrappers that instrumented the claim
+ * issuer to capture the throw and then sniffed the handler's response for the
+ * literal `T00`/`Internal error` to know when to rewrite it.
  *
  * ## Code choices
  *
@@ -40,25 +47,27 @@
  * | `no_channel_available` | F99  | `application_error` | no channel is provisioned for this sender at all — retrying now cannot help; pick another maker |
  * | `persist_failed`       | T00  | `internal_error`    | genuinely internal and transient (disk), but now says so |
  * | `signing_failed`       | T00  | `internal_error`    | genuinely internal, but now says so                      |
- * | `claim_encrypt_failed` | T00  | `internal_error`    | see the SDK note below                                   |
+ * | `claim_encrypt_failed` | T00  | `internal_error`    | the SDK's `encrypt` stage — see below                    |
  *
  * Every refusal also carries base64-JSON `data` whose `reason` field is the
  * authoritative discriminator — the same contract `buildStaleRateReject()`
  * and `buildRollingReject()` already publish.
  *
- * ## Still owed by the SDK
+ * ## The encrypt stage is now observed, not inferred
  *
- * `swap_handler.encrypt_failed` (the SDK's *other* `T00 Internal error`)
- * discards its error object entirely — it never reaches a caller-supplied
- * seam, so no wrapper on this side can recover the message. What we can do,
- * and do below, is *identify* it: a T00/`Internal error` from the SDK handler
- * after a claim was issued successfully can only have come from the encrypt
- * branch. We log that and name it on the wire. The real fix — surfacing the
- * error and rejecting with something better than `T00 Internal error` —
- * belongs in `packages/sdk/src/swap-handler.ts` upstream.
+ * `swap_handler.encrypt_failed` is the SDK's *other* `T00 Internal error`, and
+ * pre-3.2.0 it discarded its error object entirely. swap#137 could only
+ * *infer* it: a blanket `T00 Internal error` from the handler after a claim
+ * was issued successfully can have come from nowhere else. That inference is
+ * gone. The SDK now hands us `stage: 'encrypt'` with `context.claimIssued:
+ * true`, `context.claimId`, and the thrown value itself, so the refusal names
+ * the real failure instead of deducing its existence.
  */
 
-import { AsyncLocalStorage } from 'node:async_hooks';
+import type {
+  SwapHandlerFailure,
+  SwapHandlerRejection,
+} from '@toon-protocol/sdk';
 
 import type { SwapNodeLogger } from './swap-node.js';
 
@@ -140,8 +149,8 @@ const SHAPES: Record<ClaimRefusalReason, RefusalShape> = {
     code: 'T00',
     semantic: 'internal_error',
     level: 'error',
-    describe: () =>
-      'the maker issued the claim but could not encrypt it to the sender key from the gift wrap',
+    describe: (d) =>
+      `the maker issued the claim but could not encrypt it to the sender key from the gift wrap${d['err'] ? `: ${String(d['err'])}` : ''}`,
   },
   [CLAIM_REFUSAL_REASONS.CLAIM_ISSUE_FAILED]: {
     code: 'T00',
@@ -232,10 +241,6 @@ export function classifyClaimIssuerError(err: unknown): ClaimRefusal {
   });
 }
 
-/** The SDK's generic swallow-everything reject, verbatim. */
-const SDK_GENERIC_REJECT_MESSAGE = 'Internal error';
-const SDK_GENERIC_REJECT_CODE = 'T00';
-
 /** Reject-response shape the connector's PaymentHandlerAdapter consumes. */
 export interface ClaimRefusalReject {
   accept: false;
@@ -265,108 +270,82 @@ export function buildClaimRefusalReject(
 }
 
 // ---------------------------------------------------------------------------
-// Per-packet capture + the two wrappers
+// The SDK seam
 // ---------------------------------------------------------------------------
 
-interface CaptureSlot {
-  refusal?: ClaimRefusal;
-  issued: boolean;
-}
+/** The SDK's opaque catch-all default — the only reject we take over. */
+const SDK_GENERIC_REJECT_CODE = 'T00';
 
-/** Minimal structural view of the SDK's `ClaimIssuer` (avoids a value import). */
-export interface IssueClaimLike<P, R> {
-  issueClaim(params: P): Promise<R>;
-}
-
-export interface ClaimRefusalDiagnostics {
-  /**
-   * Wrap the claim issuer handed to `createSwapHandler`. Logs the classified
-   * refusal and records it for the in-flight packet, then rethrows unchanged
-   * so the SDK's own `INSUFFICIENT_INVENTORY` handling is untouched.
-   */
-  instrument<P, R>(issuer: IssueClaimLike<P, R>): IssueClaimLike<P, R>;
-  /**
-   * Wrap the SDK handler so its generic `T00 Internal error` is replaced by
-   * the refusal captured for that same packet.
-   */
-  wrap<C, T>(handler: (ctx: C) => Promise<T>): (ctx: C) => Promise<T>;
-}
-
-export function createClaimRefusalDiagnostics(options: {
+/**
+ * Build the `CreateSwapHandlerConfig.onFailure` classifier (SDK ≥ 3.2.0).
+ *
+ * Synchronous by contract — it runs on the reject path of a live packet — and
+ * total: any stage it cannot improve on returns `undefined`, leaving the SDK's
+ * own `defaultRejection` exactly as it was.
+ *
+ * What it claims, and what it deliberately does not:
+ *
+ * - **`issuer`** — classifies whatever `issueClaim()` threw, and logs it.
+ *   `INSUFFICIENT_INVENTORY` is left entirely to the SDK (it already maps to
+ *   `T04 Insufficient liquidity` and logs at warn), and so is any other
+ *   already-classified failure — signalled by `defaultRejection.code !== 'T00'`
+ *   — so that contract stays byte-identical for existing senders.
+ * - **`encrypt`** — `claimIssued` is `true` here by construction: the claim
+ *   exists and is now stranded. The thrown value comes with it, so the refusal
+ *   names the real encryption failure.
+ * - **`rate_provider` / `rate_conversion`** — untouched. Rate freshness is
+ *   already refused upstream by `RateFreshnessGuard` (`rate-staleness.ts`)
+ *   with its own `T99 stale_rate` contract, and the SDK's own defaults for
+ *   these two stages already carry a specific message.
+ */
+export function createClaimRefusalMapper(options: {
   logger?: SwapNodeLogger;
-}): ClaimRefusalDiagnostics {
-  const store = new AsyncLocalStorage<CaptureSlot>();
+}): (failure: SwapHandlerFailure) => SwapHandlerRejection | undefined {
   const logger = options.logger;
 
-  return {
-    instrument<P, R>(issuer: IssueClaimLike<P, R>): IssueClaimLike<P, R> {
-      return {
-        issueClaim: async (params: P): Promise<R> => {
-          try {
-            const result = await issuer.issueClaim(params);
-            const slot = store.getStore();
-            if (slot) slot.issued = true;
-            return result;
-          } catch (err) {
-            // Leave the SDK's own liquidity contract alone.
-            if (
-              (err as { code?: string } | undefined)?.code !==
-              'INSUFFICIENT_INVENTORY'
-            ) {
-              const refusal = classifyClaimIssuerError(err);
-              const slot = store.getStore();
-              if (slot) slot.refusal = refusal;
-              logger?.[refusal.level]?.('swap.claim.refused', {
-                reason: refusal.reason,
-                ilpCode: refusal.code,
-                clientMessage: refusal.message,
-                ...(jsonSafe(refusal.detail) as Record<string, unknown>),
-              });
-            }
-            throw err;
-          }
-        },
-      };
-    },
+  const report = (refusal: ClaimRefusal, stage: string): void => {
+    logger?.[refusal.level]?.('swap.claim.refused', {
+      reason: refusal.reason,
+      ilpCode: refusal.code,
+      clientMessage: refusal.message,
+      stage,
+      ...(jsonSafe(refusal.detail) as Record<string, unknown>),
+    });
+  };
 
-    wrap<C, T>(handler: (ctx: C) => Promise<T>): (ctx: C) => Promise<T> {
-      return async (ctx: C): Promise<T> => {
-        const slot: CaptureSlot = { issued: false };
-        const result = await store.run(slot, () => handler(ctx));
-        const r = result as unknown as {
-          accept?: boolean;
-          code?: string;
-          message?: string;
-        };
-        if (
-          r?.accept !== false ||
-          r.code !== SDK_GENERIC_REJECT_CODE ||
-          r.message !== SDK_GENERIC_REJECT_MESSAGE
-        ) {
-          return result;
-        }
-        if (slot.refusal) {
-          return buildClaimRefusalReject(slot.refusal) as unknown as T;
-        }
-        if (slot.issued) {
-          // Nothing threw out of `issueClaim` and the claim was produced, so
-          // the SDK's only remaining `T00 Internal error` branch is
-          // `swap_handler.encrypt_failed` — whose error object the SDK
-          // discards, hence the inference. See this file's header.
-          const refusal = buildRefusal(
-            CLAIM_REFUSAL_REASONS.CLAIM_ENCRYPT_FAILED,
-            {}
-          );
-          logger?.error?.('swap.claim.refused', {
-            reason: refusal.reason,
-            ilpCode: refusal.code,
-            clientMessage: refusal.message,
-            note: 'inferred from the SDK handler response; the SDK discards the underlying encrypt error',
-          });
-          return buildClaimRefusalReject(refusal) as unknown as T;
-        }
-        return result;
-      };
-    },
+  const toRejection = (refusal: ClaimRefusal): SwapHandlerRejection => {
+    const { code, message, data, rejectReason } =
+      buildClaimRefusalReject(refusal);
+    return { code, message, data, rejectReason };
+  };
+
+  return (failure: SwapHandlerFailure): SwapHandlerRejection | undefined => {
+    if (failure.stage === 'issuer') {
+      // The SDK owns the liquidity contract end to end.
+      if (failure.code === 'INSUFFICIENT_INVENTORY') return undefined;
+      const refusal = classifyClaimIssuerError(failure.error);
+      report(refusal, failure.stage);
+      // Anything the SDK already classified (its `/insufficient/i` message
+      // fallback also lands on T04) keeps its own reject; we only take over
+      // the opaque `T00 Internal error`.
+      if (failure.defaultRejection.code !== SDK_GENERIC_REJECT_CODE) {
+        return undefined;
+      }
+      return toRejection(refusal);
+    }
+
+    if (failure.stage === 'encrypt') {
+      const refusal = buildRefusal(CLAIM_REFUSAL_REASONS.CLAIM_ENCRYPT_FAILED, {
+        err: failure.message,
+        ...(failure.code !== undefined && { code: failure.code }),
+        ...(failure.context.claimId !== undefined && {
+          claimId: failure.context.claimId,
+        }),
+      });
+      report(refusal, failure.stage);
+      return toRejection(refusal);
+    }
+
+    return undefined;
   };
 }

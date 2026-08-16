@@ -1,23 +1,25 @@
 /**
- * swap#136 — unit coverage for the claim-refusal classifier and the two
- * wrappers that reclaim what the SDK swap handler throws away.
+ * swap#136 — unit coverage for the claim-refusal classifier and the
+ * `onFailure` mapper it feeds into the SDK swap handler (SDK ≥ 3.2.0).
  *
  * The end-to-end proof (a real gift-wrapped swap producing a logged,
  * actionable refusal) lives in `swap-node.claim-refusal.test.ts`; this file
- * pins the per-condition mapping and the concurrency property that makes the
- * handler wrapper safe.
+ * pins the per-condition mapping and which stages the mapper claims.
  */
 import { describe, it, expect, vi } from 'vitest';
+
+import type { SwapHandlerFailure } from '@toon-protocol/sdk';
 
 import {
   CLAIM_REFUSAL_REASONS,
   classifyClaimIssuerError,
   buildClaimRefusalReject,
-  createClaimRefusalDiagnostics,
+  createClaimRefusalMapper,
 } from './claim-refusal.js';
 import { SwapWalletError, SwapInventoryError } from './errors.js';
 
-const GENERIC = { accept: false, code: 'T00', message: 'Internal error' };
+/** The SDK's opaque catch-all, verbatim. */
+const GENERIC_DEFAULT = { code: 'T00', message: 'Internal error' };
 
 function unredeemedError(channelId = '0x0124a370', unredeemed = 1_000n) {
   return new SwapWalletError(
@@ -107,138 +109,169 @@ describe('buildClaimRefusalReject', () => {
   });
 });
 
-describe('createClaimRefusalDiagnostics', () => {
-  it('[P0] instrument() logs the refusal and rethrows unchanged', async () => {
-    const warn = vi.fn();
-    const diagnostics = createClaimRefusalDiagnostics({
+describe('createClaimRefusalMapper (SDK onFailure seam)', () => {
+  const PAIR = {
+    from: { assetCode: 'USDC', assetScale: 6, chain: 'evm:8453' },
+    to: { assetCode: 'USDC', assetScale: 6, chain: 'evm:8453' },
+    rate: '1.0',
+  };
+
+  /** A `SwapHandlerFailure` shaped exactly as the SDK hands it over. */
+  function failure(
+    stage: SwapHandlerFailure['stage'],
+    error: unknown,
+    overrides: {
+      defaultRejection?: { code: string; message: string };
+      claimIssued?: boolean;
+      claimId?: string;
+    } = {}
+  ): SwapHandlerFailure {
+    const code = (error as { code?: string } | undefined)?.code;
+    return {
+      stage,
+      error,
+      message: error instanceof Error ? error.message : String(error),
+      ...(typeof code === 'string' && { code }),
+      context: {
+        destination: 'g.toon.swap.fixture',
+        sourceAmount: 1_000n,
+        pair: PAIR,
+        senderPubkey: 'ab'.repeat(32),
+        chainRecipient: '0x' + '11'.repeat(20),
+        claimIssued: overrides.claimIssued ?? false,
+        ...(overrides.claimId !== undefined && { claimId: overrides.claimId }),
+      },
+      defaultRejection: overrides.defaultRejection ?? GENERIC_DEFAULT,
+    } as SwapHandlerFailure;
+  }
+
+  function loggerSpies(): {
+    logger: {
+      debug: ReturnType<typeof vi.fn>;
+      info: ReturnType<typeof vi.fn>;
+      warn: ReturnType<typeof vi.fn>;
+      error: ReturnType<typeof vi.fn>;
+    };
+  } {
+    return {
       logger: {
         debug: vi.fn(),
         info: vi.fn(),
-        warn,
+        warn: vi.fn(),
         error: vi.fn(),
       },
-    });
-    const thrown = unredeemedError();
-    const issuer = diagnostics.instrument({
-      issueClaim: async () => {
-        throw thrown;
-      },
-    });
+    };
+  }
 
-    await expect(issuer.issueClaim({})).rejects.toBe(thrown);
-    expect(warn).toHaveBeenCalledTimes(1);
-    const [event, fields] = warn.mock.calls[0] ?? [];
+  it("[P0] an issuer failure replaces the SDK's blanket T00 and logs the refusal", () => {
+    const { logger } = loggerSpies();
+    const mapper = createClaimRefusalMapper({ logger });
+
+    const rejection = mapper(failure('issuer', unredeemedError()));
+
+    expect(rejection?.code).toBe('T04');
+    expect(rejection?.message).toContain(
+      CLAIM_REFUSAL_REASONS.CHANNEL_UNREDEEMED
+    );
+    expect(rejection?.message).toContain('0x0124a370');
+    expect(rejection?.rejectReason?.code).toBe('insufficient_funds');
+    const data = JSON.parse(
+      Buffer.from(rejection?.data ?? '', 'base64').toString('utf8')
+    ) as Record<string, unknown>;
+    expect(data['reason']).toBe(CLAIM_REFUSAL_REASONS.CHANNEL_UNREDEEMED);
+    expect(data['unredeemed']).toBe('1000');
+
+    expect(logger.warn).toHaveBeenCalledTimes(1);
+    const [event, fields] = logger.warn.mock.calls[0] ?? [];
     expect(event).toBe('swap.claim.refused');
     expect(fields).toMatchObject({
       reason: CLAIM_REFUSAL_REASONS.CHANNEL_UNREDEEMED,
       ilpCode: 'T04',
+      stage: 'issuer',
       channelId: '0x0124a370',
       unredeemed: '1000',
     });
   });
 
-  it('[P0] INSUFFICIENT_INVENTORY is left to the SDK (T04 "Insufficient liquidity" is unchanged)', async () => {
-    const warn = vi.fn();
-    const error = vi.fn();
-    const diagnostics = createClaimRefusalDiagnostics({
-      logger: { debug: vi.fn(), info: vi.fn(), warn, error },
-    });
-    const issuer = diagnostics.instrument({
-      issueClaim: async () => {
-        throw new SwapInventoryError('INSUFFICIENT_INVENTORY', 'no reserves');
-      },
-    });
-    await expect(issuer.issueClaim({})).rejects.toThrow('no reserves');
-    expect(warn).not.toHaveBeenCalled();
-    expect(error).not.toHaveBeenCalled();
+  it('[P0] INSUFFICIENT_INVENTORY is left to the SDK (T04 "Insufficient liquidity" unchanged)', () => {
+    const { logger } = loggerSpies();
+    const mapper = createClaimRefusalMapper({ logger });
 
-    // …and the handler wrapper leaves the SDK's own T04 alone.
-    const handler = diagnostics.wrap(async () => ({
-      accept: false,
-      code: 'T04',
-      message: 'Insufficient liquidity',
-    }));
-    expect(await handler({})).toEqual({
-      accept: false,
-      code: 'T04',
-      message: 'Insufficient liquidity',
-    });
+    const rejection = mapper(
+      failure(
+        'issuer',
+        new SwapInventoryError('INSUFFICIENT_INVENTORY', 'no reserves'),
+        {
+          defaultRejection: {
+            code: 'T04',
+            message: 'Insufficient liquidity',
+          },
+        }
+      )
+    );
+
+    expect(rejection).toBeUndefined();
+    expect(logger.warn).not.toHaveBeenCalled();
+    expect(logger.error).not.toHaveBeenCalled();
   });
 
-  it("[P0] wrap() replaces the SDK's blanket T00 with the captured refusal", async () => {
-    const diagnostics = createClaimRefusalDiagnostics({});
-    const issuer = diagnostics.instrument({
-      issueClaim: async () => {
-        throw unredeemedError();
-      },
-    });
-    const handler = diagnostics.wrap(async () => {
-      // stand-in for the SDK handler: calls the issuer, swallows the throw
-      await issuer.issueClaim({}).catch(() => undefined);
-      return GENERIC;
-    });
-
-    const result = (await handler({})) as { code: string; message: string };
-    expect(result.code).toBe('T04');
-    expect(result.message).toContain(CLAIM_REFUSAL_REASONS.CHANNEL_UNREDEEMED);
+  it("[P1] an issuer failure the SDK already classified keeps the SDK's reject", () => {
+    const mapper = createClaimRefusalMapper({});
+    // The SDK's `/insufficient/i` message fallback → T04 without the code.
+    const rejection = mapper(
+      failure('issuer', new Error('insufficient something'), {
+        defaultRejection: { code: 'T04', message: 'Insufficient liquidity' },
+      })
+    );
+    expect(rejection).toBeUndefined();
   });
 
-  it('[P0] concurrent packets never cross-contaminate (per-packet AsyncLocalStorage slot)', async () => {
-    const diagnostics = createClaimRefusalDiagnostics({});
-    const issuer = diagnostics.instrument({
-      issueClaim: async (params: { fail?: string }) => {
-        await new Promise((r) => setTimeout(r, params.fail === 'a' ? 20 : 1));
-        if (params.fail === 'a') throw unredeemedError('0xAAA', 111n);
-        if (params.fail === 'b') throw unredeemedError('0xBBB', 222n);
-        return { ok: true };
-      },
-    });
-    const handler = diagnostics.wrap(async (ctx: { fail?: string }) => {
-      await issuer.issueClaim(ctx).catch(() => undefined);
-      return GENERIC;
-    });
+  it('[P0] the encrypt stage is OBSERVED — the real error, not an inference', () => {
+    const { logger } = loggerSpies();
+    const mapper = createClaimRefusalMapper({ logger });
 
-    const [a, b] = (await Promise.all([
-      handler({ fail: 'a' }),
-      handler({ fail: 'b' }),
-    ])) as { message: string }[];
-    expect(a.message).toContain('0xAAA');
-    expect(a.message).toContain('111');
-    expect(b.message).toContain('0xBBB');
-    expect(b.message).toContain('222');
-  });
+    const rejection = mapper(
+      failure('encrypt', new Error('invalid sender pubkey'), {
+        claimIssued: true,
+        claimId: 'claim-7',
+      })
+    );
 
-  it("[P1] a successful issuance followed by the SDK's T00 is named as the encrypt path", async () => {
-    const error = vi.fn();
-    const diagnostics = createClaimRefusalDiagnostics({
-      logger: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error },
-    });
-    const issuer = diagnostics.instrument({
-      issueClaim: async () => ({ claim: new Uint8Array([1]) }),
-    });
-    const handler = diagnostics.wrap(async () => {
-      await issuer.issueClaim({});
-      return GENERIC; // the SDK's `swap_handler.encrypt_failed` branch
-    });
-
-    const result = (await handler({})) as { code: string; message: string };
-    expect(result.message).toContain(
+    expect(rejection?.code).toBe('T00');
+    expect(rejection?.message).toContain(
       CLAIM_REFUSAL_REASONS.CLAIM_ENCRYPT_FAILED
     );
-    expect(error).toHaveBeenCalledTimes(1);
+    // The thrown message reaches the wire — pre-3.2.0 it was discarded.
+    expect(rejection?.message).toContain('invalid sender pubkey');
+    const data = JSON.parse(
+      Buffer.from(rejection?.data ?? '', 'base64').toString('utf8')
+    ) as Record<string, unknown>;
+    expect(data['reason']).toBe(CLAIM_REFUSAL_REASONS.CLAIM_ENCRYPT_FAILED);
+    expect(data['err']).toContain('invalid sender pubkey');
+    expect(data['claimId']).toBe('claim-7');
+    expect(logger.error).toHaveBeenCalledTimes(1);
   });
 
-  it('[P1] a T00 with no issuance attempted at all is passed through untouched', async () => {
-    const diagnostics = createClaimRefusalDiagnostics({});
-    const handler = diagnostics.wrap(async () => GENERIC);
-    expect(await handler({})).toEqual(GENERIC);
+  it('[P1] rate stages are left alone — RateFreshnessGuard owns staleness', () => {
+    const mapper = createClaimRefusalMapper({});
+    expect(
+      mapper(
+        failure('rate_provider', new Error('rpc down'), {
+          defaultRejection: { code: 'T00', message: 'Rate provider error' },
+        })
+      )
+    ).toBeUndefined();
+    expect(
+      mapper(
+        failure('rate_conversion', new Error('bad rate'), {
+          defaultRejection: { code: 'T00', message: 'Rate conversion error' },
+        })
+      )
+    ).toBeUndefined();
   });
 
-  it('[P1] accepts and non-generic rejects are passed through untouched', async () => {
-    const diagnostics = createClaimRefusalDiagnostics({});
-    const accept = { accept: true, metadata: { claim: 'x' } };
-    expect(await diagnostics.wrap(async () => accept)({})).toBe(accept);
-    const stale = { accept: false, code: 'T99', message: 'stale_rate' };
-    expect(await diagnostics.wrap(async () => stale)({})).toBe(stale);
+  it('[P1] no logger configured is not a crash', () => {
+    const mapper = createClaimRefusalMapper({});
+    expect(mapper(failure('issuer', unredeemedError()))?.code).toBe('T04');
   });
 });
