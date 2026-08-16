@@ -363,10 +363,11 @@ function applyEnvOverlay(cfg: SwapNodeConfig): SwapNodeConfig {
 // ---------------------------------------------------------------------------
 
 /**
- * A `0xdead…`-style placeholder settlementPrivateKey: a syntactically valid
- * 32-byte hex key made up entirely of repeated `dead` nibbles, the shape a
- * committed config skeleton ships so it passes format validation while
- * still being an obvious non-key. Detected case-insensitively.
+ * A `0xdead…`-style placeholder settlementPrivateKey: hex made up entirely of
+ * repeated `dead` groups — the shape a committed config skeleton ships
+ * (`0x` + `dead` × 16 = a syntactically valid 32-byte key) so it passes format
+ * validation while still being an obvious non-key. Matched case-insensitively
+ * and at any length, so shorter/longer `dead` runs are caught too.
  */
 const PLACEHOLDER_SETTLEMENT_KEY_RE = /^0x(?:dead)+$/i;
 

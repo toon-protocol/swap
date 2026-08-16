@@ -236,9 +236,11 @@ describe('AC-9 swap node CLI — env-overlay gap-fill', () => {
 // Review Pass #3 security tests — CLI parsing hardening
 // ===========================================================================
 
-import { mkdtempSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+
+import type { SwapNodeConfig } from './swap-node.js';
 
 function writeTempConfig(obj: unknown): string {
   const dir = mkdtempSync(join(tmpdir(), 'swap-cli-sec-'));
@@ -579,6 +581,28 @@ describe('issue #124 — CLI peerInfoIlpDestination / peerInfoPricePerByte', () 
 // the index-2 settlement key.
 // ---------------------------------------------------------------------------
 
+/** Universally known zero-entropy BIP-39 vector (the golden vector wallet.test.ts pins). */
+const ZERO_MNEMONIC =
+  'abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about';
+
+/**
+ * Minimal config for the identity-resolution tests: everything
+ * `resolveIdentityConfig()` does not read is stubbed empty, so each test only
+ * spells out the identity fields it is actually about.
+ */
+function identityTestConfig(
+  overrides: Partial<SwapNodeConfig> = {}
+): SwapNodeConfig {
+  return {
+    swapPairs: [],
+    chains: ['evm'],
+    channels: {},
+    inventory: {},
+    relayUrls: [],
+    ...overrides,
+  };
+}
+
 describe('issue #126 — settlement-key placeholder detection', () => {
   it('[P1] needsSettlementKeyDerivation is true when unset', async () => {
     const { needsSettlementKeyDerivation } = await import('./cli.js');
@@ -599,24 +623,13 @@ describe('issue #126 — settlement-key placeholder detection', () => {
 });
 
 describe('issue #126 — resolveIdentityConfig: index-2 settlementPrivateKey derivation', () => {
-  // Universally known zero-entropy BIP-39 vector (same golden vector wallet.test.ts pins).
-  const ZERO_MNEMONIC =
-    'abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about';
-
   it('[P1] derives settlementPrivateKey from the mnemonic when unset, recovering the deriveSwapNodeKeys index-2 address and matching settlementAddresses', async () => {
     const { resolveIdentityConfig } = await import('./cli.js');
     const { deriveSwapNodeKeys } = await import('./wallet.js');
     const { buildSignerAddresses } = await import('./swap-node.js');
 
     const resolved = await resolveIdentityConfig(
-      {
-        mnemonic: ZERO_MNEMONIC,
-        swapPairs: [],
-        chains: ['evm'],
-        channels: {},
-        inventory: {},
-        relayUrls: [],
-      },
+      identityTestConfig({ mnemonic: ZERO_MNEMONIC }),
       {}
     );
 
@@ -649,15 +662,10 @@ describe('issue #126 — resolveIdentityConfig: index-2 settlementPrivateKey der
     const { resolveIdentityConfig } = await import('./cli.js');
     const placeholder = `0x${'dead'.repeat(16)}`;
     const resolved = await resolveIdentityConfig(
-      {
+      identityTestConfig({
         mnemonic: ZERO_MNEMONIC,
         settlementPrivateKey: placeholder,
-        swapPairs: [],
-        chains: ['evm'],
-        channels: {},
-        inventory: {},
-        relayUrls: [],
-      },
+      }),
       {}
     );
     expect(resolved.settlementPrivateKey).not.toBe(placeholder);
@@ -668,15 +676,10 @@ describe('issue #126 — resolveIdentityConfig: index-2 settlementPrivateKey der
     const { resolveIdentityConfig } = await import('./cli.js');
     const operatorKey = `0x${'11'.repeat(32)}`;
     const resolved = await resolveIdentityConfig(
-      {
+      identityTestConfig({
         mnemonic: ZERO_MNEMONIC,
         settlementPrivateKey: operatorKey,
-        swapPairs: [],
-        chains: ['evm'],
-        channels: {},
-        inventory: {},
-        relayUrls: [],
-      },
+      }),
       {}
     );
     expect(resolved.settlementPrivateKey).toBe(operatorKey);
@@ -685,14 +688,7 @@ describe('issue #126 — resolveIdentityConfig: index-2 settlementPrivateKey der
   it('[P2] a secretKey-only config (no mnemonic) is left untouched — no derivation attempted', async () => {
     const { resolveIdentityConfig } = await import('./cli.js');
     const resolved = await resolveIdentityConfig(
-      {
-        secretKey: new Uint8Array(32).fill(7),
-        swapPairs: [],
-        chains: ['evm'],
-        channels: {},
-        inventory: {},
-        relayUrls: [],
-      },
+      identityTestConfig({ secretKey: new Uint8Array(32).fill(7) }),
       {}
     );
     expect(resolved.settlementPrivateKey).toBeUndefined();
@@ -726,21 +722,11 @@ describe('issue #126 — SWAP_AUTOGEN_IDENTITY self-generated + persisted identi
 
   it('[P1] generates + persists a mnemonic (mode 600) when autogen is on and no identity is provided', async () => {
     const { resolveIdentityConfig } = await import('./cli.js');
-    const { statSync, rmSync } = await import('node:fs');
     const dir = mkdtempSync(join(tmpdir(), 'swap-cli-autogen-'));
     try {
       const identityFile = join(dir, 'identity.json');
       const resolved = await withEnv({ SWAP_IDENTITY_FILE: identityFile }, () =>
-        resolveIdentityConfig(
-          {
-            swapPairs: [],
-            chains: ['evm'],
-            channels: {},
-            inventory: {},
-            relayUrls: [],
-          },
-          { identityAutogen: true }
-        )
+        resolveIdentityConfig(identityTestConfig(), { identityAutogen: true })
       );
       expect(existsSync(identityFile)).toBe(true);
       if (typeof resolved.mnemonic !== 'string') {
@@ -757,33 +743,14 @@ describe('issue #126 — SWAP_AUTOGEN_IDENTITY self-generated + persisted identi
 
   it('[P1] a second boot against the same identity file LOADS the persisted mnemonic (idempotent, no regeneration)', async () => {
     const { resolveIdentityConfig } = await import('./cli.js');
-    const { rmSync } = await import('node:fs');
     const dir = mkdtempSync(join(tmpdir(), 'swap-cli-autogen-'));
     const identityFile = join(dir, 'identity.json');
     try {
       const first = await withEnv({ SWAP_IDENTITY_FILE: identityFile }, () =>
-        resolveIdentityConfig(
-          {
-            swapPairs: [],
-            chains: ['evm'],
-            channels: {},
-            inventory: {},
-            relayUrls: [],
-          },
-          { identityAutogen: true }
-        )
+        resolveIdentityConfig(identityTestConfig(), { identityAutogen: true })
       );
       const second = await withEnv({ SWAP_IDENTITY_FILE: identityFile }, () =>
-        resolveIdentityConfig(
-          {
-            swapPairs: [],
-            chains: ['evm'],
-            channels: {},
-            inventory: {},
-            relayUrls: [],
-          },
-          { identityAutogen: true }
-        )
+        resolveIdentityConfig(identityTestConfig(), { identityAutogen: true })
       );
       expect(second.mnemonic).toBe(first.mnemonic);
       expect(second.settlementPrivateKey).toBe(first.settlementPrivateKey);
@@ -794,23 +761,14 @@ describe('issue #126 — SWAP_AUTOGEN_IDENTITY self-generated + persisted identi
 
   it('[P1] identity file defaults beside statePath when SWAP_IDENTITY_FILE is not set', async () => {
     const { resolveIdentityConfig } = await import('./cli.js');
-    const { rmSync } = await import('node:fs');
     const dir = mkdtempSync(join(tmpdir(), 'swap-cli-autogen-'));
     try {
       const statePath = join(dir, 'state.json');
       // SWAP_IDENTITY_FILE explicitly cleared: this asserts the DEFAULT path.
       await withEnv({ SWAP_IDENTITY_FILE: undefined }, () =>
-        resolveIdentityConfig(
-          {
-            swapPairs: [],
-            chains: ['evm'],
-            channels: {},
-            inventory: {},
-            relayUrls: [],
-            statePath,
-          },
-          { identityAutogen: true }
-        )
+        resolveIdentityConfig(identityTestConfig({ statePath }), {
+          identityAutogen: true,
+        })
       );
       expect(existsSync(join(dir, 'identity.json'))).toBe(true);
     } finally {
@@ -820,22 +778,12 @@ describe('issue #126 — SWAP_AUTOGEN_IDENTITY self-generated + persisted identi
 
   it('[P2] autogen is a no-op when a mnemonic is already provided — no identity file created', async () => {
     const { resolveIdentityConfig } = await import('./cli.js');
-    const { rmSync } = await import('node:fs');
     const dir = mkdtempSync(join(tmpdir(), 'swap-cli-autogen-'));
     try {
       const statePath = join(dir, 'state.json');
       await withEnv({ SWAP_IDENTITY_FILE: undefined }, () =>
         resolveIdentityConfig(
-          {
-            mnemonic:
-              'abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about',
-            swapPairs: [],
-            chains: ['evm'],
-            channels: {},
-            inventory: {},
-            relayUrls: [],
-            statePath,
-          },
+          identityTestConfig({ mnemonic: ZERO_MNEMONIC, statePath }),
           { identityAutogen: true }
         )
       );
@@ -847,7 +795,6 @@ describe('issue #126 — SWAP_AUTOGEN_IDENTITY self-generated + persisted identi
 
   it('[P1] logs the index-0 pubkey + index-2 settlement address but NEVER the mnemonic or the derived private key', async () => {
     const { resolveIdentityConfig } = await import('./cli.js');
-    const { rmSync } = await import('node:fs');
     const dir = mkdtempSync(join(tmpdir(), 'swap-cli-autogen-'));
     const lines: string[] = [];
     const realLog = console.log;
@@ -858,16 +805,7 @@ describe('issue #126 — SWAP_AUTOGEN_IDENTITY self-generated + persisted identi
       const resolved = await withEnv(
         { SWAP_IDENTITY_FILE: join(dir, 'identity.json') },
         () =>
-          resolveIdentityConfig(
-            {
-              swapPairs: [],
-              chains: ['evm'],
-              channels: {},
-              inventory: {},
-              relayUrls: [],
-            },
-            { identityAutogen: true }
-          )
+          resolveIdentityConfig(identityTestConfig(), { identityAutogen: true })
       );
       console.log = realLog;
       const output = lines.join('\n');
@@ -910,7 +848,6 @@ describe('issue #126 — SWAP_AUTOGEN_IDENTITY self-generated + persisted identi
       'swap.config.autogen-skeleton.json'
     );
     const dir = mkdtempSync(join(tmpdir(), 'swap-cli-autogen-e2e-'));
-    const { rmSync } = await import('node:fs');
     try {
       // "only SWAP_AUTOGEN_IDENTITY=1": every other identity input is
       // explicitly cleared so an ambient env var cannot mask the autogen path.
