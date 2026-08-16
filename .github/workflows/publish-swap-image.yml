@@ -2,11 +2,14 @@ name: Publish swap image
 
 # Publishes the runtime maker-node image (deploy/swap/Dockerfile, issue #124)
 # to GHCR as ghcr.io/toon-protocol/swap, tagged `sha-<short-sha>` (immutable,
-# content-pinned) and `main` (floating, default-branch only). Mirrors
-# connector's publish-connector-rust-image.yml. This is swap's first-ever
-# published artifact of any kind — the npm package itself is not yet
-# published (see CLAUDE.md "Publishing"; that stays a separate
-# changesets-driven release.yml flow, untouched here).
+# content-pinned), `main` (floating, default-branch only), and `release`
+# (floating, default-branch only — the Watchtower watch target on the relay
+# box; moves only on a merge to main that passed this workflow's own gate,
+# see toon-meta#403 and issue #131). Mirrors connector's
+# publish-connector-rust-image.yml. This is swap's first-ever published
+# artifact of any kind — the npm package itself is not yet published (see
+# CLAUDE.md "Publishing"; that stays a separate changesets-driven release.yml
+# flow, untouched here).
 
 on:
   push:
@@ -74,6 +77,7 @@ jobs:
           tags: |
             type=raw,value=sha-${{ steps.sha.outputs.short }}
             type=raw,value=main,enable={{is_default_branch}}
+            type=raw,value=release,enable={{is_default_branch}}
 
       - name: Build and push swap image
         id: build
