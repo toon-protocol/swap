@@ -63,7 +63,8 @@ import type { SettlementEvent } from './settlement-event.js';
 import { SwapInventory } from './inventory.js';
 import { SwapChannelState } from './channel-state.js';
 import type { ChannelEntry } from './channel-state.js';
-import { createEvmChannelOnChainReader } from './evm-channel-reader.js';
+import { createChannelOnChainReader } from './channel-reader.js';
+import type { SolanaChannelReaderProvider } from './solana-channel-reader.js';
 import {
   DEFAULT_RECONCILE_INTERVAL_MS,
   SwapInventoryReconciler,
@@ -1368,18 +1369,42 @@ export async function startSwapNode(
       };
     }
   }
-  // Issue #113 — wire an on-chain reader whenever an EVM chainProviders
-  // entry is configured, so a bound-but-unavailable channel can be
-  // safety-checked for rebind (no separate opt-in knob: this is the
+  // Issue #113 — wire an on-chain reader whenever a chainProviders entry of
+  // a READABLE family is configured, so a bound-but-unavailable channel can
+  // be safety-checked for rebind (no separate opt-in knob: this is the
   // rebind PRECONDITION, not a policy an operator should be able to
   // disable — see `channel-state.ts`'s docblock).
+  //
+  // Issue #141 — this used to be EVM-only, which left a Solana maker's
+  // capacity ratcheting to zero (nothing ever observed a redemption) and its
+  // rebind check permanently off. `createChannelOnChainReader` dispatches per
+  // family; Solana's payer side is picked from the node's OWN derived
+  // address, so no new config key is involved. Mina stays unreadable by
+  // construction — see `channel-reader.ts` for the evidence.
   const evmChannelReaderProviders = (config.chainProviders ?? []).filter(
     (p): p is SwapNodeEvmChainProvider => p.chainType === 'evm'
   );
-  const channelOnChainReader =
-    evmChannelReaderProviders.length > 0
-      ? createEvmChannelOnChainReader(evmChannelReaderProviders)
-      : undefined;
+  // Without our OWN Solana address there is no way to tell which of the
+  // channel's two `transferred_amount` slots is ours, and reading the
+  // counterparty's would over-recycle — so no key means no Solana reader.
+  const solanaKeys = swapNodeKeys.solana;
+  const solanaChannelReaderProviders: SolanaChannelReaderProvider[] = [];
+  if (solanaKeys) {
+    const payerPubkey = base58Encode(solanaKeys.publicKey);
+    for (const p of config.chainProviders ?? []) {
+      if (p.chainType !== 'solana') continue;
+      solanaChannelReaderProviders.push({
+        chainId: p.chainId,
+        rpcUrl: p.rpcUrl,
+        programId: p.programId,
+        payerPubkey,
+      });
+    }
+  }
+  const channelOnChainReader = createChannelOnChainReader({
+    evm: evmChannelReaderProviders,
+    solana: solanaChannelReaderProviders,
+  });
   const channelState = new SwapChannelState({
     channels: channelInit,
     logger: { warn: logger.warn },

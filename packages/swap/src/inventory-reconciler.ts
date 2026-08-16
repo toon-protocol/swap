@@ -37,9 +37,10 @@
  *
  * `startSwapNode()` runs one reconcile at boot (fire-and-forget — a slow or
  * unreachable RPC must never block boot) and then on an unref'd interval.
- * Both are no-ops when no on-chain reader is configured (no EVM
- * `chainProviders` entry), which is the same condition that disables the
- * on-chain rebind check.
+ * Both are no-ops when no on-chain reader is configured (no EVM or Solana
+ * `chainProviders` entry — see `channel-reader.ts`, incl. why `mina:*` has
+ * no reader at all), which is the same condition that disables the on-chain
+ * rebind check.
  */
 
 import type { ChannelEntry, ChannelOnChainReader } from './channel-state.js';
@@ -107,9 +108,9 @@ export interface SwapInventoryReconcilerConfig {
   inventory: SwapInventory;
   channelState: ChannelStateSnapshotSource;
   /**
-   * Live on-chain watermark source. Absent (no EVM `chainProviders` entry)
-   * disables reconciliation entirely — the node has no way to establish
-   * chain truth and must not guess.
+   * Live on-chain watermark source. Absent (no `chainProviders` entry of a
+   * readable family) disables reconciliation entirely — the node has no way
+   * to establish chain truth and must not guess.
    */
   reader?: ChannelOnChainReader;
   /** Best-effort snapshot hook (`SwapStatePersister.persist`). */
@@ -216,7 +217,7 @@ export class SwapInventoryReconciler {
         channels: [],
         pools: [],
         errors: [
-          'no on-chain reader configured (no EVM chainProviders entry) — redemptions cannot be observed, so no capacity can be recycled',
+          'no on-chain reader configured (no EVM or Solana chainProviders entry) — redemptions cannot be observed, so no capacity can be recycled',
         ],
       };
       if (apply) this.lastResult = result;

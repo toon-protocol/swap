@@ -170,7 +170,7 @@ function describeBlock(p: {
         `. Capacity returns automatically once the counterparty redeems` +
         (p.reconcilerEnabled
           ? ' (the chain-truth reconciler recycles it).'
-          : ', but NO on-chain reader is configured, so nothing will ever observe the redemption — add an EVM chainProviders entry.')
+          : ', but NO on-chain reader is configured, so nothing will ever observe the redemption — add an EVM or Solana chainProviders entry (Mina publishes no readable settled amount, so a mina-only pool cannot be recycled).')
     );
   }
   if (p.inFlight > 0n) {

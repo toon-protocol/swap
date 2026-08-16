@@ -97,10 +97,19 @@ permanent debit, and the capacity comes back when the CHAIN shows the claim
 redeemed. The node reads its own channels' on-chain `cumulativePaid` at boot
 and every `SWAP_RECONCILE_INTERVAL_MS` and recycles what it finds, so a maker
 whose capacity is held by already-redeemed claims heals itself with no
-operator action and no redeploy. Reconciliation needs an EVM `chainProviders`
-entry (the same one the rebind check uses); without it the node logs
-`swap.reconcile.disabled` and `GET /admin/inventory` reports
+operator action and no redeploy. Reconciliation needs an EVM **or Solana**
+`chainProviders` entry (the same one the rebind check uses); without it the
+node logs `swap.reconcile.disabled` and `GET /admin/inventory` reports
 `reconciler.enabled: false`.
+
+**Per chain family (issue #141).** No extra config: the family is taken from
+the chain key of the `chainProviders` entry you already have.
+
+| family | recycled? | source |
+| --- | --- | --- |
+| `evm:*` | yes | `RollingSwapChannel.channels(channelId).cumulativePaid` via `eth_call`. |
+| `solana:*` | yes | The channel PDA's `transferred_amount_{a,b}` (our own participant slot) via `getAccountInfo`. The node picks the slot from its OWN derived Solana address — nothing to configure. |
+| `mina:*` | **no** | Mina publishes no cumulative-paid: the balances live only inside a salted Poseidon `balanceCommitment`. Every readable substitute (`nonceField`, `depositTotal`, `channelState`) can overstate the watermark, which would over-recycle and would also approve a rebind that strips an unredeemed claim — so the node refuses to guess. A Mina pool's capacity stays blocked and `blockedReason` says why. |
 
 | Route | Auth | Purpose |
 | --- | --- | --- |
