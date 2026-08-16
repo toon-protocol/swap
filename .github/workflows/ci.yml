@@ -138,6 +138,142 @@ jobs:
           fi
           echo "✓ Refused to start without a config, as expected"
 
+      # ── The fleet-config gate, asked BEFORE the merge (connector ADR 0041) ─
+      # publish-swap-image.yml runs this same gate on `main`, as the last thing
+      # standing between a build and `:release` moving. That gate is correct
+      # and stays exactly as it is — it is the one that blocked a real outage.
+      # What it cannot do is tell an author anything, because it only speaks
+      # after the merge.
+      #
+      # 2026-08-16, the day after the gate landed: #139 and #140 both merged,
+      # both failed to publish with
+      #
+      #   this build REFUSES the fleet's committed swap.config.json —
+      #   [INVALID_CONFIG] SwapNodeConfig.chainProviders[0].tokenNetworkAddress
+      #   MUST be a non-empty string
+      #   :release was NOT moved.
+      #
+      # because the matching connector-side config change was still sitting in
+      # an unmerged PR. Two failed publishes and a manual re-run, for an
+      # ordering constraint nothing had ever stated: the maker's config lives
+      # in `toon-protocol/connector` (`infra/linode-relay/swap.config.json`,
+      # bind-mounted on the relay box) and the code that requires it lives
+      # here, so **config first, code second** — a newly-REQUIRED key must be
+      # committed there before the code requiring it merges here.
+      #
+      # This step is that rule, enforced at the only moment the author can
+      # still act on it. Same question, same image, same config, same failure
+      # text as the publish gate — moved from "after the merge, against the
+      # pushed image" to "on the PR, against the image this PR builds". It
+      # WEAKENS NOTHING: `:release` is still moved only by the publish-time
+      # gate, which re-asks everything from scratch on `main`.
+      #
+      # Deliberately blocking, not advisory: it is inside the `CI OK` aggregate
+      # (this repo's single required context), so an ordering violation cannot
+      # merge. A red here is honest — it means either this PR needs a connector
+      # PR merged first, or the fleet's committed config can no longer boot
+      # this repo's code, and in the second case every swap PR SHOULD be red
+      # until someone fixes it.
+      #
+      # Keep in step with publish-swap-image.yml's "Image must still boot the
+      # fleet's committed maker config" step — same deliberate mirroring as the
+      # refusal check above. If the two ever disagree, the publish one wins.
+      - name: Check out the fleet's committed maker config
+        uses: actions/checkout@v4
+        with:
+          repository: toon-protocol/connector
+          # Public repo — the default GITHUB_TOKEN reaches it, no write scope of
+          # any kind. `main` deliberately, not a pin: the question is whether
+          # this build can run what the fleet has NOW.
+          ref: main
+          path: fleet-config
+          sparse-checkout: |
+            infra/linode-relay/swap.config.json
+          sparse-checkout-cone-mode: false
+
+      - name: This build must still boot the fleet's committed maker config
+        run: |
+          set -uo pipefail
+          CONFIG=fleet-config/infra/linode-relay/swap.config.json
+
+          if [ ! -f "$CONFIG" ]; then
+            echo "::error::could not read the fleet's committed maker config at $CONFIG."
+            echo "::error::If it moved, update this step AND publish-swap-image.yml — do NOT delete the gate (connector ADR 0041)."
+            exit 1
+          fi
+
+          # `validateConfig` runs before the node allocates anything, so an
+          # incompatible config exits in about a second. A COMPATIBLE one goes
+          # on to open sockets and dial a relay and would run forever — hence
+          # the timeout, and surviving it IS the pass. The question is "was
+          # this config refused", not "does this node work".
+          #
+          # The file alone is not what the box runs: the relay box's service is
+          # this config PLUS the environment from
+          # `infra/linode-relay/docker-compose.relay.swap.yml`. In particular
+          # SWAP_AUTOGEN_IDENTITY=1, without which the file alone fails
+          # `[INVALID_CONFIG] SwapNodeConfig: one of mnemonic or secretKey is
+          # required` (#127 made the maker self-generate and persist its own
+          # mnemonic to `statePath`). So reproduce the SERVICE, not the file.
+          STATE=$(mktemp -d)
+          chmod 777 "$STATE"
+          set +e
+          OUTPUT=$(timeout 45 docker run --rm \
+            -v "$PWD/$CONFIG":/app/config/swap.config.json:ro \
+            -v "$STATE":/app/state \
+            -e SWAP_AUTOGEN_IDENTITY=1 \
+            swap:ci 2>&1)
+          STATUS=$?
+          set -e
+
+          echo "----- container output -----"
+          echo "$OUTPUT"
+          echo "----- exit code: $STATUS -----"
+
+          if [ "$STATUS" -eq 124 ]; then
+            echo "✓ the fleet's committed swap.config.json still boots this build"
+            exit 0
+          fi
+
+          # Grep for the node's own name for "this config does not satisfy my
+          # schema" rather than trusting a bare nonzero exit, so an unrelated
+          # failure (an unreachable RPC from this runner, say) is not
+          # misreported as a config break and does not redden an innocent PR.
+          if echo "$OUTPUT" | grep -q 'INVALID_CONFIG'; then
+            REASON=$(echo "$OUTPUT" | grep -o 'INVALID_CONFIG[^"]*' | head -1)
+            {
+              echo "## ❌ This build refuses the fleet's committed maker config"
+              echo ""
+              echo "\`$REASON\`"
+              echo ""
+              echo "**The config lives in another repo, and it has to change first.** The relay box"
+              echo "bind-mounts \`infra/linode-relay/swap.config.json\` from"
+              echo "[\`toon-protocol/connector\`](https://github.com/toon-protocol/connector/blob/main/infra/linode-relay/swap.config.json)."
+              echo "This branch cannot read what is committed there, so merging it would leave"
+              echo "\`:release\` unmovable — the publish gate on \`main\` will refuse it (connector ADR 0041),"
+              echo "which is exactly what happened to #139 and #140."
+              echo ""
+              echo "**Config first, code second.** To land this change:"
+              echo ""
+              echo "1. Add the setting to \`infra/linode-relay/swap.config.json\` in \`toon-protocol/connector\` and **merge that PR first**."
+              echo "2. Apply it to the box: \`gh workflow run fleet-ops.yml -f box=relay -f operation=config-apply -f apply=true\` (connector repo)."
+              echo "3. Re-run this check here — it reads connector \`main\`, so it goes green as soon as step 1 lands."
+              echo ""
+              echo "Or make the setting **optional with a safe default**, which needs no cross-repo"
+              echo "coordination at all and is the better answer whenever it is available."
+              echo ""
+              echo "This is the same gate \`publish-swap-image.yml\` runs before moving \`:release\`,"
+              echo "asked early enough that you can still do something about it. It is not skippable"
+              echo "here and it is not skippable there."
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "::error::this build REFUSES the fleet's committed swap.config.json — $REASON"
+            echo "::error::The fix probably belongs in toon-protocol/connector FIRST: infra/linode-relay/swap.config.json. Config first, code second. See the job summary."
+            exit 1
+          fi
+
+          echo "::warning::the fleet config did not reach a running state on this build (exit $STATUS), but not with INVALID_CONFIG."
+          echo "::warning::Not treated as a config-schema break — most likely an unreachable RPC from this runner. Output above."
+
   ci-ok:
     name: CI OK
     runs-on: ubuntu-latest
