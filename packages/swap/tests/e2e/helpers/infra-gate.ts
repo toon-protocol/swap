@@ -29,6 +29,7 @@ import {
   USDC_TOKEN_ADDRESS,
   TOKEN_NETWORK_REGISTRY_ADDRESS,
   TOKEN_NETWORK_ADDRESS as ROLLING_TOKEN_NETWORK_ADDRESS,
+  ROLLING_SWAP_CHANNEL_ADDRESS,
   SENDER_EVM_PRIVATE_KEY,
   SENDER_EVM_ADDRESS,
   MAKER_EVM_ADDRESS,
@@ -36,21 +37,25 @@ import {
 import {
   ANVIL_CHAIN_ID,
   ANVIL_RPC,
+  ANVIL_B_CHAIN_ID,
+  ANVIL_B_RPC,
   EVM_CHAIN_PREFIX,
   RELAY_URL,
   PEER1_BTP_URL,
   PEER1_BLS_URL,
   PEER1_NOSTR_PUBKEY,
+  PEER1_ILP_ADDRESS,
 } from './topology.js';
 
 // ---------------------------------------------------------------------------
 // Endpoints
 // ---------------------------------------------------------------------------
 
-export { ANVIL_RPC };
+export { ANVIL_RPC, ANVIL_B_RPC };
 export const PEER1_RELAY_URL = RELAY_URL;
 export { PEER1_BTP_URL };
 export { PEER1_NOSTR_PUBKEY };
+export { PEER1_ILP_ADDRESS };
 export const PEER1_EVM_ADDRESS = MAKER_EVM_ADDRESS;
 
 /**
@@ -78,6 +83,9 @@ export const TOKEN_ADDRESS = USDC_TOKEN_ADDRESS;
 export const TOKEN_NETWORK_ADDRESS = ROLLING_TOKEN_NETWORK_ADDRESS;
 export const REGISTRY_ADDRESS = TOKEN_NETWORK_REGISTRY_ADDRESS;
 export const CHAIN_ID = ANVIL_CHAIN_ID;
+export const CHAIN_B_ID = ANVIL_B_CHAIN_ID;
+/** Leg-B settlement contract — the same deterministic deployment on both anvils. */
+export const ROLLING_CHANNEL_ADDRESS = ROLLING_SWAP_CHANNEL_ADDRESS;
 
 const anvilChain: Chain = {
   id: CHAIN_ID,
@@ -95,7 +103,8 @@ export function createViemClient() {
 // for the full account allocation: #0 is peer1's settlement key)
 // ---------------------------------------------------------------------------
 
-export const SWAP_E2E_EVM_SENDER_PRIVATE_KEY = SENDER_EVM_PRIVATE_KEY as `0x${string}`;
+export const SWAP_E2E_EVM_SENDER_PRIVATE_KEY =
+  SENDER_EVM_PRIVATE_KEY as `0x${string}`;
 export const SWAP_E2E_EVM_SENDER_ADDRESS = SENDER_EVM_ADDRESS as `0x${string}`;
 
 /**
@@ -116,6 +125,13 @@ export async function publicModeSettlementKey(
 // ---------------------------------------------------------------------------
 
 export const DOCKER_CHAIN_EVM = `${EVM_CHAIN_PREFIX}${CHAIN_ID}` as const;
+/**
+ * The SECOND EVM chain (swap#153) — a distinct chain id on a distinct anvil
+ * with its own `RollingSwapChannel` deployment and therefore its own EIP-712
+ * domain. `DOCKER_CHAIN_EVM → DOCKER_CHAIN_EVM_B` is the only pair in this
+ * harness that crosses a chain boundary without operator-supplied infra.
+ */
+export const DOCKER_CHAIN_EVM_B = `${EVM_CHAIN_PREFIX}${CHAIN_B_ID}` as const;
 export const DOCKER_CHAIN_SOLANA = 'solana:devnet' as const;
 export const DOCKER_CHAIN_MINA = 'mina:devnet' as const;
 
@@ -134,6 +150,47 @@ export const DOCKER_PAIR_MATRIX: readonly {
 }[] = Object.freeze(
   DOCKER_CHAINS.flatMap((from) => DOCKER_CHAINS.map((to) => ({ from, to })))
 );
+
+// ---------------------------------------------------------------------------
+// The ROLLING matrix (swap#153)
+// ---------------------------------------------------------------------------
+
+/**
+ * The rolling matrix adds the second EVM chain, so it is 4 chains and 16
+ * ordered pairs rather than the legacy 3 and 9. That is deliberate: the extra
+ * chain is the one pair in this harness that crosses a chain boundary WITHOUT
+ * operator-supplied infra, so it is the one that actually executes in CI.
+ */
+export const ROLLING_CHAINS = [
+  DOCKER_CHAIN_EVM,
+  DOCKER_CHAIN_EVM_B,
+  DOCKER_CHAIN_SOLANA,
+  DOCKER_CHAIN_MINA,
+] as const;
+
+export type RollingChain = (typeof ROLLING_CHAINS)[number];
+
+export const ROLLING_PAIR_MATRIX: readonly {
+  from: RollingChain;
+  to: RollingChain;
+}[] = Object.freeze(
+  ROLLING_CHAINS.flatMap((from) => ROLLING_CHAINS.map((to) => ({ from, to })))
+);
+
+/**
+ * The pairs peer1 actually advertises (`peer-node.ts`). A rolling RFQ for a
+ * pair outside this set is REFUSED — `unsupported_pair` — which is a stronger
+ * statement than "skipped": the maker is asserted to say no rather than
+ * quietly quoting something it cannot deliver.
+ */
+export const PEER1_ADVERTISED_PAIRS: ReadonlySet<string> = new Set([
+  `${DOCKER_CHAIN_EVM}->${DOCKER_CHAIN_EVM}`,
+  `${DOCKER_CHAIN_EVM}->${DOCKER_CHAIN_EVM_B}`,
+]);
+
+export function peer1AdvertisesPair(from: string, to: string): boolean {
+  return PEER1_ADVERTISED_PAIRS.has(`${from}->${to}`);
+}
 
 // ---------------------------------------------------------------------------
 // Readiness probes
@@ -190,14 +247,18 @@ async function probeMinaGraphql(
   return typeof json?.data?.syncStatus === 'string';
 }
 
-async function probeAnvil(timeoutMs: number): Promise<boolean> {
+async function probeAnvilAt(
+  rpcUrl: string,
+  chainId: number,
+  timeoutMs: number
+): Promise<boolean> {
   const json = await postJson<{ result?: string }>(
-    ANVIL_RPC,
+    rpcUrl,
     { jsonrpc: '2.0', id: 1, method: 'eth_chainId', params: [] },
     timeoutMs
   );
   if (!json) return false;
-  return parseInt(json.result ?? '0x0', 16) === ANVIL_CHAIN_ID;
+  return parseInt(json.result ?? '0x0', 16) === chainId;
 }
 
 function probeRelay(timeoutMs: number): Promise<boolean> {
@@ -255,12 +316,13 @@ let cachedCoreReady: Promise<boolean> | null = null;
 let lastCoreReady = true;
 
 async function probeCore(): Promise<boolean> {
-  const [anvilOk, relayOk, peer1Ok] = await Promise.all([
-    probeAnvil(3000),
+  const [anvilOk, anvilBOk, relayOk, peer1Ok] = await Promise.all([
+    probeAnvilAt(ANVIL_RPC, ANVIL_CHAIN_ID, 3000),
+    probeAnvilAt(ANVIL_B_RPC, ANVIL_B_CHAIN_ID, 3000),
     probeRelay(3000),
     probePeer1(3000),
   ]);
-  const ready = anvilOk && relayOk && peer1Ok;
+  const ready = anvilOk && anvilBOk && relayOk && peer1Ok;
   lastCoreReady = ready;
   return ready;
 }
@@ -278,7 +340,9 @@ export function checkAllServicesReady(): Promise<boolean> {
  * peer, so this is an alias for the same core-readiness check rather than a
  * second boot.
  */
-export async function waitForPeer2Bootstrap(_timeoutMs: number): Promise<boolean> {
+export async function waitForPeer2Bootstrap(
+  _timeoutMs: number
+): Promise<boolean> {
   return checkAllServicesReady();
 }
 
@@ -316,7 +380,10 @@ export async function waitForMinaHealth(timeoutMs: number): Promise<boolean> {
   return probeMinaGraphql(MINA_GRAPHQL, timeoutMs);
 }
 
-export async function acquireMinaAccount(): Promise<{ pk: string; sk: string } | null> {
+export async function acquireMinaAccount(): Promise<{
+  pk: string;
+  sk: string;
+} | null> {
   if (!MINA_ACCOUNTS_MANAGER) return null;
   try {
     const res = await fetch(`${MINA_ACCOUNTS_MANAGER}/acquire-account`, {
@@ -360,7 +427,7 @@ export function skipIfNotReady(ready: boolean): boolean {
   if (process.env['CI'] && !lastCoreReady) {
     throw new Error(
       '[swap e2e] Self-contained EVM infra (Anvil + relay + peer1) did not ' +
-        'come up under CI — this is this harness\'s own responsibility ' +
+        "come up under CI — this is this harness's own responsibility " +
         '(devbox pins `anvil`). Check the global-setup logs rather than ' +
         'silently skipping. See tests/e2e/README.md.'
     );

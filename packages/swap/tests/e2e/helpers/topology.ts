@@ -33,6 +33,27 @@ export const ANVIL_CHAIN_ID = 31337;
 export const ANVIL_RPC = `http://127.0.0.1:${ANVIL_PORT}`;
 
 /**
+ * Chain **B** — a SECOND anvil, loaded with the same vendored state blob at a
+ * different chain id (swap#153).
+ *
+ * Why it exists: before this, every suite in `tests/e2e/` that actually
+ * EXECUTED ran `evm:base:31337 → evm:base:31337`. The Solana and Mina suites,
+ * and 8 of the pair matrix's 9 pairs, skip for want of infra this repo does not
+ * vendor — so the "multi-chain E2E harness" never once crossed a chain boundary
+ * in CI. `tests/integration/rolling-settlement.integration.test.ts` (swap#50)
+ * had already shown a chain boundary can be crossed with nothing but a second
+ * `anvil`, so the rolling port takes the same route: leg A settles on
+ * {@link ANVIL_CHAIN_ID}, leg-B claims are signed for {@link ANVIL_B_CHAIN_ID}.
+ *
+ * This is a genuinely different chain — different chain id, different RPC,
+ * different `RollingSwapChannel` deployment, its own EIP-712 domain — not a
+ * relabelling of the same one.
+ */
+export const ANVIL_B_PORT = 18546;
+export const ANVIL_B_CHAIN_ID = 31338;
+export const ANVIL_B_RPC = `http://127.0.0.1:${ANVIL_B_PORT}`;
+
+/**
  * Prefix of the EVM chain string peer1 advertises and the suites gate on.
  * Shared so `peer-node.ts` (which builds peer1's swapPairs) and
  * `infra-gate.ts` (which builds `DOCKER_CHAIN_EVM`) can never disagree —
@@ -49,3 +70,31 @@ export const PEER1_BTP_PORT = 18902;
 export const PEER1_BTP_URL = `ws://127.0.0.1:${PEER1_BTP_PORT}`;
 export const PEER1_BLS_PORT = 18903;
 export const PEER1_BLS_URL = `http://127.0.0.1:${PEER1_BLS_PORT}`;
+
+/** Peer1's own ILP address — the destination every RFQ and leg-A fill targets. */
+export const PEER1_ILP_ADDRESS = 'g.toon.peer1';
+
+/**
+ * ILP addresses the ROLLING senders authenticate their BTP sessions under.
+ *
+ * On the rolling path this string is load-bearing in a way it never was on the
+ * legacy path: the maker will only mint a session it can answer, and it decides
+ * that by comparing the RFQ's `senderIlpAddress` against the peer id the
+ * arriving BTP session authenticated with (`leg-b-return-path.ts` —
+ * `sourcePeer === senderIlpAddress`). A `ConnectorNode` greets with its
+ * `nodeId` verbatim (connector `btp/btp-client.ts`), so for a rolling sender
+ * the nodeId IS its ILP address, and `build-live-sender.ts` installs the
+ * matching self-route so leg B lands on its local-delivery handler.
+ *
+ * One per suite: peer1 is shared across every suite file in the run
+ * (`vitest.e2e.config.ts` — `singleFork`, `isolate: false`), and two live BTP
+ * sessions may not claim the same peer id.
+ */
+export const ROLLING_SENDER_ILP = {
+  evm: 'g.toon.client.e2erollevm',
+  crossChain: 'g.toon.client.e2erollxc',
+  solana: 'g.toon.client.e2erollsol',
+  mina: 'g.toon.client.e2erollmina',
+  matrix: 'g.toon.client.e2erollmtx',
+  routing: 'g.toon.client.e2erollroute',
+} as const;

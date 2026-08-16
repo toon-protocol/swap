@@ -8,13 +8,18 @@
  * Docker required: identity, chain wiring and relay publishing are all
  * in-process, callable from `global-setup.ts`.
  *
- * Only the EVM leg is wired to live chain infra (the vendored Anvil fixture
+ * Only EVM legs are wired to live chain infra (the vendored Anvil fixture
  * from `tests/integration/helpers/rolling-e2e-harness.ts`). Solana and Mina
  * swap pairs are NOT advertised by this boot helper — those chains need
  * real external infra (`solana-test-validator`, Mina lightnet) this repo
  * does not vendor; see `tests/e2e/README.md`. The suites correctly gate on
  * `waitForSolanaHealth()` / `waitForMinaHealth()` before touching those
  * chains, so their absence here is a graceful skip, not a failure.
+ *
+ * swap#153: `evmB` adds a SECOND EVM chain, so peer1 advertises a pair whose
+ * `from.chain !== to.chain` and the rolling suites can cross a real chain
+ * boundary in CI without any infra this repo does not already vendor. See
+ * `topology.ts`'s `ANVIL_B_CHAIN_ID` for why that mattered.
  */
 
 import { startSwapNode } from '../../../src/swap-node.js';
@@ -28,6 +33,27 @@ export interface PeerNodeHandle {
   instance: SwapNodeInstance;
   pubkey: string;
   stop: () => Promise<void>;
+}
+
+/** One deployed EVM surface peer1 can price and settle against. */
+export interface PeerNodeEvmChain {
+  chainId: number;
+  rpcUrl: string;
+  registryAddress: string;
+  tokenAddress: string;
+  /**
+   * Leg A — deployed `TokenNetwork` address, the contract a client opens its
+   * payment channel against and the value the kind:10032 `tokenNetworks`
+   * entry carries (issue #133).
+   */
+  tokenNetworkAddress: string;
+  /**
+   * Leg B — deployed `RollingSwapChannel` address, the EIP-712
+   * `verifyingContract` `startSwapNode()` binds into its v2 balance-proof
+   * signer (issue #101). `validateConfig()` refuses to boot a pair targeting
+   * this chain without it (PR #106 review finding #2).
+   */
+  channelAddress: string;
 }
 
 export interface StartPeerNodeOptions {
@@ -45,25 +71,13 @@ export interface StartPeerNodeOptions {
   relayUrls: readonly string[];
   ilpAddress: string;
   /** EVM chain-provider wiring. Omit to boot without any live chain (identity/relay only). */
-  evm?: {
-    chainId: number;
-    rpcUrl: string;
-    registryAddress: string;
-    tokenAddress: string;
-    /**
-     * Leg A — deployed `TokenNetwork` address, the contract a client opens its
-     * payment channel against and the value the kind:10032 `tokenNetworks`
-     * entry carries (issue #133).
-     */
-    tokenNetworkAddress: string;
-    /**
-     * Leg B — deployed `RollingSwapChannel` address, the EIP-712
-     * `verifyingContract` `startSwapNode()` binds into its v2 balance-proof
-     * signer (issue #101). `validateConfig()` refuses to boot a pair targeting
-     * this chain without it (PR #106 review finding #2).
-     */
-    channelAddress: string;
-  };
+  evm?: PeerNodeEvmChain;
+  /**
+   * A second EVM chain (swap#153). When present, peer1 additionally advertises
+   * the CROSS-chain pair `evm → evmB` and can issue leg-B claims on it.
+   * Ignored without `evm` — leg A has to land somewhere.
+   */
+  evmB?: PeerNodeEvmChain;
   loggerName?: string;
 }
 
@@ -77,40 +91,78 @@ export interface StartPeerNodeOptions {
  * file). Today that's 2 (the EVM suite's own sender + the pair-matrix
  * suite's shared sender); sized to 8 for headroom against future suites.
  */
-const SEED_CHANNEL_COUNT = 8;
-function seedChannelId(i: number): string {
-  return '0x' + 'e2'.repeat(31) + i.toString(16).padStart(2, '0');
+const SEED_CHANNEL_COUNT = 24;
+function seedChannelId(chainOrdinal: number, i: number): string {
+  return (
+    '0x' +
+    'e2'.repeat(30) +
+    chainOrdinal.toString(16).padStart(2, '0') +
+    i.toString(16).padStart(2, '0')
+  );
+}
+
+function seedChannels(chainOrdinal: number): {
+  channelId: string;
+  cumulativeAmount: bigint;
+  nonce: bigint;
+  updatedAt: number;
+}[] {
+  return Array.from({ length: SEED_CHANNEL_COUNT }, (_, i) => ({
+    channelId: seedChannelId(chainOrdinal, i),
+    cumulativeAmount: 0n,
+    nonce: 0n,
+    updatedAt: 0,
+  }));
 }
 
 export async function startPeerNode(
   opts: StartPeerNodeOptions
 ): Promise<PeerNodeHandle> {
   const evm = opts.evm;
+  const evmB = evm ? opts.evmB : undefined;
   const chain = evm ? `${EVM_CHAIN_PREFIX}${evm.chainId}` : undefined;
+  const chainB = evmB ? `${EVM_CHAIN_PREFIX}${evmB.chainId}` : undefined;
+
+  const asset = { assetCode: 'USD', assetScale: 6 } as const;
 
   const config: SwapNodeConfig = {
     mnemonic: opts.mnemonic,
     swapPairs: chain
       ? [
+          // Same-chain pair — what peer1 has always advertised, and what the
+          // legacy suites still drive. Also the shape the live devnet maker
+          // advertises today (a USDC-at-parity placeholder).
           {
-            from: { assetCode: 'USD', assetScale: 6, chain },
-            to: { assetCode: 'USD', assetScale: 6, chain },
+            from: { ...asset, chain },
+            to: { ...asset, chain },
             rate: '1',
           },
+          // Cross-chain pair (swap#153) — a real chain boundary: leg A on
+          // `chain`, leg-B claim signed for `chainB`'s own EIP-712 domain.
+          ...(chainB
+            ? [
+                {
+                  from: { ...asset, chain },
+                  to: { ...asset, chain: chainB },
+                  rate: '1',
+                },
+              ]
+            : []),
         ]
       : [],
     chains: evm ? ['evm'] : [],
     channels: chain
       ? {
-          [chain]: Array.from({ length: SEED_CHANNEL_COUNT }, (_, i) => ({
-            channelId: seedChannelId(i),
-            cumulativeAmount: 0n,
-            nonce: 0n,
-            updatedAt: 0,
-          })),
+          [chain]: seedChannels(0),
+          ...(chainB ? { [chainB]: seedChannels(1) } : {}),
         }
       : {},
-    inventory: chain ? { [chain]: 100_000_000_000n } : {},
+    inventory: chain
+      ? {
+          [chain]: 100_000_000_000n,
+          ...(chainB ? { [chainB]: 100_000_000_000n } : {}),
+        }
+      : {},
     logger: {
       debug: () => undefined,
       info: () => undefined,
@@ -124,20 +176,35 @@ export async function startPeerNode(
     btpEndpoint: `ws://127.0.0.1:${opts.btpServerPort}`,
     advertisedAsset: { assetCode: 'USD', assetScale: 6 },
     settlementPrivateKey: opts.evmPrivateKey,
-    chainProviders: evm && chain
-      ? [
-          {
-            chainType: 'evm' as const,
-            chainId: chain,
-            rpcUrl: evm.rpcUrl,
-            registryAddress: evm.registryAddress,
-            tokenAddress: evm.tokenAddress,
-            tokenNetworkAddress: evm.tokenNetworkAddress,
-            channelAddress: evm.channelAddress,
-            keyId: opts.evmPrivateKey,
-          },
-        ]
-      : [],
+    chainProviders:
+      evm && chain
+        ? [
+            {
+              chainType: 'evm' as const,
+              chainId: chain,
+              rpcUrl: evm.rpcUrl,
+              registryAddress: evm.registryAddress,
+              tokenAddress: evm.tokenAddress,
+              tokenNetworkAddress: evm.tokenNetworkAddress,
+              channelAddress: evm.channelAddress,
+              keyId: opts.evmPrivateKey,
+            },
+            ...(evmB && chainB
+              ? [
+                  {
+                    chainType: 'evm' as const,
+                    chainId: chainB,
+                    rpcUrl: evmB.rpcUrl,
+                    registryAddress: evmB.registryAddress,
+                    tokenAddress: evmB.tokenAddress,
+                    tokenNetworkAddress: evmB.tokenNetworkAddress,
+                    channelAddress: evmB.channelAddress,
+                    keyId: opts.evmPrivateKey,
+                  },
+                ]
+              : []),
+          ]
+        : [],
   };
 
   const instance = await startSwapNode(config);

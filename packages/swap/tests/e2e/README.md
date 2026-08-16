@@ -1,13 +1,38 @@
 # Docker cross-chain E2E harness
 
-Four suites here drive a real `streamSwap()` session over real BTP against a
-real swap node (`peer1`), then check settlement-bundle construction on each
-target chain:
+Ten suites here drive a real swap session over real BTP against a real swap
+node (`peer1`), then check settlement-bundle construction on each target chain.
+There are **two families**, and they run side by side:
 
-- `docker-swap-flow-evm-e2e.test.ts` (AC-3..6)
-- `docker-swap-flow-solana-e2e.test.ts` (AC-7)
-- `docker-swap-flow-mina-e2e.test.ts` (AC-8)
-- `docker-swap-flow-pair-matrix-e2e.test.ts` (AC-9/10 — all 9 ordered chain pairs)
+### Rolling (swap#153) — the protocol ADR 0003 keeps
+
+kind:20033 RFQ → kind:20034 quote → coupled fills carrying a real 32-byte
+sender-minted execution condition, with the chain-B claim arriving on **leg B**.
+
+| suite | collects | what it covers |
+| --- | --- | --- |
+| `docker-rolling-swap-evm-e2e.test.ts` | 5 | RFQ, coupled fills, R4/R6 coupling, R5/R8 withhold, EVM settlement bundle |
+| `docker-rolling-swap-cross-chain-e2e.test.ts` | 3 | `evm:base:31337 → evm:base:31338` — a REAL chain boundary, no operator infra |
+| `docker-rolling-swap-pair-matrix-e2e.test.ts` | 17 | 16 ordered pairs over 4 chains + a coverage guard |
+| `docker-rolling-swap-solana-e2e.test.ts` | 2 | Solana target (skips without a validator) |
+| `docker-rolling-swap-mina-e2e.test.ts` | 2 | Mina target (skips without a lightnet) |
+| `docker-rolling-leg-b-routing-e2e.test.ts` | 3 | the swap#148 `F02` and `T00` routing shapes |
+
+### Legacy (`streamSwap`) — kept until Stage 5 of toon-meta#411
+
+| suite | collects |
+| --- | --- |
+| `docker-swap-flow-evm-e2e.test.ts` (AC-3..6) | 4 |
+| `docker-swap-flow-solana-e2e.test.ts` (AC-7) | 2 |
+| `docker-swap-flow-mina-e2e.test.ts` (AC-8) | 2 |
+| `docker-swap-flow-pair-matrix-e2e.test.ts` (AC-9/10) | 10 |
+
+**Do not delete the legacy four before the rolling six are green in CI** — they
+were the project's only multi-chain E2E swap coverage, and swap#106 had already
+found four of them silently collecting *zero* tests while reporting a pass.
+The counts in the tables above are the guard against that happening again: a
+suite that collects fewer than its number has lost coverage, whatever colour CI
+reports.
 
 Run with:
 
@@ -32,14 +57,23 @@ required Docker daemon — just `anvil` on PATH.
 
 ## Topology
 
-### EVM leg — fully automatic, no setup
+### EVM legs — fully automatic, no setup
 
 `tests/e2e/global-setup.ts` (a Vitest `globalSetup`) boots, once per test
 run, before any suite file:
 
-1. **Anvil**, loaded with the same vendored `rolling-e2e-anvil-state.hex`
-   fixture the integration suite uses (`TokenNetworkRegistry` / `TokenNetwork`
-   (USDC) already deployed at the fixed addresses the EVM suite asserts).
+1. **Anvil (chain A, 31337)**, loaded with the same vendored
+   `rolling-e2e-anvil-state.hex` fixture the integration suite uses
+   (`TokenNetworkRegistry` / `TokenNetwork` (USDC) already deployed at the
+   fixed addresses the EVM suite asserts).
+1b. **Anvil (chain B, 31338)** — swap#153. The same blob at a different chain
+   id, so peer1 can advertise `evm:base:31337 → evm:base:31338` and the
+   rolling suites cross a **real** chain boundary on every CI run. Before
+   this, the only pair that ever executed here was same-chain EVM: Solana,
+   Mina and 8 of the 9 matrix pairs all skip for want of infra this repo does
+   not vendor, so "multi-chain coverage" had never once been exercised. Same
+   trick `tests/integration/rolling-settlement.integration.test.ts` uses; it
+   costs one extra `anvil` process and no new dependency.
 2. An **in-process Nostr relay** (`tests/e2e/helpers/local-nostr-relay.ts`)
    — just enough NIP-01 (`EVENT`/`REQ`/`EOSE`/`CLOSE`) for kind:10032
    discovery (AC-4). `startSwapNode()`'s default relay publisher
@@ -60,6 +94,30 @@ pointing back here. Under `CI=1`, that same "EVM core did not come up" case
 throws instead of skipping (see `skipIfNotReady()`'s doc comment) — this
 repo owns and boots that infra itself, so its absence under CI is a real
 regression, not an expected gap.
+
+### The rolling sender
+
+A rolling sender is the same `ConnectorNode` the legacy suites build
+(`helpers/build-live-sender.ts`), with two additions the legacy path never
+needed:
+
+- **its `nodeId` IS its ILP address.** The maker refuses to mint a session it
+  cannot answer, and decides that by comparing the RFQ's `senderIlpAddress`
+  against the peer id the arriving BTP session authenticated under
+  (`src/leg-b-return-path.ts` — the swap#148 `F02` fix). A `ConnectorNode`
+  greets with its `nodeId` verbatim, so the two have to be one string;
+- **a local-delivery handler terminates leg B** — the sender daemon's
+  verify-before-reveal seam (spec R5), built by
+  `helpers/rolling-driver.ts`'s `createLegBDaemon()`.
+
+Leg A is genuinely paid: δ > 0 means the maker's `InboundClaimValidator`
+demands a payment-channel claim it can verify on chain, and the sender
+connector's `PerPacketClaimService` signs it against the real Anvil channel —
+which is why the sender here is a connector and not a bare `BtpRuntimeClient`.
+The daemon enforces the structural half of R5 (recipient equality, monotone
+`(nonce, cumulativeAmount)`, Δcumulative covering `targetAmount`, the signer
+the quote promised); the v2 EIP-712 signature itself is verified by the real
+client pipeline in `tests/integration/rolling-settlement.integration.test.ts`.
 
 There used to be a second peer (`peer2`) in the pre-extraction Docker
 topology. None of the four suites assert anything about a distinct peer2

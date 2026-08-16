@@ -10,6 +10,7 @@
 import { generateSecretKey, getPublicKey } from 'nostr-tools/pure';
 import type { StreamSwapParams } from '@toon-protocol/sdk';
 import { ConnectorNode, createLogger } from '@toon-protocol/connector';
+import type { LocalDeliveryHandler } from '@toon-protocol/connector';
 
 import {
   PEER1_BTP_URL,
@@ -31,6 +32,11 @@ export interface LiveSender {
   senderSecretKey: Uint8Array;
   senderPubkey: string;
   channelId: string;
+  /**
+   * The ILP address this sender is reachable at — set only in rolling mode
+   * (see {@link BuildLiveSenderOptions.senderIlpAddress}).
+   */
+  senderIlpAddress?: string;
   close: () => Promise<void>;
 }
 
@@ -45,6 +51,30 @@ export interface BuildLiveSenderOptions {
   loggerName: string;
   /** Initial EVM deposit in smallest units (default: '10000000' = 10 USDC). */
   initialDeposit?: string;
+  /**
+   * ROLLING mode (swap#153). The ILP address this sender is reachable at.
+   *
+   * Setting it does three things the legacy path never needed:
+   *
+   * 1. it becomes the connector's `nodeId`, and therefore the peer id its BTP
+   *    greeting authenticates under (connector `btp/btp-client.ts` sends
+   *    `peerId: nodeId`). The maker refuses to mint a session whose RFQ
+   *    advertises a `senderIlpAddress` other than the one its arrival session
+   *    authenticated with — `leg-b-return-path.ts`, the swap#148 `F02` fix —
+   *    so the two strings have to be the same string;
+   * 2. it installs a SELF-ROUTE, so the maker's leg-B PREPARE (addressed to
+   *    this address, arriving back down the same socket) resolves to local
+   *    delivery instead of `F02 no route found`;
+   * 3. it zeroes this connector's forwarding fee, so the δ the maker prices
+   *    the fill at is the δ the test asked for and not δ minus a shave.
+   */
+  senderIlpAddress?: string;
+  /**
+   * ROLLING mode. Answers inbound leg-B PREPAREs — the sender daemon's
+   * verify-before-reveal seam (spec R5). Build one with
+   * `rolling-driver.ts`'s `createLegBDaemon()`.
+   */
+  localDeliveryHandler?: LocalDeliveryHandler;
 }
 
 /**
@@ -71,9 +101,11 @@ export async function buildLiveSender(
   );
 
   const connectorLogger = createLogger(opts.loggerName, 'warn');
+  const nodeId =
+    opts.senderIlpAddress ?? `${opts.nodeIdPrefix}-${senderPubkey.slice(0, 8)}`;
   const connector = new ConnectorNode(
     {
-      nodeId: `${opts.nodeIdPrefix}-${senderPubkey.slice(0, 8)}`,
+      nodeId,
       btpServerPort: opts.btpServerPort,
       healthCheckPort: opts.healthCheckPort,
       environment: 'development' as const,
@@ -91,8 +123,21 @@ export async function buildLiveSender(
           chain: `evm:${CHAIN_ID}`,
         },
       ],
-      routes: [],
+      // Rolling: the self-route that makes leg B deliverable back into this
+      // process. Legacy: none, exactly as before.
+      routes: opts.senderIlpAddress
+        ? [
+            {
+              prefix: opts.senderIlpAddress,
+              nextHop: nodeId,
+              priority: 100,
+            },
+          ]
+        : [],
       localDelivery: { enabled: false },
+      ...(opts.senderIlpAddress
+        ? { settlement: { connectorFeePercentage: 0 } }
+        : {}),
       chainProviders: [
         {
           chainType: 'evm' as const,
@@ -106,6 +151,12 @@ export async function buildLiveSender(
     },
     connectorLogger
   );
+
+  // Leg-B terminator. Installed BEFORE `start()` so a leg-B PREPARE can never
+  // race an unwired handler.
+  if (opts.localDeliveryHandler) {
+    connector.setLocalDeliveryHandler(opts.localDeliveryHandler);
+  }
 
   await connector.start();
 
@@ -147,10 +198,7 @@ export async function buildLiveSender(
     });
     channelId = r.channelId;
   } catch (err) {
-    if (
-      err instanceof Error &&
-      /Channel already exists/i.test(err.message)
-    ) {
+    if (err instanceof Error && /Channel already exists/i.test(err.message)) {
       // Auto-channel created by start() — recover its id by listing channels.
       // ConnectorNode does not expose a public channel-by-peer lookup, so we
       // fall back to a synthetic placeholder. The settlement assertion in
@@ -235,6 +283,7 @@ export async function buildLiveSender(
     senderSecretKey,
     senderPubkey,
     channelId,
+    ...(opts.senderIlpAddress && { senderIlpAddress: opts.senderIlpAddress }),
     close: async () => {
       try {
         await connector.stop();
