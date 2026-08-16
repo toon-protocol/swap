@@ -113,6 +113,8 @@ import { createRollingRfqIntake } from './rolling-rfq.js';
 import type { RollingRfqConfig } from './rolling-rfq.js';
 import { createLegBReturnRouteBinder } from './leg-b-return-path.js';
 import type { LegBReturnRouteBinder } from './leg-b-return-path.js';
+import { SWAP_INTAKE_EVENT, formatPairLabel } from './intake-event.js';
+import type { SwapIntakeClass } from './intake-event.js';
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -747,12 +749,6 @@ function errSummary(err: unknown): { name: string; message: string } {
     return { name: err.name, message: err.message };
   }
   return { name: 'NonError', message: String(err) };
-}
-
-/** `USDC:evm:8453→USDC:evm:8453` — the same label rolling-rfq.ts logs. */
-function formatPairLabel(pair: SwapPair | null | undefined): string | undefined {
-  if (!pair) return undefined;
-  return `${pair.from.assetCode}:${pair.from.chain}→${pair.to.assetCode}:${pair.to.chain}`;
 }
 
 function chainFamily(chain: string): SwapNodeChainKind | null {
@@ -1995,19 +1991,23 @@ export async function startSwapNode(
     // seam (never the gift wrap's Nostr pubkey, which would require an extra
     // unwrap and still isn't an ILP address/peer id) — a BTP arrival's peer
     // id when the connector reports one, else the packet's own
-    // `sourceAccount`. Never affects wire behaviour: this call is
-    // fire-and-forget against a best-effort logger.
+    // `sourceAccount`. Reads nothing the dispatch below does not already
+    // read, and decides nothing: the wire outcome is identical whether or not
+    // a logger is installed.
     const intakeSender = sourcePeer ?? request.sourceAccount;
     const emitIntake = (
-      intakeClass: 'legacy' | 'rolling-rfq' | 'rolling-fill' | 'refused',
+      intakeClass: SwapIntakeClass,
       extra: { pair?: string; reason?: string } = {}
     ): void => {
-      logger.info?.('swap.intake.arrival', {
+      logger.info?.(SWAP_INTAKE_EVENT, {
         class: intakeClass,
         sender: intakeSender,
         ...extra,
       });
     };
+    /** The pair a fill's session was minted for — absent once it has expired. */
+    const sessionPairLabel = (streamNonce: string): string | undefined =>
+      formatPairLabel(rollingSessions.get(streamNonce)?.pair);
 
     if (rollingFill === 'malformed') {
       // Self-identified rolling/1 traffic that violates the fill shape:
@@ -2035,9 +2035,7 @@ export async function startSwapNode(
         }) as HandlePacketResponse;
       }
       emitIntake('rolling-fill', {
-        pair: formatPairLabel(
-          rollingSessions.get(rollingFill.streamNonce)?.pair
-        ),
+        pair: sessionPairLabel(rollingFill.streamNonce),
       });
       return (await rollingEngine.handleFill({
         amount: request.amount,
@@ -2055,9 +2053,7 @@ export async function startSwapNode(
       // rather than fill uncoupled.
       emitIntake('refused', {
         reason: ROLLING_REJECT_REASONS.CONDITION_REQUIRED,
-        pair: formatPairLabel(
-          rollingSessions.get(rollingFill.streamNonce)?.pair
-        ),
+        pair: sessionPairLabel(rollingFill.streamNonce),
       });
       return buildRollingReject({
         code: 'F99',
@@ -2095,9 +2091,7 @@ export async function startSwapNode(
         toonData: new Uint8Array(Buffer.from(request.data, 'base64')),
         recipientSecretKey: identity.secretKey,
       });
-      legacyPair = formatPairLabel(
-        findSwapPair(rumor, [...config.swapPairs])
-      );
+      legacyPair = formatPairLabel(findSwapPair(rumor, [...config.swapPairs]));
     } catch {
       // Unclassifiable — dispatch below reports the same failure on the wire.
     }

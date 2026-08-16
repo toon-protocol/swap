@@ -21,6 +21,7 @@ import type { SwapNodeConfig, SwapNodeInstance } from './swap-node.js';
 import { ROLLING_PROTOCOL, ROLLING_REJECT_REASONS } from './rolling-engine.js';
 import type { LegBResult } from './rolling-engine.js';
 import { ROLLING_RFQ_REQUEST_KIND } from './rolling-rfq.js';
+import { SWAP_INTAKE_EVENT } from './intake-event.js';
 
 const VALID_MNEMONIC =
   'abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about';
@@ -60,13 +61,18 @@ function capturingLogger(sink: LogLine[]): SwapNodeConfig['logger'] {
     (...args: unknown[]): void => {
       sink.push({ level, args });
     };
-  return { debug: at('debug'), info: at('info'), warn: at('warn'), error: at('error') };
+  return {
+    debug: at('debug'),
+    info: at('info'),
+    warn: at('warn'),
+    error: at('error'),
+  };
 }
 
 /** Every captured `swap.intake.arrival` record, in arrival order. */
 function intakeEvents(logs: LogLine[]): Record<string, unknown>[] {
   return logs
-    .filter((l) => l.args[0] === 'swap.intake.arrival')
+    .filter((l) => l.args[0] === SWAP_INTAKE_EVENT)
     .map((l) => l.args[1] as Record<string, unknown>);
 }
 
@@ -329,6 +335,8 @@ describe('swap#152 — intake classification (ADR 0003 removal gate)', () => {
         data: rfqDataB64(sender.secretKey, instance.identity.pubkey),
       });
       expect(rfqRes.accept).toBe(true);
+      // Drop the RFQ's own intake event so the assertions below see only the
+      // fill's.
       logs.length = 0;
 
       const fillRes = await handler(
@@ -359,7 +367,11 @@ describe('swap#152 — intake classification (ADR 0003 removal gate)', () => {
     const { instance, handler, logs } = await bootNode();
     try {
       const malformed = Buffer.from(
-        JSON.stringify({ proto: ROLLING_PROTOCOL, type: 'fill', streamNonce: 'nope' }),
+        JSON.stringify({
+          proto: ROLLING_PROTOCOL,
+          type: 'fill',
+          streamNonce: 'nope',
+        }),
         'utf8'
       ).toString('base64');
       const res = await handler({

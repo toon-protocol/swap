@@ -49,6 +49,8 @@ import {
   type RollingSession,
 } from './rolling-engine.js';
 import type { LegBReturnPath } from './leg-b-return-path.js';
+import { SWAP_INTAKE_EVENT, formatPairLabel } from './intake-event.js';
+import type { SwapIntakeClass } from './intake-event.js';
 
 /** Inner rumor kind of an RFQ request (spec §2.2). */
 export const ROLLING_RFQ_REQUEST_KIND = 20033;
@@ -387,13 +389,14 @@ export function createRollingRfqIntake(config: RollingRfqIntakeConfig): {
       // place that has already paid for the unwrap; `sender` is the BTP peer
       // id, matching the ILP-level identity every other intake class logs
       // (never the gift-wrap's Nostr `senderPubkey`).
-      logger?.info?.('swap.intake.arrival', {
-        class: 'rolling-rfq',
+      const requestedPair =
+        parsed === null || parsed === 'malformed'
+          ? undefined
+          : formatPairLabel(parsed.pair);
+      logger?.info?.(SWAP_INTAKE_EVENT, {
+        class: 'rolling-rfq' satisfies SwapIntakeClass,
         sender: arrival?.sourcePeer,
-        ...(parsed !== null &&
-          parsed !== 'malformed' && {
-            pair: `${parsed.pair.from.assetCode}:${parsed.pair.from.chain}→${parsed.pair.to.assetCode}:${parsed.pair.to.chain}`,
-          }),
+        ...(requestedPair !== undefined && { pair: requestedPair }),
       });
 
       if (parsed === null || parsed === 'malformed') {
