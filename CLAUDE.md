@@ -24,5 +24,18 @@ Canonical rules/decisions: `toon-meta` → `context/decisions.md` and `context/c
 - The ILP payment engine is the separate **[toon-protocol/connector](https://github.com/toon-protocol/connector)** repo. **Payment-claim validation lives ONLY in the connector.** The swap node's own signature work (`settlement/build-settlement-tx`) is *target-chain* claim issuance/verification — a different concern from inbound payment gating.
 - Image-publish workflow (the `swap` Docker image) is a follow-up.
 
+### Config first, code second
+
+The maker's runtime config is **not in this repo and not in the image**. The relay box bind-mounts `infra/linode-relay/swap.config.json` from **connector**, so a change here that makes a new config key *required* is only half a change:
+
+1. Add the key to `infra/linode-relay/swap.config.json` in **`toon-protocol/connector`**, and **merge that first**.
+2. Then merge the code that requires it here.
+
+Backwards: `:release` cannot move (connector [ADR 0041](https://github.com/toon-protocol/connector/blob/main/docs/adr/0041-a-moving-tag-carries-the-fleets-committed-config-or-it-does-not-move.md)), and until it does, the live maker keeps running the previous build. #139 and #140 both hit this on 2026-08-16 — two failed publishes and a manual re-run.
+
+CI enforces the ordering on the PR (`swap runtime image build` → *"This build must still boot the fleet's committed maker config"*, inside the required `CI OK`), so you find out before the merge rather than after. The publish-time gate in `publish-swap-image.yml` re-asks the same question on `main` and is the authoritative one; neither is skippable.
+
+**The cheaper answer is usually to make the setting optional with a safe default** — then there is no ordering constraint at all.
+
 ## Publishing
 CI publishes via **changesets + `pnpm`** using the org `NPM_TOKEN` secret. **Never run `npm publish`**. This will be `swap`'s first-ever npm publish.
