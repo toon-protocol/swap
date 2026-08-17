@@ -179,6 +179,16 @@ jobs:
       - name: Solana + EVM cross-chain E2E
         env:
           SWAP_E2E_REQUIRE_SOLANA: '1'
+          # Vitest colorizes when it thinks a terminal is watching, and on a
+          # runner it does. That wraps the summary lines in ANSI escapes —
+          # `✓<ESC>[39m tests/e2e/…` and `(<ESC>[2m2 tests<ESC>[22m)` — which
+          # defeats the count grep in the next step (it reported "did not
+          # appear in the vitest output at all" for suites that had visibly
+          # just passed). Turning colour off at the source keeps the log
+          # greppable AND readable; the next step strips ANSI anyway, belt and
+          # braces, in case a future vitest ignores these.
+          NO_COLOR: '1'
+          FORCE_COLOR: '0'
         run: pnpm --filter @toon-protocol/swap test:e2e:docker 2>&1 | tee /tmp/solana-e2e.log
 
       # Guard the counts, not just the colour. `tests/e2e/README.md` documents
@@ -188,11 +198,19 @@ jobs:
       - name: Assert the Solana suites collected and ran everything
         run: |
           set -euo pipefail
+          # Strip any ANSI escapes before matching. Vitest's own markers sit
+          # INSIDE them (`✓<ESC>[39m tests/…`, `(<ESC>[2m4 tests<ESC>[22m)`), so
+          # a naive grep for "✓ tests/e2e/x" or "(4 tests)" misses a line that
+          # is plainly there — which is exactly how this guard first failed.
+          sed -r 's/\x1b\[[0-9;]*[a-zA-Z]//g' /tmp/solana-e2e.log > /tmp/solana-e2e.plain
           fail=0
           check() {
             local file="$1" expected="$2"
             local line
-            line=$(grep -E "(✓|❯|×) tests/e2e/${file}" /tmp/solana-e2e.log | tail -1 || true)
+            # Match on the path, not the status glyph: a failing suite must
+            # still be FOUND here so the count check reports the real problem
+            # rather than "did not appear at all".
+            line=$(grep -E "tests/e2e/${file} +\(" /tmp/solana-e2e.plain | tail -1 || true)
             if [ -z "$line" ]; then
               echo "::error::${file} did not appear in the vitest output at all"
               fail=1
