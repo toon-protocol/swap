@@ -250,6 +250,11 @@ anything yet. A class that has never fired at all omits `firstSeenAt`/
 `lastSeenAt` rather than reporting `0`, which would be indistinguishable
 from a real epoch-0 timestamp.
 
+The ledger file is written by the first arrival, not at boot, so a maker
+that has served *nothing at all* since the ledger shipped starts each
+restart with a fresh `since` — that fails the second check rather than
+passing it, which is the safe direction: no arrivals is no evidence.
+
 ## Runtime user & filesystem
 
 The container runs as a non-root `swap` user, uid/gid `10001`. Two paths are

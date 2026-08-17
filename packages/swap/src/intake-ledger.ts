@@ -105,26 +105,26 @@ export function validatePersistedIntakeLedger(
     if (!isIntakeClass(k)) {
       throw new Error(`intake ledger state.classes has unknown class "${k}"`);
     }
-    const entry = v as Record<string, unknown>;
-    if (!isFiniteNumber(entry?.['count']) || entry['count'] < 0) {
+    const entry = v as Record<string, unknown> | null;
+    const numericField = (field: keyof IntakeLedgerClassEntry): number => {
+      const value = entry?.[field];
+      if (!isFiniteNumber(value)) {
+        throw new Error(
+          `intake ledger state.classes["${k}"].${field} must be a finite number`
+        );
+      }
+      return value;
+    };
+    const count = numericField('count');
+    if (count < 0) {
       throw new Error(
         `intake ledger state.classes["${k}"].count must be a non-negative number`
       );
     }
-    if (!isFiniteNumber(entry?.['firstSeenAt'])) {
-      throw new Error(
-        `intake ledger state.classes["${k}"].firstSeenAt must be a finite number`
-      );
-    }
-    if (!isFiniteNumber(entry?.['lastSeenAt'])) {
-      throw new Error(
-        `intake ledger state.classes["${k}"].lastSeenAt must be a finite number`
-      );
-    }
     classes[k] = {
-      count: entry['count'] as number,
-      firstSeenAt: entry['firstSeenAt'] as number,
-      lastSeenAt: entry['lastSeenAt'] as number,
+      count,
+      firstSeenAt: numericField('firstSeenAt'),
+      lastSeenAt: numericField('lastSeenAt'),
     };
   }
   return { version: 1, since: rec['since'] as number, classes };

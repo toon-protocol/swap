@@ -127,11 +127,7 @@ export {
   formatPairLabel,
 } from './intake-event.js';
 export type { SwapIntakeClass } from './intake-event.js';
-export {
-  IntakeLedger,
-  JsonFileIntakeLedgerStore,
-  validatePersistedIntakeLedger,
-} from './intake-ledger.js';
+export { IntakeLedger, JsonFileIntakeLedgerStore } from './intake-ledger.js';
 export type {
   IntakeLedgerStore,
   IntakeLedgerInit,

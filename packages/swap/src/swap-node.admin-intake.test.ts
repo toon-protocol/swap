@@ -177,7 +177,9 @@ function rfqDataB64(senderSecretKey: Uint8Array, makerPubkey: string): string {
   return ilpPrepare.data;
 }
 
-async function fetchIntake(instance: SwapNodeInstance): Promise<AdminIntakeReport> {
+async function fetchIntake(
+  instance: SwapNodeInstance
+): Promise<AdminIntakeReport> {
   const res = await fetch(`http://127.0.0.1:${instance.blsPort}/admin/intake`);
   expect(res.status).toBe(200);
   return (await res.json()) as AdminIntakeReport;
@@ -253,10 +255,15 @@ describe('issue #171 — intake ledger durability across a restart', () => {
       await first.handler({
         amount: '1000',
         destination: 'g.toon.swap.x',
-        data: legacySwapDataB64(sender.secretKey, first.instance.identity.pubkey),
+        data: legacySwapDataB64(
+          sender.secretKey,
+          first.instance.identity.pubkey
+        ),
       });
       firstReport = await fetchIntake(first.instance);
-      expect(firstReport.classes.find((c) => c.class === 'legacy')?.count).toBe(1);
+      expect(firstReport.classes.find((c) => c.class === 'legacy')?.count).toBe(
+        1
+      );
     } finally {
       await first.instance.stop();
     }
@@ -271,16 +278,23 @@ describe('issue #171 — intake ledger durability across a restart', () => {
       const secondReport = await fetchIntake(second.instance);
       const legacy = secondReport.classes.find((c) => c.class === 'legacy');
       expect(legacy?.count).toBe(1);
-      expect(legacy?.lastSeenAt).toBe(firstReport.classes.find((c) => c.class === 'legacy')?.lastSeenAt);
+      expect(legacy?.lastSeenAt).toBe(
+        firstReport.classes.find((c) => c.class === 'legacy')?.lastSeenAt
+      );
       expect(secondReport.since).toBe(firstReport.since);
 
       await second.handler({
         amount: '1000',
         destination: 'g.toon.swap.x',
-        data: legacySwapDataB64(sender.secretKey, second.instance.identity.pubkey),
+        data: legacySwapDataB64(
+          sender.secretKey,
+          second.instance.identity.pubkey
+        ),
       });
       const thirdReport = await fetchIntake(second.instance);
-      expect(thirdReport.classes.find((c) => c.class === 'legacy')?.count).toBe(2);
+      expect(thirdReport.classes.find((c) => c.class === 'legacy')?.count).toBe(
+        2
+      );
     } finally {
       await second.instance.stop();
     }
@@ -304,7 +318,10 @@ describe('issue #171 — intake ledger durability across a restart', () => {
       await second.handler({
         amount: '1000',
         destination: 'g.toon.swap.x',
-        data: legacySwapDataB64(sender.secretKey, second.instance.identity.pubkey),
+        data: legacySwapDataB64(
+          sender.secretKey,
+          second.instance.identity.pubkey
+        ),
       });
       expect(existsSync(intakeLedgerPath)).toBe(true);
       expect(existsSync(join(dir, 'intake-ledger.json'))).toBe(false);
