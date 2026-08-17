@@ -1,22 +1,28 @@
 /**
  * Story 12.10 — Solana swap-flow + settlement E2E (AC-7)
  *
- * GREEN-PHASE. Drives `streamSwap()` with `swapPair.to.chain === 'solana:devnet'`
- * against sender → peer1 over real BTP, then submits the accumulated claim via
- * raw Solana JSON-RPC (`sendTransaction`) and asserts an on-chain effect on the
- * channel program account.
+ * Drives `streamSwap()` with `swapPair.to.chain === 'solana:devnet'` against
+ * sender → peer1 over real BTP and asserts the leg-B claims plus the SHAPE of the
+ * `buildSettlementTx` bundle built from them.
+ *
+ * It does NOT broadcast. This docblock claimed for two stories that it "submits
+ * the accumulated claim via raw Solana JSON-RPC (`sendTransaction`) and asserts
+ * an on-chain effect"; the file has never contained a `sendTransaction` call, and
+ * the settlement rubric it quoted (a confirmed `CLAIM_FROM_CHANNEL` txn advancing
+ * the channel account's nonce) has never been met here. Corrected in swap#164 —
+ * a stale claim in a docblock is how a defect stays invisible.
+ *
+ * Redeeming from this suite is unblocked upstream but not in this repo yet: the
+ * builder's encoding is fixed in toon#214 and the maker's signer is fixed in
+ * swap#164, but this package pins the published `@toon-protocol/sdk@^3.2.0`,
+ * which still carries the broken builder. See the `buildSettlementTx` NOTE in
+ * `docker-rolling-swap-solana-e2e.test.ts` and the README's "known gaps".
  *
  * swap#160: this suite now EXECUTES. It used to collect two tests and skip both
  * because nothing ever brought a validator up; `global-setup.ts` now boots a
- * real one with the vendored payment-channel program baked into genesis. Kept
- * as-is otherwise — it is the legacy `streamSwap()` twin of
- * `docker-rolling-swap-solana-e2e.test.ts` and stays until Stage 5 of
- * toon-meta#411 retires the legacy path.
- *
- * Settlement rubric (from story Dev Notes):
- *   Solana minimum = `CLAIM_FROM_CHANNEL` discriminator txn submitted,
- *   confirmed, and EITHER (a) recipient ATA SPL balance increased by claim
- *   amount OR (b) channel account nonce field advanced.
+ * real one with the vendored payment-channel program baked into genesis. It is
+ * the legacy `streamSwap()` twin of `docker-rolling-swap-solana-e2e.test.ts` and
+ * stays until Stage 5 of toon-meta#411 retires the legacy path.
  */
 
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';

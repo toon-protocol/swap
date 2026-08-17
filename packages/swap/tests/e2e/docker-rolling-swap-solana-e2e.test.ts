@@ -177,14 +177,23 @@ describe('Docker Rolling Swap Solana E2E (swap#160)', () => {
     expect(bundle.unsignedTxBytes.length).toBeGreaterThan(0);
     expect(bundle.claimsMerged).toBeGreaterThanOrEqual(1);
 
-    // NOTE the deliberate absence of a broadcast. `buildSettlementTx`'s Solana
-    // branch emits an Anchor-style discriminator (`sha256('global:update_
-    // balance')`) and a `cumulative || nonce` payload, while the deployed
-    // program is native, expects `CLAIM_FROM_CHANNEL = [6,0,0,0,0,0,0,0]` and
-    // `nonce || transferred_amount`, and takes the signature out of band. The
-    // bundle is therefore structurally right and not executable; submitting it
-    // here would fail for reasons that have nothing to do with this harness.
-    // Tracked separately — see the README's "known gaps".
+    // NOTE the deliberate absence of a broadcast, and what it now waits on.
+    //
+    // The encoding defect this comment used to describe is FIXED upstream
+    // (toon#214): `buildSettlementTx` now emits the native
+    // `CLAIM_FROM_CHANNEL = [6,0,0,0,0,0,0,0]` discriminator, a
+    // `nonce || transferred_amount` payload and the out-of-band Ed25519
+    // precompile instruction, proven by redeeming a real claim against this same
+    // vendored program on a local validator. The maker's own signer was the other
+    // half and is fixed here (swap#164): it signs the 48-byte message the program
+    // verifies, so the claims THIS suite produces are redeemable claims.
+    //
+    // What blocks the broadcast is the dependency, not the design: this package
+    // pins `@toon-protocol/sdk@^3.2.0`, which is the published version that still
+    // carries the broken builder — `verifySignatures: false` above is load-bearing
+    // for exactly that reason, since 3.2.0's verifier checks the legacy digest the
+    // maker no longer signs. Bump the range once the fix is released, then wire
+    // the redemption here and assert `transferred_amount_b` moves in S-3.
   });
 
   // ---------------------------------------------------------------------
