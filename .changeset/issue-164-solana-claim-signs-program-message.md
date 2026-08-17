@@ -1,5 +1,5 @@
 ---
-'@toon-protocol/swap': minor
+'@toon-protocol/swap': major
 ---
 
 The maker's Solana balance proofs are now REDEEMABLE (swap#164, toon#214).

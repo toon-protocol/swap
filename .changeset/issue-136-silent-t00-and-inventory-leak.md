@@ -1,4 +1,5 @@
 ---
+'@toon-protocol/swap': major
 ---
 
 **A swap refusal is now logged and actionable, and a failed swap no longer leaks inventory.**
