@@ -5,9 +5,9 @@
  * instead of a guess.
  *
  * These drive real packets through the connector-facing packet handler
- * (`setPacketHandler`), the same seam `swap-node.rolling-rfq.test.ts` and
- * `swap-node.claim-refusal.test.ts` exercise, and assert on the captured
- * `swap.intake.arrival` log line — never on internal state.
+ * (`setPacketHandler`), the same seam `swap-node.rolling-rfq.test.ts`
+ * exercises, and assert on the captured `swap.intake.arrival` log line —
+ * never on internal state.
  */
 import { describe, it, expect } from 'vitest';
 import { sha256 } from '@noble/hashes/sha2.js';
@@ -20,7 +20,10 @@ import { startSwapNode } from './swap-node.js';
 import type { SwapNodeConfig, SwapNodeInstance } from './swap-node.js';
 import { ROLLING_PROTOCOL, ROLLING_REJECT_REASONS } from './rolling-engine.js';
 import type { LegBResult } from './rolling-engine.js';
-import { ROLLING_RFQ_REQUEST_KIND } from './rolling-rfq.js';
+import {
+  ROLLING_RFQ_REQUEST_KIND,
+  ROLLING_RFQ_REJECT_REASONS,
+} from './rolling-rfq.js';
 import { SWAP_INTAKE_EVENT } from './intake-event.js';
 
 const VALID_MNEMONIC =
@@ -224,7 +227,7 @@ function mint(): { preimage: Uint8Array; conditionB64: string } {
 }
 
 describe('swap#152 — intake classification (ADR 0003 removal gate)', () => {
-  it('a legacy gift wrap emits class "legacy" with the requested pair and peer', async () => {
+  it('a legacy (kind:20032) gift wrap emits class "refused" (swap#154 — the maker no longer accepts it)', async () => {
     const sender = senderKeys();
     const { instance, handler, logs } = await bootNode();
     try {
@@ -236,13 +239,14 @@ describe('swap#152 — intake classification (ADR 0003 removal gate)', () => {
         },
         'peer-legacy-01'
       );
-      expect(res.accept).toBe(true);
+      expect(res.accept).toBe(false);
 
       const events = intakeEvents(logs);
       expect(events).toHaveLength(1);
       expect(events[0]).toMatchObject({
-        class: 'legacy',
+        class: 'refused',
         sender: 'peer-legacy-01',
+        reason: ROLLING_RFQ_REJECT_REASONS.LEGACY_PROTOCOL_REFUSED,
         pair: PAIR_LABEL,
       });
     } finally {
@@ -312,7 +316,10 @@ describe('swap#152 — intake classification (ADR 0003 removal gate)', () => {
 
       const events = intakeEvents(logs);
       expect(events).toHaveLength(2);
-      expect(events[0]?.['class']).toBe('legacy');
+      expect(events[0]).toMatchObject({
+        class: 'refused',
+        reason: ROLLING_RFQ_REJECT_REASONS.LEGACY_PROTOCOL_REFUSED,
+      });
       expect(events[1]?.['class']).toBe('rolling-rfq');
     } finally {
       await instance.stop();
@@ -413,7 +420,7 @@ describe('swap#152 — intake classification (ADR 0003 removal gate)', () => {
     }
   });
 
-  it('a sender-chosen condition on a non-rolling payload emits class "refused" (condition_unsupported_legacy)', async () => {
+  it('a sender-chosen condition on a non-fill payload emits class "refused" (malformed_fill)', async () => {
     const { conditionB64 } = mint();
     const { instance, handler, logs } = await bootNode();
     try {
@@ -429,7 +436,7 @@ describe('swap#152 — intake classification (ADR 0003 removal gate)', () => {
       expect(events).toHaveLength(1);
       expect(events[0]).toMatchObject({
         class: 'refused',
-        reason: ROLLING_REJECT_REASONS.CONDITION_UNSUPPORTED_LEGACY,
+        reason: ROLLING_REJECT_REASONS.MALFORMED_FILL,
       });
     } finally {
       await instance.stop();
@@ -448,7 +455,7 @@ describe('swap#152 — intake classification (ADR 0003 removal gate)', () => {
       const events = intakeEvents(logs);
       expect(events).toHaveLength(1);
       const keys = Object.keys(events[0] ?? {});
-      expect(keys.sort()).toEqual(['class', 'pair', 'sender']);
+      expect(keys.sort()).toEqual(['class', 'pair', 'reason', 'sender']);
     } finally {
       await instance.stop();
     }

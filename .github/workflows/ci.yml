@@ -191,11 +191,12 @@ jobs:
           FORCE_COLOR: '0'
         run: pnpm --filter @toon-protocol/swap test:e2e:docker 2>&1 | tee /tmp/solana-e2e.log
 
-      # Guard the counts, not just the colour. `tests/e2e/README.md` documents
-      # what each suite collects; these two are the Solana ones, and each must
-      # collect its full complement with NOTHING skipped. A suite that quietly
-      # loses a test, or skips one, fails here.
-      - name: Assert the Solana suites collected and ran everything
+      # Guard the count, not just the colour. `tests/e2e/README.md` documents
+      # what this suite collects; it must collect its full complement with
+      # NOTHING skipped. A suite that quietly loses a test, or skips one,
+      # fails here. swap#154 (toon-meta#411 Stage 5) deleted the legacy
+      # `docker-swap-flow-solana-e2e.test.ts` this used to check alongside it.
+      - name: Assert the Solana suite collected and ran everything
         run: |
           set -euo pipefail
           # Strip any ANSI escapes before matching. Vitest's own markers sit
@@ -223,9 +224,8 @@ jobs:
             fi
           }
           check 'docker-rolling-swap-solana-e2e.test.ts' 4
-          check 'docker-swap-flow-solana-e2e.test.ts' 2
           [ "$fail" -eq 0 ] || exit 1
-          echo "✓ both Solana suites collected and ran their full complement"
+          echo "✓ the Solana suite collected and ran its full complement"
 
   swap-image-build:
     name: swap runtime image build

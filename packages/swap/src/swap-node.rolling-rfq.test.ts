@@ -468,34 +468,7 @@ describe('rolling RFQ intake — wire reachability', () => {
     }
   });
 
-  it('rolling.rfq.enabled=false leaves the RFQ to the legacy handler (opt-out is real)', async () => {
-    const sender = senderKeys();
-    const { instance, handler } = await bootNode({
-      rolling: { rfq: { enabled: false } },
-    });
-    try {
-      const res = await handler()({
-        amount: '1000',
-        destination: 'g.toon.swap.x',
-        data: giftWrappedDataB64({
-          kind: ROLLING_RFQ_REQUEST_KIND,
-          content: rfqRequest(),
-          senderSecretKey: sender.secretKey,
-          makerPubkey: instance.identity.pubkey,
-        }),
-      });
-      // Falls through to the legacy swap handler, which does not know kind:20033.
-      expect(res.accept).toBe(false);
-      expect(res.code).not.toBe('F01');
-      expect(decodeReason(res.data)).not.toBe(
-        ROLLING_RFQ_REJECT_REASONS.MALFORMED_RFQ
-      );
-    } finally {
-      await instance.stop();
-    }
-  });
-
-  it('a gift wrap whose inner kind is NOT 20033 still takes the legacy path unchanged', async () => {
+  it('a gift wrap whose inner kind is 20032 (legacy) is refused, terminally (swap#154)', async () => {
     const sender = senderKeys();
     const { instance, handler } = await bootNode();
     try {
@@ -503,25 +476,23 @@ describe('rolling RFQ intake — wire reachability', () => {
         amount: '1000',
         destination: 'g.toon.swap.x',
         data: giftWrappedDataB64({
-          kind: 20032, // the legacy swap-request rumor kind
+          kind: 20032, // the retired legacy swap-request rumor kind
           content: '{}',
           senderSecretKey: sender.secretKey,
           makerPubkey: instance.identity.pubkey,
         }),
       });
-      // Whatever the legacy handler says, it must not be an RFQ verdict.
-      expect(decodeReason(res.data)).not.toBe(
-        ROLLING_RFQ_REJECT_REASONS.MALFORMED_RFQ
-      );
-      expect(decodeReason(res.data)).not.toBe(
-        ROLLING_RFQ_REJECT_REASONS.UNSUPPORTED_PAIR
+      expect(res.accept).toBe(false);
+      expect(res.code).toBe('F06');
+      expect(decodeReason(res.data)).toBe(
+        ROLLING_RFQ_REJECT_REASONS.LEGACY_PROTOCOL_REFUSED
       );
     } finally {
       await instance.stop();
     }
   });
 
-  it('an unparseable (non-gift-wrap) payload is untouched — legacy F06 Invalid TOON payload', async () => {
+  it('an unparseable (non-gift-wrap) payload is refused, terminally (swap#154)', async () => {
     const { instance, handler } = await bootNode();
     try {
       const res = await handler()({
@@ -531,7 +502,9 @@ describe('rolling RFQ intake — wire reachability', () => {
       });
       expect(res.accept).toBe(false);
       expect(res.code).toBe('F06');
-      expect(res.message).toBe('Invalid TOON payload');
+      expect(decodeReason(res.data)).toBe(
+        ROLLING_RFQ_REJECT_REASONS.UNREADABLE_REQUEST
+      );
     } finally {
       await instance.stop();
     }

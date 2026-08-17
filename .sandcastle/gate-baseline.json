@@ -1,11 +1,11 @@
 {
   "$schema": "https://toon-protocol.github.io/schemas/gate-baseline.v1.json",
   "repo": "swap",
-  "capturedAt": "2026-08-16T23:33:06Z",
-  "capturedFromCommit": "d644d4e81cf38b421cf0897f83defdce8894cf9f",
-  "capturedFromBranch": "sandcastle/issue-152",
+  "capturedAt": "2026-08-17T13:27:19Z",
+  "capturedFromCommit": "69ac5859ce8302774987f2c3156d90d8816eec95",
+  "capturedFromBranch": "sandcastle/issue-154",
   "regressionTolerancePct": 25,
-  "recaptureNote": "gateSpeed recaptured again; gateCorrectness's enforced allowlists (lint, typecheck) and gatePerformance are untouched — live counts still sit at or under those frozen figures, so no ratchet was needed there. gateCorrectness.test's counts ARE refreshed below (27/365 → 42/517 passing files/tests, as measured at the capture commit) to match the live suite; that block is descriptive only, gate-correctness.ts enforces just lint and typecheck. Recaptured because issue #152 (this PR — adding `swap.intake.arrival` classification logging plus one new test file) failed gate:no-regression's test-speed check on an UNMODIFIED baseline: testMs measured ~17.2s vs the frozen 11216ms, >25% over. Verified this is pre-existing baseline staleness, not a regression this change introduced, by stashing this PR's diff (including the new, untracked test file) and re-running the gate against plain HEAD (d644d4e) — same failure, testMs ~16.7-17.2s. Root cause is the same organic test-suite growth pattern the prior recapture (issue #131) already documented: fourteen more PRs merged to main since that capture (785b117 → d644d4e), closing #133, #134, #138, #139, #140, #141, #142, #144, #148 among others — vitest's own test count grew from 365 to 517 (+42%), each adding real coverage (including a wider gate-tooling suite under `.sandcastle/scripts/`), tracking directly with the testMs increase measured here. Reproduce via the method below on the current HEAD.",
+  "recaptureNote": "Rebaselined for swap#154 (toon-meta#411 Stage 5), which the ticket requires: the maker's legacy claim-in-FULFILL dispatch (createSwapHandler/withMaxRateAge wiring, the HandlerRegistry, the CONDITION_UNSUPPORTED_LEGACY reject) is deleted and rfqIntake.handle() is made terminal, so this is a net deletion of both product and test code, not a growth recapture like #131/#152 were. gateCorrectness's lint/typecheck allowlists are LOWERED, not just left unratcheted: lint 352→271 warnings (byRule no-non-null-assertion 350→269, unused-eslint-disable-directive unchanged at 2), typecheck 25→4 errors (all 4 still test-side, swap#69 — the deleted legacy suites and the fixture they shared accounted for the rest of the drop). gateCorrectness.test counts are 42/517→44/537 passing files/tests at the root `pnpm test` level. That is a net RISE despite this PR deleting four legacy tests/e2e/docker-swap-flow-*.test.ts suites (18 tests), tests/integration/swap-flow.integration.test.ts, tests/integration/swap-flow-anvil.integration.test.ts, tests/integration/staleness-reject.integration.test.ts, src/swap-node.claim-refusal.test.ts and tests/integration/helpers/fixture-topology.ts outright (their scenarios all depended on legacy dispatch, which no longer exists) — every unrelated PR merged to main between #152's capture and this one (see recent-commits: #153, #159, #160/#162, #164/#165, #166) added real coverage of its own, and this recapture does not attempt to separate that growth from swap#154's own (larger) deletion. gateSpeed re-measured the same way as every prior recapture (method below); no regression, well inside tolerance.",
   "gateShape": {
     "packageManager": "pnpm@8.15.9",
     "order": ["lint", "build", "typecheck", "test"],
@@ -19,11 +19,11 @@
   "gateSpeed": {
     "description": "CI wall-clock time for the gate the dumb zone (.sandcastle/) runs before opening a PR. Read by gate-no-regression.ts as the frozen numbers to compare live timings against.",
     "unit": "milliseconds",
-    "lintMs": 13085,
-    "buildMs": 7776,
-    "typecheckMs": 5684,
-    "testMs": 16745,
-    "gateTotalMs": 43290,
+    "lintMs": 13417,
+    "buildMs": 7955,
+    "typecheckMs": 5735,
+    "testMs": 17595,
+    "gateTotalMs": 44702,
     "ciWorkflowReference": {
       "note": "Cross-check data point only, NOT the primary number: .github/workflows/ci.yml runs a narrower shape on a GitHub-hosted ubuntu-latest runner. The sandcastle gate above (lint/build/typecheck/test) is the shape this baseline tracks. Not re-measured for this recapture (no CI run available from the capture sandbox) — the prior swap#77 run remains the only data point; treat as stale alongside the rest of this cross-check block.",
       "workflow": "ci.yml",
@@ -56,21 +56,21 @@
     "lint": {
       "tool": "eslint . (flat config)",
       "errors": 0,
-      "warnings": 352,
+      "warnings": 271,
       "byRule": {
-        "@typescript-eslint/no-non-null-assertion": 350,
+        "@typescript-eslint/no-non-null-assertion": 269,
         "unused-eslint-disable-directive": 2
       }
     },
     "typecheck": {
       "tool": "tsc -p tsconfig.json --noEmit (run after build — see gateShape.note)",
-      "errors": 25,
-      "note": "All 25 errors are test-side (packages/swap/src/*.test.ts and packages/swap/tests/**); zero production-source (non-test src/*.ts) errors. Tracked debt: swap#69."
+      "errors": 4,
+      "note": "All 4 errors are test-side (2 in packages/swap/src/swap-node.leg-b-wire.test.ts, 2 under packages/swap/tests/e2e/**); zero production-source (non-test src/*.ts) errors. Tracked debt: swap#69."
     },
     "test": {
       "tool": "vitest run",
-      "testFiles": { "passed": 42, "total": 42 },
-      "tests": { "passed": 517, "skipped": 2, "failed": 0, "total": 519 }
+      "testFiles": { "passed": 44, "total": 44 },
+      "tests": { "passed": 537, "skipped": 2, "failed": 0, "total": 539 }
     },
     "build": {
       "tool": "pnpm -r run build (tsup)",

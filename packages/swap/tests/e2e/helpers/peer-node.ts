@@ -176,9 +176,9 @@ export async function startPeerNode(
     mnemonic: opts.mnemonic,
     swapPairs: chain
       ? [
-          // Same-chain pair — what peer1 has always advertised, and what the
-          // legacy suites still drive. Also the shape the live devnet maker
-          // advertises today (a USDC-at-parity placeholder).
+          // Same-chain pair — what peer1 has always advertised, and the
+          // shape the live devnet maker advertises today (a USDC-at-parity
+          // placeholder).
           {
             from: { ...asset, chain },
             to: { ...asset, chain },

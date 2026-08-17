@@ -20,7 +20,7 @@ devbox shell
 # Inside the devbox shell:
 node --version      # v22.x
 pnpm --version      # 8.15.x
-forge --version     # foundry (used by test:integration:anvil)
+forge --version     # foundry (anvil-gated integration/e2e suites)
 anvil --version
 
 # Build and test
