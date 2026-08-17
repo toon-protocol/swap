@@ -16,7 +16,7 @@ sender-minted execution condition, with the chain-B claim arriving on **leg B**.
 | `docker-rolling-swap-evm-e2e.test.ts` | 5 | RFQ, coupled fills, R4/R6 coupling, R5/R8 withhold, EVM settlement bundle |
 | `docker-rolling-swap-cross-chain-e2e.test.ts` | 3 | `evm:base:31337 → evm:base:31338` — a REAL chain boundary, no operator infra |
 | `docker-rolling-swap-pair-matrix-e2e.test.ts` | 17 | 16 ordered pairs over 4 chains + a coverage guard |
-| `docker-rolling-swap-solana-e2e.test.ts` | 4 | `evm:base:31337 → solana:devnet` against a REAL vendored-program validator: leg-B ed25519 claims, the Solana settlement bundle, a real channel PDA read back through swap#141's decoder, and the refusal of the reverse direction (swap#160) |
+| `docker-rolling-swap-solana-e2e.test.ts` | 4 | `evm:base:31337 → solana:devnet` against a REAL vendored-program validator: leg-B ed25519 claims, the Solana settlement bundle's SHAPE (not a broadcast — see below), a real channel PDA read back through swap#141's decoder, and the refusal of the reverse direction (swap#160) |
 | `docker-rolling-swap-mina-e2e.test.ts` | 2 | Mina target (skips without a lightnet) |
 | `docker-rolling-leg-b-routing-e2e.test.ts` | 3 | the swap#148 `F02` and `T00` routing shapes |
 
@@ -155,7 +155,21 @@ maker needs to price and settle on it. Nothing is operator-supplied:
    with nothing real to read.
 
 Peer1 then advertises `evm:base:31337 → solana:devnet` and issues real ed25519
-balance proofs on it.
+balance proofs on it — as of swap#164 over the 48-byte
+`channel_pda || nonce(8 LE) || transferred_amount(8 LE)` message the program
+above actually verifies, so those proofs are REDEEMABLE. Until then the maker
+signed `sha256(utf8(channelId) || cumulative(32BE) || nonce(32BE) ||
+utf8(recipient))`, a digest no deployed program has ever checked (toon#214).
+
+What these suites still do NOT do is broadcast one. The upstream builder's
+encoding is fixed (toon#214, proven by redeeming against this same vendored
+program on a local validator), but this package pins the published
+`@toon-protocol/sdk@^3.2.0`, which is the version that still emits an
+Anchor-style discriminator, a reversed payload and an inlined signature. So the
+Solana settlement assertions remain SHAPE-ONLY and `verifySignatures: false`
+stays load-bearing — 3.2.0's verifier checks the legacy digest the maker no
+longer signs. Bumping that range, then wiring the redemption and asserting
+`transferred_amount_b` moves in S-3, is the follow-up.
 
 Requirement: `solana-test-validator`, `solana` and `spl-token` on PATH
 (`https://release.anza.xyz/v2.1.21/install`). The **`solana-e2e` CI job**

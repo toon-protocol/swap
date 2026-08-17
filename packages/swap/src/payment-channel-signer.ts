@@ -15,13 +15,20 @@ import { sha256 } from '@noble/hashes/sha2.js';
 // share a single source of truth. (The EVM digest now comes from the
 // settlement-digest leaf imported below — issue #101.)
 import {
-  balanceProofHashSolana,
   balanceProofFieldsMina,
   base58Encode,
   bigintToBytes32BE,
   concatBytes,
   hexToBytes,
 } from '@toon-protocol/sdk';
+
+// swap#164 / toon#214: the Solana balance proof is the RAW 48-byte message the
+// deployed program's Ed25519 precompile check verifies, NOT the sdk's legacy
+// `balanceProofHashSolana` digest — which no program has ever verified, making
+// every Solana claim this signer has issued unredeemable. Local until the sdk
+// range is bumped to a release carrying `balanceProofMessageSolana`; see that
+// module's header.
+import { balanceProofMessageSolana } from './solana-balance-proof.js';
 
 // Issue #101: the EVM balance-proof digest comes from the shared, dependency-light
 // leaf (@noble-only, no core/sdk/connector major bump needed) so the swap node
@@ -319,6 +326,14 @@ export class MinaPaymentChannelSigner implements PaymentChannelSigner {
 
 // ---------------------------------------------------------------------------
 // SolanaPaymentChannelSigner
+//
+// Signs the 48-byte `channel_pda || nonce(8 LE) || transferred_amount(8 LE)`
+// message connector's native payment-channel program verifies through the
+// Ed25519 precompile — so `channelId` MUST be the channel's PDA in base58, and a
+// claim this signer produces is redeemable by
+// `@toon-protocol/sdk`'s `buildSettlementTx` (toon#214, proven against the real
+// program on a local validator). It signed a `sha256(...)` digest no program has
+// ever verified until swap#164.
 // ---------------------------------------------------------------------------
 
 export interface SolanaPaymentChannelSignerConfig {
@@ -353,15 +368,18 @@ export class SolanaPaymentChannelSigner implements PaymentChannelSigner {
     params: PaymentChannelSignParams
   ): Promise<Uint8Array> {
     try {
-      const msg = balanceProofHashSolana(
+      const msg = balanceProofMessageSolana(
         params.channelId,
-        params.cumulativeAmount,
         params.nonce,
-        params.recipient
+        params.cumulativeAmount
       );
       const sig = ed25519.sign(msg, this.privateKey);
       return new Uint8Array(sig);
     } catch (err) {
+      // `balanceProofMessageSolana` already explains exactly which input it
+      // refused (a channelId that is not a 32-byte PDA, an out-of-u64 amount);
+      // re-wrapping it would bury that message in `cause`.
+      if (err instanceof SwapWalletError) throw err;
       throw new SwapWalletError(
         'SIGNING_FAILED',
         'Solana balance-proof signing failed',

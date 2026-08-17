@@ -15,10 +15,18 @@ import {
 
 import { deriveSwapNodeKeys } from './wallet.js';
 
-import { verifyMinaSignature } from '@toon-protocol/sdk';
+import { base58Decode, verifyMinaSignature } from '@toon-protocol/sdk';
 import type { AccumulatedClaim } from '@toon-protocol/sdk';
 
 import { SwapWalletError } from './errors.js';
+
+/**
+ * A real 32-byte channel PDA in base58. On Solana a channelId IS its channel
+ * PDA, and the balance proof the program verifies is built from those 32 bytes,
+ * so a placeholder like `'chan-sol-1'` is not a channelId the chain could ever
+ * resolve — the signer now refuses it (swap#164).
+ */
+const SOLANA_CHANNEL_PDA = '7My924UBF6FFUSZ6uHeEvzTTR6Wjs3nZ3SAym9cDjPV1';
 
 const ZERO_MNEMONIC =
   'abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about';
@@ -253,7 +261,8 @@ describe('SolanaPaymentChannelSigner — round-trip (Story 12.4 AC-5)', () => {
     });
 
     const sig = await signer.signBalanceProof({
-      channelId: 'chan-sol-1',
+      // A Solana channelId IS its channel PDA — 32 bytes, base58 (swap#164).
+      channelId: SOLANA_CHANNEL_PDA,
       cumulativeAmount: 1_000n,
       nonce: 1n,
       recipient: 'So11111111111111111111111111111111111111112',
@@ -265,70 +274,98 @@ describe('SolanaPaymentChannelSigner — round-trip (Story 12.4 AC-5)', () => {
   });
 
   it('[P0] Solana signature cryptographically verifies against the derived public key (round-trip)', async () => {
-    const { sha256 } = await import('@noble/hashes/sha2.js');
     const { ed25519 } = await import('@noble/curves/ed25519.js');
 
     const keys = await deriveSwapNodeKeys({
       mnemonic: ZERO_MNEMONIC,
       chains: ['solana'],
     });
+    const solana = keys.solana;
+    if (!solana) throw new Error('deriveSwapNodeKeys returned no Solana key');
     const signer = new SolanaPaymentChannelSigner({
       chain: 'solana:mainnet',
-      privateKey: keys.solana!.privateKey,
+      privateKey: solana.privateKey,
     });
 
     const params = {
-      channelId: 'chan-verify',
+      channelId: SOLANA_CHANNEL_PDA,
       cumulativeAmount: 42n,
       nonce: 7n,
       recipient: 'So11111111111111111111111111111111111111112',
     };
     const sig = await signer.signBalanceProof(params);
 
-    // Recompose the signed message in the EXACT same way the signer does
-    // (see `balanceProofHashSolana` in payment-channel-signer.ts):
-    //   sha256(channelId_utf8 || cumulativeAmount(32BE) || nonce(32BE) || recipient_utf8)
-    const bigintToBytes32BE = (x: bigint): Uint8Array => {
-      const out = new Uint8Array(32);
+    // Recompose the signed message the way the ON-CHAIN PROGRAM does — this is
+    // the assertion that matters, and it is deliberately hand-rolled from
+    // connector `packages/solana-program/src/processor.rs:900-910` rather than
+    // from the helper under test, so a drift in either fails here:
+    //   channel_pda(32) || nonce(8 LE) || transferred_amount(8 LE)
+    // (Before swap#164 this recomposed `sha256(utf8(channelId) || ... )`, a
+    // digest no deployed program verifies — the signer and this test agreed
+    // with each other and with nothing else.)
+    const u64LE = (x: bigint): Uint8Array => {
+      const out = new Uint8Array(8);
       let v = x;
-      for (let i = 31; i >= 0; i--) {
+      for (let i = 0; i < 8; i++) {
         out[i] = Number(v & 0xffn);
         v >>= 8n;
       }
       return out;
     };
-    const parts = [
-      new TextEncoder().encode(params.channelId),
-      bigintToBytes32BE(params.cumulativeAmount),
-      bigintToBytes32BE(params.nonce),
-      new TextEncoder().encode(params.recipient),
-    ];
-    const totalLen = parts.reduce((n, p) => n + p.length, 0);
-    const concat = new Uint8Array(totalLen);
-    let off = 0;
-    for (const p of parts) {
-      concat.set(p, off);
-      off += p.length;
-    }
-    const msgHash = sha256(concat);
+    const message = new Uint8Array(48);
+    message.set(base58Decode(params.channelId), 0);
+    message.set(u64LE(params.nonce), 32);
+    message.set(u64LE(params.cumulativeAmount), 40);
 
-    // Primary assertion: the signature must verify against the derived
-    // public key when using the documented hashing formula. If this
-    // breaks, the signer's encoding drifted from its documented contract.
-    const ok = ed25519.verify(sig, msgHash, keys.solana!.publicKey);
+    // Primary assertion: the signature must verify against the derived public
+    // key over the program's message. If this breaks, the signer's encoding
+    // drifted from the program and its claims stopped being redeemable.
+    const ok = ed25519.verify(sig, message, solana.publicKey);
     expect(ok).toBe(true);
 
     // Tampered-message path MUST NOT verify.
-    const tampered = new Uint8Array(msgHash);
+    const tampered = new Uint8Array(message);
     tampered[0] = (tampered[0] ?? 0) ^ 0xff;
-    const tamperedOk = ed25519.verify(sig, tampered, keys.solana!.publicKey);
+    const tamperedOk = ed25519.verify(sig, tampered, solana.publicKey);
     expect(tamperedOk).toBe(false);
+
+    // A bumped nonce MUST NOT verify either: the program reads nonce and
+    // transferred_amount out of the same 48 bytes it re-derives.
+    const bumpedNonce = new Uint8Array(message);
+    bumpedNonce.set(u64LE(params.nonce + 1n), 32);
+    expect(ed25519.verify(sig, bumpedNonce, solana.publicKey)).toBe(false);
 
     // Sanity: a random other public key MUST NOT verify the real message.
     const otherPriv = new Uint8Array(32);
     otherPriv.fill(9);
     const otherPub = ed25519.getPublicKey(otherPriv);
-    expect(ed25519.verify(sig, msgHash, otherPub)).toBe(false);
+    expect(ed25519.verify(sig, message, otherPub)).toBe(false);
+  });
+
+  it('[P0] refuses a channelId that is not a 32-byte PDA rather than signing an unredeemable claim (swap#164)', async () => {
+    const keys = await deriveSwapNodeKeys({
+      mnemonic: ZERO_MNEMONIC,
+      chains: ['solana'],
+    });
+    const solana = keys.solana;
+    if (!solana) throw new Error('deriveSwapNodeKeys returned no Solana key');
+    const signer = new SolanaPaymentChannelSigner({
+      chain: 'solana:mainnet',
+      privateKey: solana.privateKey,
+    });
+    const params = {
+      cumulativeAmount: 42n,
+      nonce: 7n,
+      recipient: 'So11111111111111111111111111111111111111112',
+    };
+    // Valid base58, wrong length — the shape a synthetic test channelId takes.
+    await expect(
+      signer.signBalanceProof({ ...params, channelId: 'chanSoX' })
+    ).rejects.toThrow(/32-byte channel PDA/);
+    // Not base58 at all — the shape the old placeholders took.
+    await expect(
+      signer.signBalanceProof({ ...params, channelId: 'chan-verify' })
+    ).rejects.toThrow(/not valid base58/);
   });
 
   it('[P2] chain and chainKind getters are correctly exposed', async () => {
