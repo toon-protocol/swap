@@ -1,5 +1,0 @@
----
-'@toon-protocol/swap': minor
----
-
-Bumped `@toon-protocol/sdk` from `^2.2.0` to `^3.1.8` (toon#200): released clients send EIP-55 checksummed (mixed-case) EVM `chain-recipient` addresses, and the sdk's `createSwapHandler`/`streamSwap` shared `validateChainRecipient` was lowercase-only, rejecting every such packet as `missing_or_malformed_chain_recipient` with an opaque ILP `T00 Internal error`. sdk 3.1.8 fixes this and reclassifies the reject as `F01` (permanent, self-diagnosable) instead of `T00` (transient). The swap node's own third-tier defense-in-depth check in `MultiChainClaimIssuer` (`claim-issuer.ts`, guarding direct `issueClaim`/rolling-session callers that bypass the sdk handler) carried a byte-for-byte copy of the same lowercase-only bug — fixed the same way, and now normalizes the accepted recipient to lowercase before signing/echoing it, matching the sdk's own `findChainRecipient()` behavior.
