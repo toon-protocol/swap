@@ -21,6 +21,7 @@ import type { ReconcileResult } from './inventory-reconciler.js';
 import type { ChannelOnChainReader } from './channel-state.js';
 import { registerAdminRoutes, buildInventoryReport } from './admin-surface.js';
 import type { AdminInventoryReport } from './admin-surface.js';
+import { IntakeLedger } from './intake-ledger.js';
 
 const ASSET = 'USDC';
 const CHAIN = 'evm:base:8453';
@@ -305,6 +306,7 @@ function makeAdminApp(p: {
   registerAdminRoutes(app, {
     inventory: p.inventory,
     reconciler: p.reconciler,
+    intakeLedger: new IntakeLedger(),
     ...(p.adminToken !== undefined && { adminToken: p.adminToken }),
   });
   return app;
@@ -352,7 +354,11 @@ describe('operator read surface — GET /admin/inventory', () => {
       reader: fakeReader({ redeemed: 0n }),
     });
 
-    const body = buildInventoryReport({ inventory, reconciler });
+    const body = buildInventoryReport({
+      inventory,
+      reconciler,
+      intakeLedger: new IntakeLedger(),
+    });
     expect(must(body.pools[0], 'pool view').issuanceBlocked).toBe(false);
     expect(must(body.pools[0], 'pool view').blockedReason).toBeUndefined();
     expect(body.writes.enabled).toBe(false);
@@ -370,7 +376,11 @@ describe('operator read surface — GET /admin/inventory', () => {
       channelState: makeChannelState(100n),
     });
 
-    const body = buildInventoryReport({ inventory, reconciler });
+    const body = buildInventoryReport({
+      inventory,
+      reconciler,
+      intakeLedger: new IntakeLedger(),
+    });
     expect(body.reconciler.enabled).toBe(false);
     expect(must(body.pools[0], 'pool view').blockedReason).toContain(
       'NO on-chain reader is configured'

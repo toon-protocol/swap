@@ -24,6 +24,13 @@
  *                            enables persistence of inventory, channel
  *                            watermarks, sticky bindings + replay
  *                            reservations across restarts
+ *   SWAP_INTAKE_LEDGER_PATH — durable per-class intake ledger path (issue
+ *                            #171, ADR 0003's removal gate — read at
+ *                            GET /admin/intake). OPTIONAL: defaults to
+ *                            `intake-ledger.json` beside SWAP_STATE_PATH
+ *                            when that is set; a missing/corrupt file
+ *                            starts empty rather than crash-looping the
+ *                            maker.
  *   TOON_CONNECTOR_URL     — parent BTP URL; activates embedded-with-parent mode
  *   TOON_PARENT_PEER_ID    — peer id for the parent (default: "apex")
  *   TOON_PARENT_AUTH_TOKEN — BTP auth token for the parent peer (default: "")
@@ -135,6 +142,8 @@ interface CliRawConfig {
   btpServerPort?: number;
   /** Durable swap-state snapshot path (issue #46). */
   statePath?: string;
+  /** Durable intake-ledger path (issue #171); defaults beside statePath. */
+  intakeLedgerPath?: string;
   passphrase?: string;
   knownPeers?: { ilpAddress: string; btpUrl?: string }[];
   // Story 12.7 Review Pass #1 additions — operator-surfaced kind:10032 fields.
@@ -270,6 +279,7 @@ function parseRawConfig(raw: CliRawConfig): SwapNodeConfig {
   if (raw.blsPort !== undefined) cfg.blsPort = raw.blsPort;
   if (raw.btpServerPort !== undefined) cfg.btpServerPort = raw.btpServerPort;
   if (raw.statePath) cfg.statePath = raw.statePath;
+  if (raw.intakeLedgerPath) cfg.intakeLedgerPath = raw.intakeLedgerPath;
   if (raw.passphrase) cfg.passphrase = raw.passphrase;
   if (raw.knownPeers) cfg.knownPeers = raw.knownPeers;
   if (raw.ilpAddress) cfg.ilpAddress = raw.ilpAddress;
@@ -342,6 +352,9 @@ function applyEnvOverlay(cfg: SwapNodeConfig): SwapNodeConfig {
       .filter(Boolean);
   }
   if (env['SWAP_STATE_PATH']) out.statePath = env['SWAP_STATE_PATH'];
+  if (env['SWAP_INTAKE_LEDGER_PATH']) {
+    out.intakeLedgerPath = env['SWAP_INTAKE_LEDGER_PATH'];
+  }
   // Embedded-with-parent connector wiring (TOON_* env vars). Setting
   // TOON_CONNECTOR_URL activates the embedded-with-parent path; the
   // remaining TOON_* vars are optional refinements.
