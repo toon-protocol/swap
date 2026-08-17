@@ -1576,8 +1576,9 @@ export async function startSwapNode(
   // 8. Staleness guard (rolling-swap §4, swap#48) — the rolling engine's and
   // the RFQ intake's shared `stale_rate` gate. swap#154 (toon-meta#411 Stage
   // 5) deleted the legacy `createSwapHandler` / `withMaxRateAge` wiring this
-  // used to also feed; the guard itself stays, unwired from either, because
-  // both the rolling engine and the RFQ intake still consume it directly.
+  // guard used to also feed; the guard itself stays, because the rolling
+  // engine (its `stale_rate` reject) and the RFQ intake (the freshness bound
+  // it advertises in the quote) both still consume it directly.
   const stalenessGuard = config.maxRateAge
     ? new RateFreshnessGuard({
         maxRateAge: config.maxRateAge,
@@ -1815,9 +1816,9 @@ export async function startSwapNode(
   // fill is a benign F06, so an idle engine costs nothing. Shares the
   // staleness guard (same feed-tick state the RFQ intake's freshness bound
   // reads) and — when persistence is enabled — the persistent replay set, so
-  // rolling replay
-  // reservations hit disk synchronously (state-store crash rule 4) under
-  // `rolling:${streamNonce}:${seq}` keys, disjoint from gift-wrap ids.
+  // rolling replay reservations hit disk synchronously (state-store crash
+  // rule 4) under `rolling:${streamNonce}:${seq}` keys, disjoint from
+  // gift-wrap ids.
   const resolvedNodeId =
     config.nodeId ?? `toon-swap-${identity.pubkey.slice(0, 16)}`;
   const rollingLegBSender: LegBSender =
@@ -1934,13 +1935,16 @@ export async function startSwapNode(
   // which is TERMINAL: kind:20033 mints a session, anything else (the
   // retired legacy kind:20032, or anything unparseable) is a named reject.
   //
-  //   | executionCondition   | payload          | path                          |
-  //   |----------------------|------------------|--------------------------------|
-  //   | absent / all-zero    | kind:20033 RFQ   | rolling RFQ intake (session)  |
-  //   | absent / all-zero    | anything else    | rfqIntake reject (terminal)   |
-  //   | absent / all-zero    | rolling fill     | reject F99 condition_required |
-  //   | non-zero (32B)       | rolling fill     | rolling engine (coupled legs) |
-  //   | non-zero (32B)       | anything else    | reject F01 malformed_fill     |
+  // Rows are in the order the branches below test them:
+  //
+  //   | executionCondition | payload         | path                          |
+  //   |--------------------|-----------------|-------------------------------|
+  //   | any                | malformed fill  | reject F01 malformed_fill     |
+  //   | non-zero (32B)     | rolling fill    | rolling engine (coupled legs) |
+  //   | non-zero (32B)     | anything else   | reject F01 malformed_fill     |
+  //   | absent / all-zero  | rolling fill    | reject F99 condition_required |
+  //   | absent / all-zero  | kind:20033 RFQ  | rolling RFQ intake (session)  |
+  //   | absent / all-zero  | anything else   | rfqIntake reject (terminal)   |
   const decodeSenderCondition = (b64?: string): Uint8Array | null => {
     if (typeof b64 !== 'string' || b64.length === 0) return null;
     let buf: Buffer;
@@ -1950,7 +1954,9 @@ export async function startSwapNode(
       return null;
     }
     if (buf.length !== 32) return null;
-    if (buf.every((b) => b === 0)) return null; // legacy class (contract §classes)
+    // An all-zero condition is the contract's "legacy" packet class
+    // (contract §classes) — the seam the RFQ intake now owns terminally.
+    if (buf.every((b) => b === 0)) return null;
     return new Uint8Array(buf);
   };
 
@@ -2000,9 +2006,8 @@ export async function startSwapNode(
     const sessionPairLabel = (streamNonce: string): string | undefined =>
       formatPairLabel(rollingSessions.get(streamNonce)?.pair);
 
-    if (rollingFill === 'malformed') {
-      // Self-identified rolling/1 traffic that violates the fill shape:
-      // reject F01 with a precise reason rather than a generic one.
+    /** The one answer both malformed-fill branches below give, byte for byte. */
+    const malformedFillReject = (): HandlePacketResponse => {
       emitIntake('refused', { reason: ROLLING_REJECT_REASONS.MALFORMED_FILL });
       return buildRollingReject({
         code: 'F01',
@@ -2010,6 +2015,12 @@ export async function startSwapNode(
         message: 'malformed rolling fill payload',
         reason: ROLLING_REJECT_REASONS.MALFORMED_FILL,
       }) as HandlePacketResponse;
+    };
+
+    if (rollingFill === 'malformed') {
+      // Self-identified rolling/1 traffic that violates the fill shape:
+      // reject F01 with a precise reason rather than a generic one.
+      return malformedFillReject();
     }
     if (senderCondition) {
       if (rollingFill === null) {
@@ -2018,13 +2029,7 @@ export async function startSwapNode(
         // this maker accepts under a real condition — the retired legacy
         // claim-in-FULFILL path never set one (swap#154) — so this is
         // malformed input, not a distinct case.
-        emitIntake('refused', { reason: ROLLING_REJECT_REASONS.MALFORMED_FILL });
-        return buildRollingReject({
-          code: 'F01',
-          semantic: 'invalid_request',
-          message: 'malformed rolling fill payload',
-          reason: ROLLING_REJECT_REASONS.MALFORMED_FILL,
-        }) as HandlePacketResponse;
+        return malformedFillReject();
       }
       emitIntake('rolling-fill', {
         pair: sessionPairLabel(rollingFill.streamNonce),

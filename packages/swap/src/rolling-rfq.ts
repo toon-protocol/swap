@@ -373,12 +373,21 @@ export function createRollingRfqIntake(config: RollingRfqIntakeConfig): {
       reason,
     }) as RollingRfqOutcome;
 
-  /** One `swap.intake.arrival` line for a reject decided in this module. */
-  const emitRefused = (sourcePeer: string | undefined, reason: string): void => {
+  /**
+   * One `swap.intake.arrival` line for a reject decided in this module.
+   * `pair` is omitted rather than logged as null when the arrival never named
+   * one the maker recognizes (the JSON-line logger drops the key).
+   */
+  const emitRefused = (
+    sourcePeer: string | undefined,
+    reason: string,
+    pair?: string
+  ): void => {
     logger?.info?.(SWAP_INTAKE_EVENT, {
       class: 'refused' satisfies SwapIntakeClass,
       sender: sourcePeer,
       reason,
+      ...(pair !== undefined && { pair }),
     });
   };
 
@@ -432,15 +441,11 @@ export function createRollingRfqIntake(config: RollingRfqIntakeConfig): {
         // legacy request shape tagged its pair the same way a rolling one
         // does. Absent (rather than failing the reject) when it doesn't
         // resolve, e.g. an unrecognized inner kind entirely.
-        const legacyPair = formatPairLabel(
-          findSwapPair(rumor, [...config.swapPairs]) ?? undefined
+        emitRefused(
+          arrival?.sourcePeer,
+          ROLLING_RFQ_REJECT_REASONS.LEGACY_PROTOCOL_REFUSED,
+          formatPairLabel(findSwapPair(rumor, [...config.swapPairs]))
         );
-        logger?.info?.(SWAP_INTAKE_EVENT, {
-          class: 'refused' satisfies SwapIntakeClass,
-          sender: arrival?.sourcePeer,
-          reason: ROLLING_RFQ_REJECT_REASONS.LEGACY_PROTOCOL_REFUSED,
-          ...(legacyPair !== undefined && { pair: legacyPair }),
-        });
         return reject(
           'F06',
           'legacy_protocol_refused',

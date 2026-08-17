@@ -44,7 +44,11 @@ import {
   bigintToBytes32BE,
   concatBytes,
 } from '@toon-protocol/settlement-digest';
-import { startSwapNode, ROLLING_PROTOCOL } from '@toon-protocol/swap';
+import {
+  startSwapNode,
+  ROLLING_PROTOCOL,
+  ROLLING_RFQ_REJECT_REASONS,
+} from '@toon-protocol/swap';
 import type {
   LegBPrepare,
   LegBResult,
@@ -528,6 +532,15 @@ describe('swap#47 — rolling coupled-leg engine (integration)', () => {
 
       expect(res.accept).toBe(false);
       expect(res.code).toBe('F06');
+      // …and refused by NAME, not merely refused: the discriminator a legacy
+      // sender reads off the base64-JSON reject `data`.
+      expect(
+        JSON.parse(
+          Buffer.from(res.data ?? '', 'base64').toString('utf8')
+        ) as Record<string, unknown>
+      ).toMatchObject({
+        reason: ROLLING_RFQ_REJECT_REASONS.LEGACY_PROTOCOL_REFUSED,
+      });
 
       // Nothing moved, and no leg-B traffic was generated for it.
       expect(instance.health().inventoryAvailable[INVENTORY_KEY]).toBe(before);

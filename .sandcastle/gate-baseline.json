@@ -65,7 +65,7 @@
     "typecheck": {
       "tool": "tsc -p tsconfig.json --noEmit (run after build — see gateShape.note)",
       "errors": 4,
-      "note": "All 4 errors are test-side (packages/swap/tests/e2e/**); zero production-source (non-test src/*.ts) errors. Tracked debt: swap#69."
+      "note": "All 4 errors are test-side (2 in packages/swap/src/swap-node.leg-b-wire.test.ts, 2 under packages/swap/tests/e2e/**); zero production-source (non-test src/*.ts) errors. Tracked debt: swap#69."
     },
     "test": {
       "tool": "vitest run",
