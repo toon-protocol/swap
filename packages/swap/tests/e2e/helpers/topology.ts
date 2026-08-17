@@ -61,6 +61,55 @@ export const ANVIL_B_RPC = `http://127.0.0.1:${ANVIL_B_PORT}`;
  */
 export const EVM_CHAIN_PREFIX = 'evm:base:';
 
+/**
+ * Solana — a real `solana-test-validator` booted by `global-setup.ts`
+ * (swap#160), with the real payment-channel program baked into its genesis
+ * from `tests/e2e/fixtures/solana/payment_channel.so`.
+ *
+ * Why this exists: before it, the Solana suites gated on an operator having
+ * brought up a validator by hand and exported `SOLANA_E2E_RPC_URL`, which
+ * nobody ever did in CI — so they collected two tests and skipped both, on
+ * every run, for the whole life of the harness. A local validator mints
+ * freely and confirms instantly, so the supply problem that blocks the
+ * public Solana devnet (dry airdrop, unconfigured faucet route) does not
+ * apply; the only thing that was ever missing was a program to talk to, and
+ * this repo can vendor that in 109 KB.
+ *
+ * Ports deliberately sit in the 188xx band, below the relay/peer1 block and
+ * well clear of the 199xx band the per-suite senders use — two suites running
+ * concurrently on one machine already collide there (`EADDRINUSE` on
+ * 18901/19920 has been observed), and a validator that binds a range is the
+ * worst thing to add to a crowded band. `--dynamic-port-range` covers the
+ * gossip/TPU/serve-repair sockets the validator opens beyond the RPC.
+ */
+export const SOLANA_RPC_PORT = 18899;
+export const SOLANA_RPC_URL = `http://127.0.0.1:${SOLANA_RPC_PORT}`;
+export const SOLANA_FAUCET_PORT = 18898;
+export const SOLANA_DYNAMIC_PORT_RANGE = '18860-18890';
+
+/**
+ * The address the vendored program is loaded at.
+ *
+ * The program has NO `declare_id!` (it is native Rust, not Anchor — it takes
+ * `program_id` from the entrypoint and derives its PDAs from it), so this is
+ * a free choice rather than a property of the binary. It is connector's
+ * `LOCAL_TEST_PROGRAM_ID`
+ * (`crates/connector-settlement-solana/src/test_support.rs`) verbatim, so a
+ * channel PDA derived in this repo's tests matches one derived in that
+ * repo's.
+ */
+export const SOLANA_PROGRAM_ID = 'HY4AYFNe5Vg5BkEwAURNsGY3uFAvGMNpAQPRtgoasJiR';
+
+/**
+ * The mock 6-decimal SPL mint the Solana channels settle in — the address of
+ * the committed `fixtures/solana/usdc-mint.json` keypair, so it survives every
+ * `--reset` and the suites can assert on it.
+ */
+export const SOLANA_USDC_MINT = 'CfXoHk5zRtFDtxD4HtTJXDzhfRMtSad4r3BiKeG9A2AC';
+
+/** The Solana chain key peer1 advertises and the suites gate on. */
+export const SOLANA_CHAIN = 'solana:devnet';
+
 /** In-process vanilla Nostr relay (local-nostr-relay.ts). */
 export const RELAY_PORT = 18901;
 export const RELAY_URL = `ws://127.0.0.1:${RELAY_PORT}`;

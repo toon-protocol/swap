@@ -18,10 +18,18 @@
  *   3. A minimal in-process Nostr relay (`local-nostr-relay.ts`).
  *   4. Peer1 — a real `startSwapNode()` instance (`peer-node.ts`).
  *
- * Solana and Mina are NOT started here — this repo vendors no
- * `solana-test-validator` / Mina lightnet binary or image (see
- * `tests/e2e/README.md`). Their suites gate on `waitForSolanaHealth()` /
- * `waitForMinaHealth()` and skip gracefully when those chains are absent.
+ *   5. Solana (swap#160) — a real `solana-test-validator` with the vendored
+ *      payment-channel program baked into genesis, a mock USDC SPL mint, and
+ *      REAL channel PDAs peer1 is seeded with. Requires only
+ *      `solana-test-validator` + `solana`/`spl-token` on PATH; when they are
+ *      absent Solana stays down and its suites skip (loudly — and hard-fail
+ *      under `SWAP_E2E_REQUIRE_SOLANA`, which the `solana-e2e` CI job sets).
+ *      See `helpers/solana-validator.ts`.
+ *
+ * Mina is still NOT started — this repo vendors no lightnet, and unlike Solana
+ * there is no single binary + 109 KB blob that would stand one up (see
+ * `tests/e2e/README.md`). Its suites gate on `waitForMinaHealth()` and skip
+ * gracefully.
  *
  * Must never throw: a missing `anvil` binary (e.g. outside `devbox run`) is
  * an expected, common condition, not a hard failure — `infra-gate.ts`'s
@@ -46,6 +54,15 @@ import {
 } from './helpers/local-nostr-relay.js';
 import { startPeerNode, type PeerNodeHandle } from './helpers/peer-node.js';
 import {
+  areSolanaCliToolsAvailable,
+  deriveMakerSolanaPubkey,
+  isSolanaValidatorAvailable,
+  openSolanaChannels,
+  provisionSplMint,
+  startSolanaValidator,
+  type SolanaValidatorInstance,
+} from './helpers/solana-validator.js';
+import {
   ANVIL_PORT,
   ANVIL_CHAIN_ID,
   ANVIL_B_PORT,
@@ -56,6 +73,7 @@ import {
   PEER1_BLS_PORT,
   PEER1_MNEMONIC,
   PEER1_ILP_ADDRESS,
+  SOLANA_CHAIN,
 } from './helpers/topology.js';
 
 export default async function globalSetup(): Promise<() => Promise<void>> {
@@ -63,6 +81,65 @@ export default async function globalSetup(): Promise<() => Promise<void>> {
   let anvilB: AnvilInstance | null = null;
   let relay: LocalRelay | null = null;
   let peer1: PeerNodeHandle | null = null;
+  let solanaValidator: SolanaValidatorInstance | null = null;
+  let solanaChain: {
+    chainId: string;
+    rpcUrl: string;
+    programId: string;
+    tokenMint: string;
+    channelIds: readonly string[];
+  } | null = null;
+
+  // Solana comes up BEFORE peer1: the maker's `channels['solana:devnet']` seeds
+  // have to be real, already-existing channel PDAs, so they must be opened on
+  // chain before `startSwapNode()` reads the config. Failure here is never
+  // fatal — the whole block degrades to "no Solana", the EVM legs run
+  // untouched, and `infra-gate.ts` decides whether that is a skip (local) or a
+  // hard failure (`SWAP_E2E_REQUIRE_SOLANA`, set by the `solana-e2e` CI job).
+  if (isSolanaValidatorAvailable() && areSolanaCliToolsAvailable()) {
+    try {
+      const startedAt = Date.now();
+      solanaValidator = await startSolanaValidator();
+      const { mint } = await provisionSplMint(solanaValidator.rpcUrl);
+      const makerSolanaPubkey = await deriveMakerSolanaPubkey(PEER1_MNEMONIC);
+      const channelIds = await openSolanaChannels({
+        rpcUrl: solanaValidator.rpcUrl,
+        programId: solanaValidator.programId,
+        tokenMint: mint,
+        makerSolanaPubkey,
+      });
+      solanaChain = {
+        chainId: SOLANA_CHAIN,
+        rpcUrl: solanaValidator.rpcUrl,
+        programId: solanaValidator.programId,
+        tokenMint: mint,
+        channelIds,
+      };
+      console.log(
+        `[swap e2e] Solana ready in ${Date.now() - startedAt}ms — ` +
+          `${channelIds.length} real channel PDAs at ${solanaValidator.rpcUrl} ` +
+          `(maker ${makerSolanaPubkey})`
+      );
+    } catch (err) {
+      // Loud, and naming what failed: a silent Solana absence is the exact
+      // defect this ticket exists to remove.
+      console.warn(
+        '[swap e2e] Solana infra failed to come up — Solana suites will skip ' +
+          '(or fail under SWAP_E2E_REQUIRE_SOLANA):',
+        err instanceof Error ? err.message : err
+      );
+      await solanaValidator?.stop().catch(() => undefined);
+      solanaValidator = null;
+      solanaChain = null;
+    }
+  } else {
+    console.warn(
+      '[swap e2e] `solana-test-validator` / `solana` / `spl-token` not on ' +
+        'PATH — the Solana suites will skip. Install the Solana CLI ' +
+        '(https://release.anza.xyz/v2.1.21/install) to run them; CI does this ' +
+        'in the `solana-e2e` job. See tests/e2e/README.md.'
+    );
+  }
 
   if (isAnvilAvailable()) {
     try {
@@ -101,6 +178,7 @@ export default async function globalSetup(): Promise<() => Promise<void>> {
           tokenNetworkAddress: TOKEN_NETWORK_ADDRESS,
           channelAddress: ROLLING_SWAP_CHANNEL_ADDRESS,
         },
+        ...(solanaChain ? { solana: solanaChain } : {}),
       });
 
       // Wait for peer1's BLS `/health` to report boot-complete before
@@ -128,10 +206,15 @@ export default async function globalSetup(): Promise<() => Promise<void>> {
     }
   }
 
+  // Teardown in reverse boot order, so nothing is still talking to a chain
+  // that has already gone away. The validator goes LAST because peer1's
+  // chain-truth reader polls it, and it also removes its temp ledger — leaving
+  // one behind fills a runner's disk over repeated runs.
   return async () => {
     await peer1?.stop().catch(() => undefined);
     await relay?.stop().catch(() => undefined);
     await anvil?.stop().catch(() => undefined);
     await anvilB?.stop().catch(() => undefined);
+    await solanaValidator?.stop().catch(() => undefined);
   };
 }
