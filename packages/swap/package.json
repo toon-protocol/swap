@@ -1,7 +1,7 @@
 {
   "name": "@toon-protocol/swap",
-  "version": "2.1.0",
-  "description": "TOON Protocol swap node \u2014 multi-chain payment-channel claim issuer (EVM/Solana/Mina)",
+  "version": "3.0.0",
+  "description": "TOON Protocol swap node — multi-chain payment-channel claim issuer (EVM/Solana/Mina)",
   "type": "module",
   "main": "./dist/index.js",
   "module": "./dist/index.js",
