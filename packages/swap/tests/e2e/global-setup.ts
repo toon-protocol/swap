@@ -100,14 +100,17 @@ export default async function globalSetup(): Promise<() => Promise<void>> {
     try {
       const startedAt = Date.now();
       solanaValidator = await startSolanaValidator();
-      const { mint } = await provisionSplMint(solanaValidator.rpcUrl);
+      const provisioning = await provisionSplMint(solanaValidator.rpcUrl);
       const makerSolanaPubkey = await deriveMakerSolanaPubkey(PEER1_MNEMONIC);
       const channelIds = await openSolanaChannels({
         rpcUrl: solanaValidator.rpcUrl,
         programId: solanaValidator.programId,
-        tokenMint: mint,
+        tokenMint: provisioning.mint,
         makerSolanaPubkey,
+        openers: provisioning.openers,
       });
+      provisioning.dispose();
+      const mint = provisioning.mint;
       solanaChain = {
         chainId: SOLANA_CHAIN,
         rpcUrl: solanaValidator.rpcUrl,

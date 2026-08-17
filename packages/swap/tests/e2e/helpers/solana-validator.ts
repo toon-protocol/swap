@@ -320,9 +320,14 @@ export async function startSolanaValidator(): Promise<SolanaValidatorInstance> {
     { stdio: 'ignore' }
   );
 
-  let exited: { code: number | null; signal: string | null } | null = null;
+  // Held behind a property rather than a bare `let`: TypeScript's control-flow
+  // analysis narrows a `let` assigned only inside a callback to `null` at every
+  // read, which makes the fields below unreachable types.
+  const childExit: {
+    info: { code: number | null; signal: string | null } | null;
+  } = { info: null };
   child.once('exit', (code, signal) => {
-    exited = { code, signal };
+    childExit.info = { code, signal };
   });
 
   const stop = async (): Promise<void> => {
@@ -343,12 +348,13 @@ export async function startSolanaValidator(): Promise<SolanaValidatorInstance> {
   // flaky, and the failure below says which check timed out.
   const healthDeadline = Date.now() + 90_000;
   for (;;) {
-    if (exited !== null) {
+    const exit = childExit.info;
+    if (exit !== null) {
       await stop();
       throw new Error(
         `solana-test-validator exited during startup (code=${String(
-          exited.code
-        )} signal=${String(exited.signal)}). A common cause is a stale ` +
+          exit.code
+        )} signal=${String(exit.signal)}). A common cause is a stale ` +
           `validator still holding :${SOLANA_RPC_PORT}.`
       );
     }

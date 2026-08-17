@@ -71,7 +71,7 @@ const PAIR: SwapPair = {
   rate: '1',
 };
 
-describe('Docker Rolling Swap Solana E2E (swap#153)', () => {
+describe('Docker Rolling Swap Solana E2E (swap#160)', () => {
   let servicesReady = false;
   let sender: LiveSender | null = null;
   let daemon: LegBDaemon = createLegBDaemon();
@@ -219,7 +219,10 @@ describe('Docker Rolling Swap Solana E2E (swap#153)', () => {
     ]);
 
     const swap = present(result, 'the Solana rolling swap result');
-    const channelId = present(swap.claims[0], 'the first leg-B claim').channelId;
+    const channelId = present(
+      present(swap.claims[0], 'the first leg-B claim').channelId,
+      "the first leg-B claim's channelId"
+    );
 
     // A Solana channelId IS the channel PDA's base58 address — never 0x-hex.
     // If this ever fails, the maker bound the sender to an EVM-shaped seed for
