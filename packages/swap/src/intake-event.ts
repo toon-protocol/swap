@@ -23,12 +23,18 @@ export const SWAP_INTAKE_EVENT = 'swap.intake.arrival';
  * - `rolling-rfq` — inner rumor kind:20033;
  * - `rolling-fill` — a coupled fill under a sender-chosen condition;
  * - `refused` — rejected before dispatch, carrying the reject reason.
+ *
+ * Canonical list (issue #171's intake ledger validates/reports against this
+ * rather than a second, driftable copy of the four literals).
  */
-export type SwapIntakeClass =
-  | 'legacy'
-  | 'rolling-rfq'
-  | 'rolling-fill'
-  | 'refused';
+export const SWAP_INTAKE_CLASSES = [
+  'legacy',
+  'rolling-rfq',
+  'rolling-fill',
+  'refused',
+] as const;
+
+export type SwapIntakeClass = (typeof SWAP_INTAKE_CLASSES)[number];
 
 /** Minimal pair shape — satisfied by both `SwapPair` and an RFQ's requested pair. */
 interface PairLike {

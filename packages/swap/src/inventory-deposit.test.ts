@@ -27,6 +27,7 @@ import type {
 } from './channel-state.js';
 import { SwapInventoryReconciler } from './inventory-reconciler.js';
 import { registerAdminRoutes } from './admin-surface.js';
+import { IntakeLedger } from './intake-ledger.js';
 import { createEvmChannelOnChainReader } from './evm-channel-reader.js';
 import { composeChannelOnChainReaders } from './channel-reader.js';
 
@@ -135,6 +136,7 @@ function makeAdminApp(p: {
   registerAdminRoutes(app, {
     inventory: p.inventory,
     reconciler: p.reconciler,
+    intakeLedger: new IntakeLedger(),
     ...(p.adminToken !== undefined && { adminToken: p.adminToken }),
   });
   return app;

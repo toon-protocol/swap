@@ -10,7 +10,7 @@
  * `nonce`/`cumulativeAmount` BELOW claims already issued and invites a
  * replay — see `state-store.ts`).
  *
- * Four routes, mounted on the existing BLS server under `/admin`:
+ * Five routes, mounted on the existing BLS server under `/admin`:
  *
  * - `GET  /admin/inventory`           — read: per-pool buckets, per-channel
  *   issued-vs-redeemed, and an explicit reason when issuance is blocked.
@@ -20,6 +20,11 @@
  * - `POST /admin/inventory/deposit`   — write (swap#142): book genuinely NEW
  *   capital, and ONLY the amount the pool's on-chain channel funding
  *   corroborates.
+ * - `GET  /admin/intake`              — read (issue #171): per-class
+ *   cumulative counts + first/last-seen timestamps from the durable intake
+ *   ledger, and the ledger's own `since` — the reading ADR 0003's removal
+ *   gate is actually taken from. See `intake-ledger.ts` for why this has to
+ *   be a persisted watermark rather than a `docker logs` grep.
  *
  * ## Recycling vs. new capital (swap#142)
  *
@@ -73,6 +78,9 @@ import type {
   ReconcileResult,
   SwapInventoryReconciler,
 } from './inventory-reconciler.js';
+import { SWAP_INTAKE_CLASSES } from './intake-event.js';
+import type { SwapIntakeClass } from './intake-event.js';
+import type { IntakeLedger } from './intake-ledger.js';
 
 export interface AdminChannelView {
   channelId: string;
@@ -127,6 +135,8 @@ export interface AdminInventoryReport {
 export interface AdminSurfaceDeps {
   inventory: SwapInventory;
   reconciler: SwapInventoryReconciler;
+  /** Issue #171 — backs `GET /admin/intake`. */
+  intakeLedger: IntakeLedger;
   /** Operator token; absent ⇒ writes disabled. */
   adminToken?: string;
   clock?: () => number;
@@ -299,6 +309,49 @@ export function buildInventoryReport(
   };
 }
 
+export interface AdminIntakeClassView {
+  class: SwapIntakeClass;
+  count: number;
+  /** Absent when this class has never been observed by this ledger. */
+  firstSeenAt?: number;
+  lastSeenAt?: number;
+}
+
+export interface AdminIntakeReport {
+  generatedAt: number;
+  /**
+   * ms-epoch this ledger started observing (issue #171). A class reading 0
+   * is only meaningful once `generatedAt - since` covers the gate's full
+   * window — a fresh ledger and 90 days of silence both read `count: 0`,
+   * and only `since` tells them apart.
+   */
+  since: number;
+  /** Always all four classes, in `SWAP_INTAKE_CLASSES` order — an absent
+   *  class would be indistinguishable from a class this build forgot. */
+  classes: AdminIntakeClassView[];
+}
+
+/** Build the operator read view backing `GET /admin/intake` (issue #171). */
+export function buildIntakeReport(deps: AdminSurfaceDeps): AdminIntakeReport {
+  const clock = deps.clock ?? Date.now;
+  const persisted = deps.intakeLedger.snapshot();
+  return {
+    generatedAt: clock(),
+    since: persisted.since,
+    classes: SWAP_INTAKE_CLASSES.map((intakeClass) => {
+      const entry = persisted.classes[intakeClass];
+      return {
+        class: intakeClass,
+        count: entry?.count ?? 0,
+        ...(entry !== undefined && {
+          firstSeenAt: entry.firstSeenAt,
+          lastSeenAt: entry.lastSeenAt,
+        }),
+      };
+    }),
+  };
+}
+
 /** JSON-safe projection of a reconcile pass. */
 function serializeReconcile(result: ReconcileResult): Record<string, unknown> {
   return {
@@ -414,6 +467,12 @@ export function registerAdminRoutes(app: Hono, deps: AdminSurfaceDeps): void {
   app.get('/admin/inventory', (c: Context) =>
     c.json(buildInventoryReport(deps))
   );
+
+  // Issue #171 — read-only, unauthenticated, same protection as
+  // /admin/inventory (box nginx `^~ /admin` 404 rule) and same reasoning:
+  // this discloses strictly less than an operator with shell access to the
+  // state volume could already read from intake-ledger.json.
+  app.get('/admin/intake', (c: Context) => c.json(buildIntakeReport(deps)));
 
   app.post('/admin/inventory/reconcile', async (c: Context) => {
     const denied = denyWrite(c);

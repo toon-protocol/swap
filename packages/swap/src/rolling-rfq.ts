@@ -51,6 +51,7 @@ import {
 import type { LegBReturnPath } from './leg-b-return-path.js';
 import { SWAP_INTAKE_EVENT, formatPairLabel } from './intake-event.js';
 import type { SwapIntakeClass } from './intake-event.js';
+import type { IntakeLedger } from './intake-ledger.js';
 
 /** Inner rumor kind of an RFQ request (spec §2.2). */
 export const ROLLING_RFQ_REQUEST_KIND = 20033;
@@ -304,6 +305,12 @@ export interface RollingRfqIntakeConfig {
     /** swap#152 — carries the `rolling-rfq` intake classification event. */
     info?: (msg: string, meta?: Record<string, unknown>) => void;
   };
+  /**
+   * Issue #171 — the durable intake ledger. Recorded alongside the
+   * `swap.intake.arrival` log line below, from the same site, so the two
+   * can never diverge.
+   */
+  intakeLedger?: IntakeLedger;
 }
 
 /** Accept/reject shape the packet handler returns, structurally. */
@@ -398,6 +405,7 @@ export function createRollingRfqIntake(config: RollingRfqIntakeConfig): {
         sender: arrival?.sourcePeer,
         ...(requestedPair !== undefined && { pair: requestedPair }),
       });
+      config.intakeLedger?.record('rolling-rfq');
 
       if (parsed === null || parsed === 'malformed') {
         // Kind:20033 is unambiguously rolling traffic. Falling through would

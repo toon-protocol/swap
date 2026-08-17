@@ -36,6 +36,7 @@ checked into this repo):
 | `blsPort` | no | `/health` HTTP port. |
 | `btpServerPort` | no | **Required for the proven standalone-maker wiring** — no `connectorUrl`/`connector` set + this present = auto-created embedded `ConnectorNode` with no parent, self-routed. |
 | `statePath` | no | Durable state snapshot path (issue #46) — mount a volume here to persist inventory/watermarks/bindings across restarts. The image pre-creates `/app/state`, owned by the runtime `swap` user (uid `10001`), as the intended mount point — see "Runtime user & filesystem" below. |
+| `intakeLedgerPath` | no | **Issue #171.** Durable per-class intake-ledger path (ADR 0003's removal gate — see "ADR 0003 removal gate" below). Defaults to `intake-ledger.json` beside `statePath`; without either, counts are in-memory only and reset on restart. |
 | `chainProviders` | yes for EVM settlement | Array of `{ chainType: "evm", chainId, rpcUrl, registryAddress, tokenAddress, tokenNetworkAddress, channelAddress, keyId? }` (or the `solana`/`mina` variants — see `SwapNodeChainProvider` in `swap-node.ts`). **Two different contracts, both required** for any EVM chain a `swapPair` targets — boot refuses otherwise: `tokenNetworkAddress` is **leg A**, the deployed `TokenNetwork` a *client* calls `openChannel(address,uint256)` on to open the channel it pays this maker over (this is what the kind:10032 `tokenNetworks` entry advertises, and it must be the same fleet-wide `TokenNetwork` deployment the relay/store/apex announce for this chain+token); `channelAddress` is **leg B**, the deployed `RollingSwapChannel` this maker signs v2 EIP-712 balance-proof claims against (advertised separately as `swapVerifyingContracts`). Never set them to the same address — see issue #133. `keyId` defaults to `settlementPrivateKey` (or the identity secret key) when omitted. |
 | `settlementPrivateKey` | no | Hex EVM private key for the claim signer / `chainProviders[].keyId` default. In the proven wiring this is the **same BIP-44 account-index-2 key** used as the connector `keyId`. **Issue #126:** when the identity is a mnemonic and this is unset (or a `0xdead…`-style placeholder), the CLI auto-derives it via `deriveSwapNodeKeys` (index-2) — a committed skeleton can ship a placeholder here and rely on the CLI to fill in the real key, whether or not `identityAutogen` is used. |
 | `identityAutogen` | no | **Issue #126.** When `true` (or `SWAP_AUTOGEN_IDENTITY=1`) and no identity is otherwise provided, self-generates a BIP-39 mnemonic and persists it to an identity file (mode 600, default beside `statePath`) so restarts reuse the same identity. No-op if `mnemonic`/`secretKey` is set. |
@@ -61,6 +62,7 @@ inject the secret from a mount rather than baking it into the config file.
 | `SWAP_BLS_PORT` | Overrides `blsPort`. |
 | `SWAP_RELAYS` | Comma-separated relay WS URLs, overrides `relayUrls`. |
 | `SWAP_STATE_PATH` | Overrides `statePath`. |
+| `SWAP_INTAKE_LEDGER_PATH` | **Issue #171.** Overrides `intakeLedgerPath`. |
 | `TOON_CONNECTOR_URL` | Parent BTP URL — activates embedded-with-parent mode instead of standalone. |
 | `TOON_PARENT_PEER_ID` | Parent peer id (default `apex`). |
 | `TOON_PARENT_AUTH_TOKEN` | BTP auth token for the parent peer. |
@@ -117,6 +119,7 @@ the chain key of the `chainProviders` entry you already have.
 | `POST /admin/inventory/reconcile` | token | Force a chain-truth pass now; returns what it recycled. |
 | `POST /admin/inventory/credit` | token | `{ assetCode, chain, amount? }` — recycle burned capital. Applies **only** what an on-chain redemption corroborates: an uncorroborated request (or one larger than the chain backs) is refused `409` with nothing applied. |
 | `POST /admin/inventory/deposit` | token | **swap#142.** `{ assetCode, chain, amount?, dryRun? }` — book genuinely NEW capital. Applies **only** what the pool's on-chain channel funding corroborates. |
+| `GET /admin/intake` | none | **Issue #171.** Per-class intake counts backing ADR 0003's removal gate — see below. |
 
 ### Adding capital (swap#142)
 
@@ -206,6 +209,46 @@ and it is deliberately **not** corrected by any live write path:
 If it must be exact sooner, do it with the node **down** — stop the maker,
 edit the persisted pool entry in `swap-node-state.json`, restart. That is a
 deliberate human action, not a route that can be fired by accident.
+
+## ADR 0003 removal gate (issue #171)
+
+ADR 0003's removal gate is *"no legacy intake observed on the deployed maker
+for N consecutive days"*. **Do not read this from `docker logs`.**
+`swap:release` is auto-on-green and Watchtower recreates the `swap-node`
+container on every merge to `main`; `docker logs` only ever holds the
+CURRENT container's stdout, so every recreate silently resets the
+observation window to zero and any `docker logs | grep swap.intake.arrival`
+count is a lie about how long legacy has actually been silent.
+
+Read the durable ledger instead — it survives a recreate because it lives
+beside `statePath` on the same persistent volume:
+
+```sh
+curl -s http://127.0.0.1:<blsPort>/admin/intake | jq .
+```
+
+```json
+{
+  "generatedAt": 1755450000000,
+  "since": 1754845200000,
+  "classes": [
+    { "class": "legacy", "count": 0 },
+    { "class": "rolling-rfq", "count": 812, "firstSeenAt": 1754845201000, "lastSeenAt": 1755449999000 },
+    { "class": "rolling-fill", "count": 799, "firstSeenAt": 1754845202000, "lastSeenAt": 1755449999500 },
+    { "class": "refused", "count": 3, "firstSeenAt": 1754900000000, "lastSeenAt": 1755000000000 }
+  ]
+}
+```
+
+The gate is satisfied only when **both** hold: `legacy.count === 0` (or, for
+a maker with prior legacy traffic, `Date.now() - legacy.lastSeenAt >= N
+days`) **and** `Date.now() - since >= N days`. The second check is what a
+`docker logs` grep could never give: without `since`, a ledger that just
+started reads identically to one that has genuinely observed N days of
+silence — a freshly-recreated container's `count: 0` is not evidence of
+anything yet. A class that has never fired at all omits `firstSeenAt`/
+`lastSeenAt` rather than reporting `0`, which would be indistinguishable
+from a real epoch-0 timestamp.
 
 ## Runtime user & filesystem
 

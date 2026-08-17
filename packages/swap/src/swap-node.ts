@@ -21,6 +21,8 @@
  * `SwapNodeInstance.stop()` idempotence guarantees.
  */
 
+import { dirname, join } from 'node:path';
+
 import { serve, type ServerType } from '@hono/node-server';
 import { Hono, type Context } from 'hono';
 import { SimplePool } from 'nostr-tools/pool';
@@ -115,6 +117,7 @@ import { createLegBReturnRouteBinder } from './leg-b-return-path.js';
 import type { LegBReturnRouteBinder } from './leg-b-return-path.js';
 import { SWAP_INTAKE_EVENT, formatPairLabel } from './intake-event.js';
 import type { SwapIntakeClass } from './intake-event.js';
+import { IntakeLedger, JsonFileIntakeLedgerStore } from './intake-ledger.js';
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -370,6 +373,19 @@ export interface SwapNodeConfig {
    * `statePath`.
    */
   stateStore?: SwapStateStore;
+  /**
+   * Issue #171 (ADR 0003's removal gate) — path to the durable per-class
+   * intake ledger (counts + first/last-seen timestamps), read at
+   * `GET /admin/intake`. Defaults to `intake-ledger.json` beside
+   * `statePath` when `statePath` is set, so it lands on the same durable
+   * volume without a second required config key. When neither this nor
+   * `statePath` is set, the ledger still counts in-memory (no persistence
+   * — counts reset on restart, same fallback `statePath` itself has).
+   * Corruption/write failures never crash the maker or fail a swap — this
+   * is observability evidence, not a crash-consistency watermark (contrast
+   * `statePath`'s load-fails-loudly policy).
+   */
+  intakeLedgerPath?: string;
 
   // --- Rolling coupled-leg engine (issue #47, rolling-swap §3) ---
   /**
@@ -924,6 +940,16 @@ export function validateConfig(config: SwapNodeConfig): void {
       'SwapNodeConfig.statePath MUST be a non-empty string when set'
     );
   }
+  if (
+    config.intakeLedgerPath !== undefined &&
+    (typeof config.intakeLedgerPath !== 'string' ||
+      config.intakeLedgerPath.length === 0)
+  ) {
+    throw new SwapNodeStartError(
+      'INVALID_CONFIG',
+      'SwapNodeConfig.intakeLedgerPath MUST be a non-empty string when set'
+    );
+  }
 
   if (!Array.isArray(config.swapPairs) || config.swapPairs.length === 0) {
     throw new SwapNodeStartError(
@@ -1348,6 +1374,27 @@ export async function startSwapNode(
       });
     }
   }
+
+  // 4c. Issue #171 (ADR 0003's removal gate) — durable intake ledger.
+  //
+  // Defaults beside `statePath` so it lands on the SAME durable volume the
+  // maker's inventory/channel watermarks already survive a Watchtower
+  // recreate on, with no second required config key (swap#134). Unlike the
+  // state store above, a corrupt/unreadable ledger file starts empty rather
+  // than failing boot — this is observability evidence, not a
+  // crash-consistency watermark, and counting must never be able to fail
+  // an arrival.
+  const intakeLedgerPath =
+    config.intakeLedgerPath ??
+    (config.statePath !== undefined
+      ? join(dirname(config.statePath), 'intake-ledger.json')
+      : undefined);
+  const intakeLedger = new IntakeLedger({
+    ...(intakeLedgerPath !== undefined && {
+      store: new JsonFileIntakeLedgerStore(intakeLedgerPath),
+    }),
+    logger: { warn: logger.warn },
+  });
 
   // 5. Inventory — map operator-supplied `Record<chain, bigint>` into the
   //    `SwapInventory` per-asset/per-chain shape. We key off pair.to.assetCode
@@ -1985,6 +2032,7 @@ export async function startSwapNode(
     },
     ...(config.rolling?.rfq && { rfq: config.rolling.rfq }),
     logger: { debug: logger.debug, warn: logger.warn, info: logger.info },
+    intakeLedger,
   });
 
   // 11a. Wire the HandlerRegistry to the connector's local-delivery path.
@@ -2084,6 +2132,9 @@ export async function startSwapNode(
         sender: intakeSender,
         ...extra,
       });
+      // Issue #171 — the durable watermark ADR 0003's removal gate is
+      // actually read from; the log line above dies with the container.
+      intakeLedger.record(intakeClass);
     };
     /** The pair a fill's session was minted for — absent once it has expired. */
     const sessionPairLabel = (streamNonce: string): string | undefined =>
@@ -2401,6 +2452,7 @@ export async function startSwapNode(
   registerAdminRoutes(app, {
     inventory,
     reconciler,
+    intakeLedger,
     ...(config.adminToken !== undefined && { adminToken: config.adminToken }),
   });
 

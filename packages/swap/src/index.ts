@@ -41,12 +41,19 @@ export type {
   ChannelFundingObservation,
   PoolFundingReading,
 } from './inventory-reconciler.js';
-export { buildInventoryReport, registerAdminRoutes } from './admin-surface.js';
+export {
+  buildInventoryReport,
+  buildIntakeReport,
+  registerAdminRoutes,
+} from './admin-surface.js';
 export type {
   AdminInventoryReport,
   AdminPoolView,
   AdminChannelView,
   AdminSurfaceDeps,
+  // Issue #171 — the `GET /admin/intake` report shape.
+  AdminIntakeReport,
+  AdminIntakeClassView,
 } from './admin-surface.js';
 
 // Payment-channel signing (Story 12.4)
@@ -109,6 +116,28 @@ export type {
   PersistedChannelEntry,
   PersistedReservationEntry,
 } from './state-store.js';
+
+// Intake classification + durable ledger (swap#152, issue #171 — ADR 0003's
+// removal gate). `swap.intake.arrival` classifies every arrival; the ledger
+// is what makes "no legacy for N consecutive days" survive a Watchtower
+// recreate instead of resetting to zero on every deploy.
+export {
+  SWAP_INTAKE_EVENT,
+  SWAP_INTAKE_CLASSES,
+  formatPairLabel,
+} from './intake-event.js';
+export type { SwapIntakeClass } from './intake-event.js';
+export {
+  IntakeLedger,
+  JsonFileIntakeLedgerStore,
+  validatePersistedIntakeLedger,
+} from './intake-ledger.js';
+export type {
+  IntakeLedgerStore,
+  IntakeLedgerInit,
+  PersistedIntakeLedger,
+  IntakeLedgerClassEntry,
+} from './intake-ledger.js';
 
 // Errors (Story 12.4)
 export { SwapInventoryError, SwapWalletError } from './errors.js';
