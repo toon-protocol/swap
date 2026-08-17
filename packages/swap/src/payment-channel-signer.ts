@@ -16,25 +16,30 @@ import { sha256 } from '@noble/hashes/sha2.js';
 // settlement-digest leaf imported below — issue #101.)
 import {
   balanceProofFieldsMina,
+  base58Decode,
   base58Encode,
   bigintToBytes32BE,
   concatBytes,
   hexToBytes,
 } from '@toon-protocol/sdk';
 
-// swap#164 / toon#214: the Solana balance proof is the RAW 48-byte message the
-// deployed program's Ed25519 precompile check verifies, NOT the sdk's legacy
-// `balanceProofHashSolana` digest — which no program has ever verified, making
-// every Solana claim this signer has issued unredeemable. Local until the sdk
-// range is bumped to a release carrying `balanceProofMessageSolana`; see that
-// module's header.
-import { balanceProofMessageSolana } from './solana-balance-proof.js';
-
 // Issue #101: the EVM balance-proof digest comes from the shared, dependency-light
 // leaf (@noble-only, no core/sdk/connector major bump needed) so the swap node
 // signs the SAME v2 EIP-712 domain-separated digest every client, the sdk, the
 // connector and the on-chain RollingSwapChannel verify against.
-import { balanceProofHashEvm } from '@toon-protocol/settlement-digest';
+//
+// swap#164 / toon#214: the Solana balance proof is the RAW 48-byte message the
+// deployed program's Ed25519 precompile check verifies, NOT the legacy
+// `balanceProofHashSolana` digest — which no program has ever verified, making
+// every Solana claim this signer issued before swap#165 unredeemable. The byte
+// layout now comes from the SAME shared leaf as the EVM digest (published in
+// `@toon-protocol/settlement-digest@1.1.0`, re-exported by core/sdk), replacing
+// swap's temporary local copy: it was proven byte-identical over the pinned
+// vectors in `solana-balance-proof.test.ts` before removal.
+import {
+  balanceProofHashEvm,
+  balanceProofMessageSolana,
+} from '@toon-protocol/settlement-digest';
 
 import type { SwapNodeChainKind } from './wallet.js';
 import { SwapWalletError } from './errors.js';
@@ -341,6 +346,61 @@ export interface SolanaPaymentChannelSignerConfig {
   privateKey: Uint8Array; // 32-byte Ed25519 seed
 }
 
+/**
+ * Build the 48-byte Solana balance-proof message from a base58 `channelId`.
+ *
+ * The bytes themselves come from `@toon-protocol/settlement-digest`'s
+ * `balanceProofMessageSolana` — the shared leaf every signer, off-chain verifier
+ * and the on-chain program agree on. All this adds is the swap's own input
+ * contract:
+ *
+ * - a `channelId` is carried as base58 on the wire, and on Solana a channelId IS
+ *   its 32-byte channel PDA, so it is decoded here and refused if it cannot name
+ *   a channel on chain;
+ * - the u64 range failures are reported as `SwapWalletError`s that NAME the
+ *   offending field, which the shared leaf's plain `Error`s do not — and which
+ *   `signBalanceProof` would otherwise bury in `cause`.
+ *
+ * Exported for `solana-balance-proof.test.ts`, which pins the byte layout.
+ */
+export function solanaBalanceProofMessage(
+  channelId: string,
+  nonce: bigint,
+  transferredAmount: bigint
+): Uint8Array {
+  let channelPda: Uint8Array;
+  try {
+    channelPda = base58Decode(channelId);
+  } catch (err) {
+    throw new SwapWalletError(
+      'SIGNING_FAILED',
+      `Solana channelId is not valid base58: ${channelId}`,
+      { cause: err }
+    );
+  }
+  if (channelPda.length !== 32) {
+    throw new SwapWalletError(
+      'SIGNING_FAILED',
+      `Solana channelId must be a 32-byte channel PDA in base58 (got ` +
+        `${channelPda.length} bytes from "${channelId}"). The on-chain program ` +
+        `rebuilds the balance proof from the channel account itself, so a claim ` +
+        `signed over anything else can never be redeemed.`
+    );
+  }
+  for (const [label, value] of [
+    ['nonce', nonce],
+    ['transferredAmount', transferredAmount],
+  ] as const) {
+    if (value < 0n || value > 0xffffffffffffffffn) {
+      throw new SwapWalletError(
+        'SIGNING_FAILED',
+        `Solana balance proof: ${label} does not fit in a u64 (got ${value})`
+      );
+    }
+  }
+  return balanceProofMessageSolana(channelPda, nonce, transferredAmount);
+}
+
 export class SolanaPaymentChannelSigner implements PaymentChannelSigner {
   public readonly chain: string;
   public readonly chainKind: SwapNodeChainKind = 'solana';
@@ -368,7 +428,7 @@ export class SolanaPaymentChannelSigner implements PaymentChannelSigner {
     params: PaymentChannelSignParams
   ): Promise<Uint8Array> {
     try {
-      const msg = balanceProofMessageSolana(
+      const msg = solanaBalanceProofMessage(
         params.channelId,
         params.nonce,
         params.cumulativeAmount
@@ -376,7 +436,7 @@ export class SolanaPaymentChannelSigner implements PaymentChannelSigner {
       const sig = ed25519.sign(msg, this.privateKey);
       return new Uint8Array(sig);
     } catch (err) {
-      // `balanceProofMessageSolana` already explains exactly which input it
+      // `solanaBalanceProofMessage` already explains exactly which input it
       // refused (a channelId that is not a 32-byte PDA, an out-of-u64 amount);
       // re-wrapping it would bury that message in `cause`.
       if (err instanceof SwapWalletError) throw err;
