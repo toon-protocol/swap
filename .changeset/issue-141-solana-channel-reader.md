@@ -1,4 +1,5 @@
 ---
+'@toon-protocol/swap': minor
 ---
 
 Chain-truth inventory recycling is no longer EVM-only. `createEvmChannelOnChainReader` was the sole `ChannelOnChainReader`, so on a Solana target chain nothing ever observed a claim's redemption: `unsettled` liability only grew, `free` walked to zero, and the maker refused every swap however faithfully its counterparty redeemed — the exact defect #138 fixed, still live for a second chain family. A new `createSolanaChannelOnChainReader` reads the channel PDA's `transferred_amount_{a,b}` straight from `getAccountInfo` (hand-decoded from the canonical 178-byte `ChannelState` layout, no Solana SDK dependency, mirroring the EVM reader's raw-`eth_call` stance), and `createChannelOnChainReader` composes the readers behind the one seam both consumers already take — so this ALSO closes the same gap in the #113 channel-rebind precondition, which was likewise EVM-only.

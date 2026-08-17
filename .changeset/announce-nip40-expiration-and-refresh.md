@@ -1,4 +1,5 @@
 ---
+'@toon-protocol/swap': minor
 ---
 
 The swap node's kind:10032 announce now carries a NIP-40 `["expiration", created_at + ttl]` tag and is republished on a refresh loop, instead of being published exactly once at boot with no expiry at all.

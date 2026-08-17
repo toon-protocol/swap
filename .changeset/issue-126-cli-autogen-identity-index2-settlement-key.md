@@ -1,4 +1,5 @@
 ---
+'@toon-protocol/swap': minor
 ---
 
 The `toon-swap` CLI now closes two gaps blocking a fully-autonomous, self-provisioning maker deploy (toon-meta#402):

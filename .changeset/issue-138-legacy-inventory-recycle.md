@@ -1,4 +1,5 @@
 ---
+'@toon-protocol/swap': minor
 ---
 
 Inventory now recycles on the legacy swap path, so a maker no longer degrades to permanently unusable. Both claim paths share ONE capital model: `issueClaim` takes an in-flight window reservation and commits it to **unsettled channel liability** instead of permanently debiting `available`, exactly as the rolling path already did. Previously a *successful* legacy claim burned `available` for good — `recordSettlement`, the only recycler, shrank `unsettled`, which the legacy path never populated — so `available` ratcheted toward zero over the maker's lifetime and it then refused everything with T04 however faithfully its counterparties redeemed on chain.

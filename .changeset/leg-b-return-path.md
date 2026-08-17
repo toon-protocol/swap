@@ -1,4 +1,5 @@
 ---
+'@toon-protocol/swap': minor
 ---
 
 **A rolling fill can now actually be delivered: leg B goes back over the BTP session its RFQ arrived on.**

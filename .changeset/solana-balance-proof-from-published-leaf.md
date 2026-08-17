@@ -1,5 +1,5 @@
 ---
-'@toon-protocol/swap': patch
+'@toon-protocol/swap': minor
 ---
 
 The Solana balance-proof bytes now come from the published shared leaf, not a

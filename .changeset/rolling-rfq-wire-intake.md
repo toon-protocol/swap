@@ -1,4 +1,5 @@
 ---
+'@toon-protocol/swap': minor
 ---
 
 The maker now accepts a rolling-swap session **from the wire**: an inbound kind:20033 RFQ (NIP-59 gift wrap, rolling-swap spec §2.2) registers the session and is answered with a gift-wrapped kind:20034 quote carrying `R₀`, `rateTimestamp`, quote expiry, `spread`, `maxRateAge`, `minAmount`/`maxAmount` and the leg-B `swapSignerAddress`.
