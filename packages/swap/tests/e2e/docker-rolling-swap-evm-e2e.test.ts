@@ -1,15 +1,13 @@
 /**
  * swap#153 — ROLLING swap-flow + settlement E2E, EVM leg.
  *
- * The rolling counterpart of `docker-swap-flow-evm-e2e.test.ts` (AC-3..AC-6),
- * which drives the legacy zero-condition `streamSwap` sender ADR 0003
- * removes. Same infra, same peer1, same socket — different protocol:
- * kind:20033 RFQ → kind:20034 quote → coupled fills carrying a real 32-byte
- * sender-minted execution condition, with the chain-B claim arriving on LEG B
- * rather than inside the leg-A FULFILL.
- *
- * Both suites run side by side until Stage 5 removes the maker's legacy
- * intake; nothing here deletes anything.
+ * The rolling counterpart of the now-deleted `docker-swap-flow-evm-e2e.test.ts`
+ * (AC-3..AC-6), which drove the legacy zero-condition `streamSwap` sender
+ * ADR 0003 removed (swap#154, toon-meta#411 Stage 5). Same infra, same peer1,
+ * same socket — different protocol: kind:20033 RFQ → kind:20034 quote →
+ * coupled fills carrying a real 32-byte sender-minted execution condition,
+ * with the chain-B claim arriving on LEG B rather than inside the leg-A
+ * FULFILL.
  */
 
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';

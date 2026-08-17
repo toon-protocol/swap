@@ -121,14 +121,16 @@ const AUTHORITY_KEYPAIR = join(FIXTURES_DIR, 'usdc-authority.json');
  * off-chain watermark, i.e. once the sender has actually redeemed. These suites
  * never redeem (the claims are off-chain balance proofs), so every distinct
  * sender that targets Solana consumes one channel permanently, and peer1 is
- * shared across all ten suite files (`vitest.e2e.config.ts` — `singleFork`,
+ * shared across all six suite files (`vitest.e2e.config.ts` — `singleFork`,
  * `isolate: false`).
  *
- * Four senders target Solana today — the rolling Solana suite, the rolling
- * pair-matrix, the legacy Solana suite, the legacy pair-matrix — and running
- * out is a confusing failure deep in the maker (`channel_unredeemed`, "not safe
- * to rebind"), so this is sized to twice that. Each extra channel costs ~1s of
- * provisioning, and they are opened concurrently.
+ * The rolling Solana suite and the rolling pair-matrix both target Solana
+ * (swap#154, toon-meta#411 Stage 5 deleted the legacy Solana suite and the
+ * legacy pair-matrix, which used to bring this to four), and running out is a
+ * confusing failure deep in the maker (`channel_unredeemed`, "not safe to
+ * rebind"), so this stays generously headroomed rather than trimmed to the
+ * exact live count. Each extra channel costs ~1s of provisioning, and they
+ * are opened concurrently.
  */
 const OPENER_COUNT = 8;
 

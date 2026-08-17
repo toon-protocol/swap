@@ -9,8 +9,9 @@
  *   - Inventory + channel state
  *   - `MultiChainClaimIssuer` — populated with `signerAddresses` (closes
  *     the TODO(12.7) hook from Story 12.6)
- *   - `createSwapHandler` from the SDK, registered on kind:1059 (gift-wrap)
- *     via `HandlerRegistry`
+ *   - The rolling swap engine + RFQ intake, registered on kind:1059
+ *     (gift-wrap) local delivery (swap#154 retired the legacy
+ *     `createSwapHandler` / `HandlerRegistry` wiring this used to also serve)
  *   - An embedded / caller-supplied / URL-referenced connector
  *   - A minimal Hono-based BLS server serving `GET /health`
  *   - One fire-and-forget kind:10032 `IlpPeerInfo` publish at boot with
@@ -36,22 +37,12 @@ import type {
   TransportConfig,
 } from '@toon-protocol/connector';
 
-import {
-  HandlerRegistry,
-  createSwapHandler,
-  fromMnemonic,
-  base58Encode,
-  unwrapSwapPacketFromToon,
-  findSwapPair,
-} from '@toon-protocol/sdk';
-import type { NodeIdentity, CreateSwapHandlerConfig } from '@toon-protocol/sdk';
+import { fromMnemonic, base58Encode } from '@toon-protocol/sdk';
+import type { NodeIdentity } from '@toon-protocol/sdk';
 import {
   buildIlpPeerInfoEvent,
   createDirectIlpClient,
   encodeEventToToon,
-  decodeEventFromToon,
-  shallowParseToon,
-  ilpCodeToSemantic,
   VERSION,
 } from '@toon-protocol/core';
 import type {
@@ -62,7 +53,6 @@ import type {
   IlpPeerInfo,
   SwapPair,
 } from '@toon-protocol/core';
-import { createHandlerContext } from '@toon-protocol/sdk';
 
 import { deriveSwapNodeKeys } from './wallet.js';
 import type { SwapNodeKeys, SwapNodeChainKind } from './wallet.js';
@@ -85,7 +75,6 @@ import {
 } from './payment-channel-signer.js';
 import type { PaymentChannelSigner } from './payment-channel-signer.js';
 import { MultiChainClaimIssuer } from './claim-issuer.js';
-import { createClaimRefusalMapper } from './claim-refusal.js';
 import { SwapNodeStartError } from './errors.js';
 import {
   JsonFileSwapStateStore,
@@ -95,9 +84,7 @@ import {
 import type { SwapStateStore, PersistedSwapState } from './state-store.js';
 import {
   RateFreshnessGuard,
-  normalizeRateProvider,
   validateMaxRateAgeConfig,
-  withMaxRateAge,
 } from './rate-staleness.js';
 import type { MaxRateAgeConfig, SwapRateProvider } from './rate-staleness.js';
 import {
@@ -340,15 +327,16 @@ export interface SwapNodeConfig {
    */
   maxRateAge?: MaxRateAgeConfig;
   /**
-   * Optional operator-supplied replay-protection set for the swap handler.
+   * Optional operator-supplied replay-protection set for the rolling engine.
    *
    * SECURITY: this `Set<string>` is unbounded by default. The swap node accepts
    * gift-wrap packets from any peer (handler-level dispatch), so a malicious
    * sender can flood the swap node with distinct packet IDs and grow this set
    * until memory is exhausted. Operators SHOULD supply a bounded / LRU-backed
-   * `Set`-like impl (or rely on `createSwapHandler`'s default policy — see
-   * `@toon-protocol/sdk/swap-handler` for the in-process bound). This field
-   * is forwarded verbatim; `startSwapNode()` does NOT size-cap it.
+   * `Set`-like impl — the SDK-default in-process bound `createSwapHandler`
+   * used to fall back to does not apply here; this maker no longer wires that
+   * handler (swap#154). This field is forwarded verbatim; `startSwapNode()`
+   * does NOT size-cap it.
    */
   seenPacketIds?: Set<string>;
 
@@ -395,10 +383,10 @@ export interface SwapNodeConfig {
      */
     reservationGraceMs?: number;
     /**
-     * RFQ intake knobs (spec §2.2). Entirely optional and defaulted — the
-     * intake is ON by default because the path it adds is only reachable by a
-     * packet whose inner rumor kind is 20033, a kind that has no other handler
-     * at all, so it cannot regress traffic that works today.
+     * RFQ intake knobs (spec §2.2). Entirely optional and defaulted. The
+     * intake itself is always on and not configurable — swap#154 (toon-meta#411
+     * Stage 5) removed the `enabled` switch: it is this maker's only swap
+     * protocol, so disabling it would just disable swapping.
      */
     rfq?: RollingRfqConfig;
   };
@@ -667,8 +655,6 @@ export interface SwapNodeInstance {
    * result and leave that channel's capacity blocked.
    */
   reconcileInventory(): Promise<ReconcileResult>;
-  /** @internal — AC-10 test hook. */
-  readonly _handlerRegistry?: HandlerRegistry;
   /** @internal — issue #47 test hook (rolling-engine introspection). */
   readonly _rollingEngine?: RollingSwapEngine;
 }
@@ -1198,10 +1184,10 @@ export async function startSwapNode(
   }
 
   // The swap node's Nostr identity is derived from the SWAP_MNEMONIC (NOT from any
-  // NODE_NOSTR_SECRET_KEY). This SAME `identity` is the swap-handler gift-wrap
-  // recipient (`recipientSecretKey: identity.secretKey`, below) and is
-  // published as the kind:10032 IlpPeerInfo `pubkey` (below). streamSwap
-  // callers therefore gift-wrap to `identity.pubkey` and pass it as
+  // NODE_NOSTR_SECRET_KEY). This SAME `identity` is the RFQ intake's and the
+  // rolling engine's gift-wrap recipient (`secretKey: identity.secretKey`,
+  // below) and is published as the kind:10032 IlpPeerInfo `pubkey` (below).
+  // Callers therefore gift-wrap to `identity.pubkey` and pass it as
   // `swapPubkey`. See issues #80/#88 and docs/protocol.md ("Swap recipient
   // key discovery").
   const identity: NodeIdentity = fromMnemonic(config.mnemonic);
@@ -1587,13 +1573,11 @@ export async function startSwapNode(
   });
   config.__testHooks?.onClaimIssuerBuilt?.(claimIssuer);
 
-  // 8. Swap handler (+ optional maxRateAge staleness guard — swap#48).
-  //
-  // The guard owns the timestamped-quote normalization: the SDK handler only
-  // accepts `(pair) => string` providers, so the swap node's widened
-  // SwapRateProvider (`{ rate, at }` returns) is adapted here. With
-  // `maxRateAge` set, the SDK-facing provider also re-checks freshness at
-  // pricing time (race backstop behind the gate below).
+  // 8. Staleness guard (rolling-swap §4, swap#48) — the rolling engine's and
+  // the RFQ intake's shared `stale_rate` gate. swap#154 (toon-meta#411 Stage
+  // 5) deleted the legacy `createSwapHandler` / `withMaxRateAge` wiring this
+  // used to also feed; the guard itself stays, unwired from either, because
+  // both the rolling engine and the RFQ intake still consume it directly.
   const stalenessGuard = config.maxRateAge
     ? new RateFreshnessGuard({
         maxRateAge: config.maxRateAge,
@@ -1602,64 +1586,6 @@ export async function startSwapNode(
         logger: { warn: logger.warn, info: logger.info },
       })
     : undefined;
-  const sdkRateProvider = stalenessGuard
-    ? stalenessGuard.toSdkRateProvider()
-    : config.rateProvider
-      ? normalizeRateProvider(config.rateProvider)
-      : undefined;
-
-  // swap#136 — reclaim the diagnosis the SDK handler used to throw away. Since
-  // `@toon-protocol/sdk@3.2.0` (toon#205) this is a first-class seam: the
-  // handler hands us the thrown value, the packet context and the reject it
-  // would otherwise emit, and we log the classified refusal and return the
-  // reject that actually goes on the wire. See `claim-refusal.ts`.
-  const swapHandler = createSwapHandler({
-    recipientSecretKey: identity.secretKey,
-    swapPairs: [...config.swapPairs],
-    claimIssuer,
-    onFailure: createClaimRefusalMapper({ logger }),
-    ...(sdkRateProvider && { rateProvider: sdkRateProvider }),
-    // Issue #46 — prefer the operator's set (verbatim, SDK contract), else
-    // the swap-node-owned persistent replay set when persistence is enabled,
-    // else the SDK's default in-memory LRU.
-    ...((config.seenPacketIds ?? persistentSeen) && {
-      seenPacketIds: (config.seenPacketIds ?? persistentSeen) as NonNullable<
-        CreateSwapHandlerConfig['seenPacketIds']
-      >,
-    }),
-    logger: {
-      debug: logger.debug,
-      info: logger.info,
-      warn: logger.warn,
-      error: logger.error,
-    },
-  });
-
-  // Staleness gate (rolling-swap §4): reject `stale_rate` BEFORE the inner
-  // handler takes its replay reservation, prices the packet, or issues a
-  // leg-B claim. Decorating the handler (rather than gating only in
-  // handlePacket below) puts the guard on EVERY dispatch path into the
-  // registry. No maxRateAge → the handler is registered untouched.
-  const gatedSwapHandler = stalenessGuard
-    ? withMaxRateAge(swapHandler, {
-        guard: stalenessGuard,
-        recipientSecretKey: identity.secretKey,
-        swapPairs: config.swapPairs,
-        logger: { info: logger.info, warn: logger.warn },
-      })
-    : swapHandler;
-
-  // 9/10. HandlerRegistry — register on kind:1059 (NIP-59 gift-wrap).
-  const registry = new HandlerRegistry();
-  try {
-    registry.on(1059, gatedSwapHandler);
-  } catch (err) {
-    throw new SwapNodeStartError(
-      'HANDLER_REGISTRATION_FAILED',
-      'Failed to register swap handler on kind:1059',
-      { cause: err }
-    );
-  }
 
   // 11. Connector ownership.
   //
@@ -1887,8 +1813,9 @@ export async function startSwapNode(
   //
   // Constructed unconditionally: without registered sessions every rolling
   // fill is a benign F06, so an idle engine costs nothing. Shares the
-  // staleness guard (same feed-tick state as the legacy gate) and — when
-  // persistence is enabled — the persistent replay set, so rolling replay
+  // staleness guard (same feed-tick state the RFQ intake's freshness bound
+  // reads) and — when persistence is enabled — the persistent replay set, so
+  // rolling replay
   // reservations hit disk synchronously (state-store crash rule 4) under
   // `rolling:${streamNonce}:${seq}` keys, disjoint from gift-wrap ids.
   const resolvedNodeId =
@@ -1987,49 +1914,33 @@ export async function startSwapNode(
     logger: { debug: logger.debug, warn: logger.warn, info: logger.info },
   });
 
-  // 11a. Wire the HandlerRegistry to the connector's local-delivery path.
+  // 11a. Wire `handlePacket` to the connector's local-delivery path.
   //
   // Story 50.3 (SOL settlement leg, AC#4): inbound kind:1059 (NIP-59 gift-wrap)
-  // swap-request packets destined for swap node's OWN ILP address MUST be dispatched
-  // to `swapHandler` so swap node returns a signed claim in the FULFILL `data`. swap node
-  // does NOT route through `createToonNode()` (the SDK helper that performs this
-  // wiring for town nodes), so without an explicit `setPacketHandler()` call the
+  // swap-request packets destined for swap node's OWN ILP address MUST be
+  // dispatched to `handlePacket` so swap node returns a signed claim, a
+  // quote, or a reject in the FULFILL `data`. swap node does NOT route
+  // through `createToonNode()` (the SDK helper that performs this wiring for
+  // town nodes), so without an explicit `setPacketHandler()` call the
   // embedded ConnectorNode has no `localDeliveryHandler` set. With
-  // `localDelivery: { enabled: false }`, the connector's PacketHandler then falls
-  // through to its auto-fulfill stub, returning the literal string
-  // `"Local delivery - auto-fulfill stub"` as FULFILL data — which the sender's
-  // streamSwap decoder cannot JSON.parse (`FULFILL_DECODE_FAILED`).
+  // `localDelivery: { enabled: false }`, the connector's PacketHandler then
+  // falls through to its auto-fulfill stub, returning the literal string
+  // `"Local delivery - auto-fulfill stub"` as FULFILL data — which no
+  // sender's decoder can JSON.parse.
   //
-  // This handler mirrors the canonical pipeline in
-  // `@toon-protocol/sdk` `create-node.ts`:
-  //   1. Shallow-parse the TOON to recover the real event kind for routing.
-  //   2. Build a HandlerContext and dispatch to the registry (kind:1059 →
-  //      swapHandler). Verification/replay-protection happen INSIDE the swap
-  //      handler (it unwraps + verifies the gift-wrap itself); payment was
-  //      already gated by the apex parent on the inbound hop.
-  //   3. Serialize the handler's `accept()` metadata → base64-JSON FULFILL
-  //      `data` (connector v3.3.2 PaymentHandlerAdapter consumes `data`, not
-  //      `metadata`). This is the exact shape streamSwap's FULFILL decoder reads.
-  //   4. Reverse-map the handler's ILP reject code → the connector adapter's
-  //      semantic `rejectReason` (otherwise every reject collapses to F99).
-  const toonDecoder = (toon: string): NostrEvent =>
-    decodeEventFromToon(Buffer.from(toon, 'base64'));
-
-  // Issue #47 dispatch matrix (condition class × payload class):
+  // swap#154 (toon-meta#411 Stage 5) dispatch matrix (condition class ×
+  // payload class) — the legacy claim-in-FULFILL row is gone. A zero/absent
+  // condition that isn't a rolling fill now falls to `rfqIntake.handle()`,
+  // which is TERMINAL: kind:20033 mints a session, anything else (the
+  // retired legacy kind:20032, or anything unparseable) is a named reject.
   //
-  //   | executionCondition   | payload        | path                          |
-  //   |----------------------|----------------|-------------------------------|
-  //   | absent / all-zero    | TOON/gift-wrap | LEGACY, byte-for-byte         |
-  //   | absent / all-zero    | rolling fill   | reject F99 condition_required |
-  //   | non-zero (32B)       | rolling fill   | rolling engine (coupled legs) |
-  //   | non-zero (32B)       | anything else  | reject F99 (see below)        |
-  //
-  // The last row is load-bearing: the legacy handler cannot mint a
-  // sender-chosen preimage, so dispatching it would debit inventory and
-  // issue a claim only for the connector to convert the FULFILL into F99
-  // (contract rule 3) with nothing recorded upstream — a maker-side loss on
-  // every such packet. Rejecting BEFORE dispatch keeps the failure benign
-  // and stateless.
+  //   | executionCondition   | payload          | path                          |
+  //   |----------------------|------------------|--------------------------------|
+  //   | absent / all-zero    | kind:20033 RFQ   | rolling RFQ intake (session)  |
+  //   | absent / all-zero    | anything else    | rfqIntake reject (terminal)   |
+  //   | absent / all-zero    | rolling fill     | reject F99 condition_required |
+  //   | non-zero (32B)       | rolling fill     | rolling engine (coupled legs) |
+  //   | non-zero (32B)       | anything else    | reject F01 malformed_fill     |
   const decodeSenderCondition = (b64?: string): Uint8Array | null => {
     if (typeof b64 !== 'string' || b64.length === 0) return null;
     let buf: Buffer;
@@ -2091,8 +2002,7 @@ export async function startSwapNode(
 
     if (rollingFill === 'malformed') {
       // Self-identified rolling/1 traffic that violates the fill shape:
-      // reject F01 rather than letting it fall through to the legacy TOON
-      // parser's misleading F06.
+      // reject F01 with a precise reason rather than a generic one.
       emitIntake('refused', { reason: ROLLING_REJECT_REASONS.MALFORMED_FILL });
       return buildRollingReject({
         code: 'F01',
@@ -2103,15 +2013,17 @@ export async function startSwapNode(
     }
     if (senderCondition) {
       if (rollingFill === null) {
-        emitIntake('refused', {
-          reason: ROLLING_REJECT_REASONS.CONDITION_UNSUPPORTED_LEGACY,
-        });
+        // A real sender-chosen condition paired with a payload that is not
+        // even rolling/1-shaped. The rolling fill protocol is the only thing
+        // this maker accepts under a real condition — the retired legacy
+        // claim-in-FULFILL path never set one (swap#154) — so this is
+        // malformed input, not a distinct case.
+        emitIntake('refused', { reason: ROLLING_REJECT_REASONS.MALFORMED_FILL });
         return buildRollingReject({
-          code: 'F99',
-          semantic: 'application_error',
-          message:
-            'sender-chosen execution conditions are not supported on the legacy swap path',
-          reason: ROLLING_REJECT_REASONS.CONDITION_UNSUPPORTED_LEGACY,
+          code: 'F01',
+          semantic: 'invalid_request',
+          message: 'malformed rolling fill payload',
+          reason: ROLLING_REJECT_REASONS.MALFORMED_FILL,
         }) as HandlePacketResponse;
       }
       emitIntake('rolling-fill', {
@@ -2143,111 +2055,16 @@ export async function startSwapNode(
       }) as HandlePacketResponse;
     }
 
-    // Rolling RFQ (spec §2.2) — a zero-condition kind:1059 gift wrap, exactly
-    // like a legacy swap request, distinguished ONLY by its inner rumor kind
-    // (20033). It therefore has to be sniffed here, before the legacy branch,
-    // by unwrapping and reading that kind. `handle()` returns null for
-    // everything it cannot positively identify as an RFQ (including any unwrap
-    // failure), so the legacy path below stays byte-for-byte as it was. The
-    // `rolling-rfq` intake event is emitted from inside `handle()` itself
-    // (it already unwraps to answer the RFQ, so classifying here too would
-    // mean a second unwrap for no reason).
-    const rfq = await rfqIntake.handle(request.data, {
+    // Rolling RFQ (spec §2.2) — a zero-condition kind:1059 gift wrap,
+    // distinguished from anything else on this seam only by its inner rumor
+    // kind (20033). `handle()` is TERMINAL (swap#154, toon-meta#411 Stage 5):
+    // it always returns an accept or a named reject, never `null` — there is
+    // no more legacy fall-through for it to defer to. It emits its own
+    // `swap.intake.arrival` classification (it already pays for the unwrap
+    // that identifies the class, including the refused ones).
+    return (await rfqIntake.handle(request.data, {
       ...(sourcePeer !== undefined ? { sourcePeer } : {}),
-    });
-    if (rfq) return rfq as HandlePacketResponse;
-
-    // Legacy path (zero-condition gift-wrap, not RFQ) — unchanged below.
-    // `rfqIntake.handle()` above already paid for one unwrap to answer "is
-    // this an RFQ"; its result throws away the rumor rather than returning
-    // it, so classifying legacy pays for a second, read-only unwrap purely
-    // for the intake event. Best-effort: any failure here (including "not a
-    // gift wrap at all") still classifies as `legacy` — that's the code path
-    // this packet takes next, and the dispatch below reports its own F01/F06
-    // for exactly the same failure.
-    let legacyPair: string | undefined;
-    try {
-      const { rumor } = unwrapSwapPacketFromToon({
-        toonData: new Uint8Array(Buffer.from(request.data, 'base64')),
-        recipientSecretKey: identity.secretKey,
-      });
-      legacyPair = formatPairLabel(findSwapPair(rumor, [...config.swapPairs]));
-    } catch {
-      // Unclassifiable — dispatch below reports the same failure on the wire.
-    }
-    emitIntake('legacy', { pair: legacyPair });
-
-    let meta;
-    try {
-      meta = shallowParseToon(Buffer.from(request.data, 'base64'));
-    } catch {
-      return {
-        accept: false,
-        code: 'F06',
-        message: 'Invalid TOON payload',
-      };
-    }
-
-    let amount: bigint;
-    try {
-      amount = BigInt(request.amount);
-    } catch {
-      return { accept: false, code: 'T00', message: 'Invalid payment amount' };
-    }
-
-    const ctx = createHandlerContext({
-      toon: request.data,
-      meta,
-      amount,
-      destination: request.destination,
-      toonDecoder,
-    });
-
-    let result: HandlePacketResponse;
-    try {
-      result = (await registry.dispatch(ctx)) as HandlePacketResponse;
-    } catch (err) {
-      logger.error?.('swap.packet.dispatch_failed', { err: errSummary(err) });
-      return { accept: false, code: 'T00', message: 'Internal error' };
-    }
-
-    // Connector v3.3.2: the embedded ConnectorNode's PaymentHandlerAdapter
-    // consumes `response.data` (base64) and ignores `response.metadata`.
-    // The swap handler returns the signed claim via `ctx.accept(metadata)`;
-    // serialize it into `data` as the base64-JSON shape streamSwap expects.
-    if (result.accept && result.metadata && !result.data) {
-      try {
-        const json = JSON.stringify(result.metadata);
-        (result as { data?: string }).data = Buffer.from(json, 'utf8').toString(
-          'base64'
-        );
-      } catch (err) {
-        logger.error?.('swap.packet.metadata_serialize_failed', {
-          err: errSummary(err),
-        });
-      }
-    }
-
-    // Connector v3.3.2: the adapter's reject path reads
-    // `response.rejectReason.{code,message}` and feeds `code` through
-    // `mapRejectCode()` (semantic-reason → ILP-code). The handler's
-    // `ctx.reject(ilpCode, message)` returns the ILP code directly, so
-    // reverse-map it to the semantic reason or every reject collapses to F99.
-    if (
-      !result.accept &&
-      !(result as { rejectReason?: unknown }).rejectReason &&
-      (result as { code?: string }).code
-    ) {
-      const ilpCode = (result as { code: string }).code;
-      (
-        result as { rejectReason?: { code: string; message: string } }
-      ).rejectReason = {
-        code: ilpCodeToSemantic(ilpCode),
-        message: (result as { message?: string }).message ?? 'Payment rejected',
-      };
-    }
-
-    return result;
+    })) as HandlePacketResponse;
   };
 
   // Register the handler as the connector's local-delivery callback.
@@ -2726,7 +2543,6 @@ export async function startSwapNode(
     blsPort: livePort,
     swapNodeKeys,
     ...(effectiveConnector !== undefined && { connector: effectiveConnector }),
-    _handlerRegistry: registry,
     _rollingEngine: rollingEngine,
     registerRollingSession: (session: RollingSession) => {
       rollingEngine.registerSession(session);

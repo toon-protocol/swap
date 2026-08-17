@@ -37,11 +37,20 @@
  * this module answers a kind:20033 with a legacy-handler reject, which is
  * exactly the negative signal the sender needs. Advertising a flag would add a
  * second, unspecified source of truth that no client reads.
+ *
+ * swap#154 (toon-meta#411 Stage 5) retired the "legacy-handler reject" half of
+ * that sentence for THIS maker: `handle()` is now terminal for every arrival
+ * on this seam, and a kind:20032 request gets `LEGACY_PROTOCOL_REFUSED`
+ * rather than a dispatch to a legacy handler that no longer exists.
  */
 
 import type { SwapPair } from '@toon-protocol/core';
 import type { NostrEvent, UnsignedEvent } from 'nostr-tools';
-import { unwrapSwapPacketFromToon, wrapSwapPacket } from '@toon-protocol/sdk';
+import {
+  unwrapSwapPacketFromToon,
+  wrapSwapPacket,
+  findSwapPair,
+} from '@toon-protocol/sdk';
 
 import {
   ROLLING_PROTOCOL,
@@ -81,6 +90,20 @@ export const ROLLING_RFQ_REJECT_REASONS = {
    * failure free — see `leg-b-return-path.ts`.
    */
   NO_RETURN_PATH: 'no_return_path',
+  /**
+   * swap#154 (toon-meta#411 Stage 5) — the zero-condition arrival unwrapped
+   * fine but its inner rumor is not kind:20033. Overwhelmingly this is the
+   * retired legacy kind:20032 swap request; this maker serves the rolling
+   * protocol only and there is no more fall-through to hand it to.
+   */
+  LEGACY_PROTOCOL_REFUSED: 'legacy_protocol_refused',
+  /**
+   * swap#154 — the arrival could not even be unwrapped as a NIP-59 gift wrap
+   * addressed to this maker (wrong recipient, corrupt bytes, not TOON at
+   * all). Distinct from {@link LEGACY_PROTOCOL_REFUSED}: unlike a readable
+   * kind:20032, there is no positive evidence this was ever a swap request.
+   */
+  UNREADABLE_REQUEST: 'unreadable_request',
 } as const;
 
 /**
@@ -169,10 +192,9 @@ function parseAsset(v: unknown): RollingRfqAsset | null {
  * Parse the `content` of a kind:20033 rumor as an RFQ request.
  *
  * Returns `'malformed'` when the payload self-identifies as `rolling/1` (or is
- * simply unparseable) but violates the shape — the caller rejects rather than
- * letting a kind:20033 fall through to the legacy handler, which would answer
- * with a misleading legacy error. Returns `null` only when the content is not
- * rolling traffic at all.
+ * simply unparseable) but violates the shape — the caller rejects with a
+ * precise RFQ error rather than a generic one. Returns `null` only when the
+ * content is not rolling traffic at all.
  */
 export function parseRollingRfqRequest(
   content: string
@@ -244,12 +266,6 @@ export function findRfqPair(
 /** Optional, all-defaulted RFQ knobs (no new REQUIRED config key). */
 export interface RollingRfqConfig {
   /**
-   * Master switch. Defaults to `true`: the path is only reachable by a packet
-   * whose inner rumor kind is 20033, which today has no other handler at all,
-   * so enabling it cannot regress any traffic that currently works.
-   */
-  enabled?: boolean;
-  /**
    * How long the quoted `R₀` stays a valid basis for the sender's session
    * floor (spec §5), default {@link DEFAULT_RFQ_QUOTE_TTL_MS} — the 60s of the
    * spec's §11 worked example.
@@ -318,23 +334,27 @@ export type RollingRfqOutcome =
     };
 
 /**
- * Decide whether an inbound local-delivery packet is an RFQ request, and if so
- * answer it.
+ * Decide whether an inbound zero-condition local-delivery packet is an RFQ
+ * request, and answer it — accept or reject, terminally (swap#154).
  *
- * Returns `null` when the packet is NOT an RFQ — it could not be unwrapped, or
- * its inner rumor is not kind:20033 — in which case the caller MUST fall
- * through to its existing legacy path with behaviour byte-for-byte unchanged.
- * Every failure mode inside this function is expressed as a returned reject or
- * as `null`; it never throws.
+ * A kind:20033 rumor mints a session and returns a quote. Everything else —
+ * unreadable bytes, or a readable rumor whose kind is not 20033 (typically
+ * the retired legacy kind:20032) — is a named reject. Every failure mode is
+ * expressed as a returned reject; this never throws and never returns `null`.
  */
 export function createRollingRfqIntake(config: RollingRfqIntakeConfig): {
-  /** `null` ⇒ not an RFQ, fall through to legacy. */
+  /**
+   * TERMINAL (swap#154, toon-meta#411 Stage 5): every zero-condition arrival
+   * on this seam ends here. A kind:20033 rumor mints a session and returns a
+   * quote; anything else — the retired legacy kind:20032, an unknown kind, or
+   * a payload that will not even unwrap — is a named reject. There is no more
+   * legacy handler to fall through to, so this never returns `null`.
+   */
   handle(
     dataB64: string,
     arrival?: { sourcePeer?: string }
-  ): Promise<RollingRfqOutcome | null>;
+  ): Promise<RollingRfqOutcome>;
 } {
-  const enabled = config.rfq?.enabled ?? true;
   const quoteTtlMs = config.rfq?.quoteTtlMs ?? DEFAULT_RFQ_QUOTE_TTL_MS;
   const spreadBps = config.rfq?.spreadBps;
   const now = config.now ?? Date.now;
@@ -353,18 +373,38 @@ export function createRollingRfqIntake(config: RollingRfqIntakeConfig): {
       reason,
     }) as RollingRfqOutcome;
 
+  /** One `swap.intake.arrival` line for a reject decided in this module. */
+  const emitRefused = (sourcePeer: string | undefined, reason: string): void => {
+    logger?.info?.(SWAP_INTAKE_EVENT, {
+      class: 'refused' satisfies SwapIntakeClass,
+      sender: sourcePeer,
+      reason,
+    });
+  };
+
   return {
     async handle(
       dataB64: string,
       arrival?: { sourcePeer?: string }
-    ): Promise<RollingRfqOutcome | null> {
-      if (!enabled) return null;
-      if (typeof dataB64 !== 'string' || dataB64.length === 0) return null;
+    ): Promise<RollingRfqOutcome> {
+      if (typeof dataB64 !== 'string' || dataB64.length === 0) {
+        emitRefused(
+          arrival?.sourcePeer,
+          ROLLING_RFQ_REJECT_REASONS.UNREADABLE_REQUEST
+        );
+        return reject(
+          'F06',
+          'unreadable_request',
+          'empty or missing swap request payload',
+          ROLLING_RFQ_REJECT_REASONS.UNREADABLE_REQUEST
+        );
+      }
 
       // Unwrap to read the INNER rumor kind. The outer envelope of an RFQ and
       // of a legacy swap request are both kind:1059, so the kind is only
-      // visible after NIP-59 decryption. ANY failure here means "not an RFQ we
-      // can read" → fall through, leaving the legacy path exactly as it was.
+      // visible after NIP-59 decryption. Any failure here means the payload
+      // is not even a gift wrap this maker can read at all — refuse, there is
+      // no other handler left on this seam to try.
       let rumor: UnsignedEvent;
       let senderPubkey: string;
       try {
@@ -375,9 +415,40 @@ export function createRollingRfqIntake(config: RollingRfqIntakeConfig): {
         rumor = unwrapped.rumor;
         senderPubkey = unwrapped.senderPubkey;
       } catch {
-        return null;
+        logger?.warn?.('swap.rfq.unreadable', { sender: arrival?.sourcePeer });
+        emitRefused(
+          arrival?.sourcePeer,
+          ROLLING_RFQ_REJECT_REASONS.UNREADABLE_REQUEST
+        );
+        return reject(
+          'F06',
+          'unreadable_request',
+          'could not decrypt or parse the swap request as a NIP-59 gift wrap',
+          ROLLING_RFQ_REJECT_REASONS.UNREADABLE_REQUEST
+        );
       }
-      if (rumor?.kind !== ROLLING_RFQ_REQUEST_KIND) return null;
+      if (rumor?.kind !== ROLLING_RFQ_REQUEST_KIND) {
+        // Best-effort pair label for operator diagnostics — the retired
+        // legacy request shape tagged its pair the same way a rolling one
+        // does. Absent (rather than failing the reject) when it doesn't
+        // resolve, e.g. an unrecognized inner kind entirely.
+        const legacyPair = formatPairLabel(
+          findSwapPair(rumor, [...config.swapPairs]) ?? undefined
+        );
+        logger?.info?.(SWAP_INTAKE_EVENT, {
+          class: 'refused' satisfies SwapIntakeClass,
+          sender: arrival?.sourcePeer,
+          reason: ROLLING_RFQ_REJECT_REASONS.LEGACY_PROTOCOL_REFUSED,
+          ...(legacyPair !== undefined && { pair: legacyPair }),
+        });
+        return reject(
+          'F06',
+          'legacy_protocol_refused',
+          `this maker only accepts rolling swap requests (kind:${ROLLING_RFQ_REQUEST_KIND}); ` +
+            `kind:${rumor?.kind} is the retired legacy swap protocol and is no longer served`,
+          ROLLING_RFQ_REJECT_REASONS.LEGACY_PROTOCOL_REFUSED
+        );
+      }
 
       const parsed = parseRollingRfqRequest(
         typeof rumor.content === 'string' ? rumor.content : ''
@@ -400,9 +471,8 @@ export function createRollingRfqIntake(config: RollingRfqIntakeConfig): {
       });
 
       if (parsed === null || parsed === 'malformed') {
-        // Kind:20033 is unambiguously rolling traffic. Falling through would
-        // hand it to the legacy handler, whose error would misdescribe the
-        // failure, so reject here with the actionable reason.
+        // Kind:20033 is unambiguously rolling traffic — reject with the
+        // actionable RFQ-specific reason rather than a generic one.
         logger?.warn?.('swap.rfq.malformed', { senderPubkey });
         return reject(
           'F01',
@@ -469,8 +539,7 @@ export function createRollingRfqIntake(config: RollingRfqIntakeConfig): {
           'F02',
           'unreachable',
           `no leg-B return path to ${parsed.senderIlpAddress}: ${returnPath.reason}. ` +
-            'Connect to this maker over BTP, or use the legacy swap path ' +
-            '(`rolling: "off"`).',
+            'Connect to this maker over BTP.',
           ROLLING_RFQ_REJECT_REASONS.NO_RETURN_PATH
         );
       }
