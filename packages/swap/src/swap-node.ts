@@ -41,6 +41,8 @@ import {
   createSwapHandler,
   fromMnemonic,
   base58Encode,
+  unwrapSwapPacketFromToon,
+  findSwapPair,
 } from '@toon-protocol/sdk';
 import type { NodeIdentity, CreateSwapHandlerConfig } from '@toon-protocol/sdk';
 import {
@@ -111,6 +113,8 @@ import { createRollingRfqIntake } from './rolling-rfq.js';
 import type { RollingRfqConfig } from './rolling-rfq.js';
 import { createLegBReturnRouteBinder } from './leg-b-return-path.js';
 import type { LegBReturnRouteBinder } from './leg-b-return-path.js';
+import { SWAP_INTAKE_EVENT, formatPairLabel } from './intake-event.js';
+import type { SwapIntakeClass } from './intake-event.js';
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -1980,7 +1984,7 @@ export async function startSwapNode(
       return { rate: pair.rate, rateTimestamp: Date.now() };
     },
     ...(config.rolling?.rfq && { rfq: config.rolling.rfq }),
-    logger: { debug: logger.debug, warn: logger.warn },
+    logger: { debug: logger.debug, warn: logger.warn, info: logger.info },
   });
 
   // 11a. Wire the HandlerRegistry to the connector's local-delivery path.
@@ -2060,10 +2064,36 @@ export async function startSwapNode(
     );
     const rollingFill = parseRollingFillPayload(request.data);
 
+    // swap#152 (ADR 0003's removal gate) — one classified intake event per
+    // arrival, emitted from the SAME branches that already decide dispatch,
+    // so classification can never diverge from the routing decision it
+    // describes. `sender` is the ILP-level identity already on hand at this
+    // seam (never the gift wrap's Nostr pubkey, which would require an extra
+    // unwrap and still isn't an ILP address/peer id) — a BTP arrival's peer
+    // id when the connector reports one, else the packet's own
+    // `sourceAccount`. Reads nothing the dispatch below does not already
+    // read, and decides nothing: the wire outcome is identical whether or not
+    // a logger is installed.
+    const intakeSender = sourcePeer ?? request.sourceAccount;
+    const emitIntake = (
+      intakeClass: SwapIntakeClass,
+      extra: { pair?: string; reason?: string } = {}
+    ): void => {
+      logger.info?.(SWAP_INTAKE_EVENT, {
+        class: intakeClass,
+        sender: intakeSender,
+        ...extra,
+      });
+    };
+    /** The pair a fill's session was minted for — absent once it has expired. */
+    const sessionPairLabel = (streamNonce: string): string | undefined =>
+      formatPairLabel(rollingSessions.get(streamNonce)?.pair);
+
     if (rollingFill === 'malformed') {
       // Self-identified rolling/1 traffic that violates the fill shape:
       // reject F01 rather than letting it fall through to the legacy TOON
       // parser's misleading F06.
+      emitIntake('refused', { reason: ROLLING_REJECT_REASONS.MALFORMED_FILL });
       return buildRollingReject({
         code: 'F01',
         semantic: 'invalid_request',
@@ -2073,6 +2103,9 @@ export async function startSwapNode(
     }
     if (senderCondition) {
       if (rollingFill === null) {
+        emitIntake('refused', {
+          reason: ROLLING_REJECT_REASONS.CONDITION_UNSUPPORTED_LEGACY,
+        });
         return buildRollingReject({
           code: 'F99',
           semantic: 'application_error',
@@ -2081,6 +2114,9 @@ export async function startSwapNode(
           reason: ROLLING_REJECT_REASONS.CONDITION_UNSUPPORTED_LEGACY,
         }) as HandlePacketResponse;
       }
+      emitIntake('rolling-fill', {
+        pair: sessionPairLabel(rollingFill.streamNonce),
+      });
       return (await rollingEngine.handleFill({
         amount: request.amount,
         destination: request.destination,
@@ -2095,6 +2131,10 @@ export async function startSwapNode(
       // A rolling fill without a sender-chosen condition has NO coupling
       // (spec R2: a zero condition is skipped by every verifier) — refuse
       // rather than fill uncoupled.
+      emitIntake('refused', {
+        reason: ROLLING_REJECT_REASONS.CONDITION_REQUIRED,
+        pair: sessionPairLabel(rollingFill.streamNonce),
+      });
       return buildRollingReject({
         code: 'F99',
         semantic: 'application_error',
@@ -2108,13 +2148,35 @@ export async function startSwapNode(
     // (20033). It therefore has to be sniffed here, before the legacy branch,
     // by unwrapping and reading that kind. `handle()` returns null for
     // everything it cannot positively identify as an RFQ (including any unwrap
-    // failure), so the legacy path below stays byte-for-byte as it was.
+    // failure), so the legacy path below stays byte-for-byte as it was. The
+    // `rolling-rfq` intake event is emitted from inside `handle()` itself
+    // (it already unwraps to answer the RFQ, so classifying here too would
+    // mean a second unwrap for no reason).
     const rfq = await rfqIntake.handle(request.data, {
       ...(sourcePeer !== undefined ? { sourcePeer } : {}),
     });
     if (rfq) return rfq as HandlePacketResponse;
 
-    // Legacy path (zero-condition gift-wrap) — unchanged below.
+    // Legacy path (zero-condition gift-wrap, not RFQ) — unchanged below.
+    // `rfqIntake.handle()` above already paid for one unwrap to answer "is
+    // this an RFQ"; its result throws away the rumor rather than returning
+    // it, so classifying legacy pays for a second, read-only unwrap purely
+    // for the intake event. Best-effort: any failure here (including "not a
+    // gift wrap at all") still classifies as `legacy` — that's the code path
+    // this packet takes next, and the dispatch below reports its own F01/F06
+    // for exactly the same failure.
+    let legacyPair: string | undefined;
+    try {
+      const { rumor } = unwrapSwapPacketFromToon({
+        toonData: new Uint8Array(Buffer.from(request.data, 'base64')),
+        recipientSecretKey: identity.secretKey,
+      });
+      legacyPair = formatPairLabel(findSwapPair(rumor, [...config.swapPairs]));
+    } catch {
+      // Unclassifiable — dispatch below reports the same failure on the wire.
+    }
+    emitIntake('legacy', { pair: legacyPair });
+
     let meta;
     try {
       meta = shallowParseToon(Buffer.from(request.data, 'base64'));
