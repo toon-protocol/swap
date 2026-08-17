@@ -38,6 +38,7 @@ import {
   DOCKER_PAIR_MATRIX,
   SWAP_E2E_EVM_SENDER_ADDRESS,
   type DockerChain,
+  peer1AdvertisesPair,
 } from './helpers/infra-gate.js';
 
 // ---------------------------------------------------------------------------
@@ -211,6 +212,25 @@ describe('Docker Swap-Flow Pair-Matrix E2E (Story 12.10, Task 5) — 9 ordered c
         totalAmount: 1_000_000n,
         packetCount: 1,
       });
+
+      if (!peer1AdvertisesPair(pair.from, pair.to)) {
+        // swap#160. Until this ticket, this branch was unreachable: every pair
+        // whose chains were "ready" was one peer1 advertised, because the only
+        // ready chain was EVM. Booting a real Solana validator made
+        // `solana:devnet` ready, which made `solana → *` reachable here — and
+        // those are pairs peer1 deliberately does NOT advertise, because their
+        // leg A would have to be PAID on Solana and no sender can do that (see
+        // `S-4` in `docker-rolling-swap-solana-e2e.test.ts` for the three
+        // reasons). Asserting "does not complete" is the honest expectation and
+        // a stronger one than this suite made before: a maker that started
+        // quoting a pair it cannot be paid for would now fail here instead of
+        // passing.
+        expect(
+          result.state,
+          `peer1 completed ${pair.from} → ${pair.to}, a pair it does not advertise`
+        ).not.toBe('completed');
+        return;
+      }
 
       expect(result.state).toBe('completed');
       expect(result.claims.length).toBeGreaterThanOrEqual(1);

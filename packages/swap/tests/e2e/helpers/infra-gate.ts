@@ -45,6 +45,10 @@ import {
   PEER1_BLS_URL,
   PEER1_NOSTR_PUBKEY,
   PEER1_ILP_ADDRESS,
+  SOLANA_CHAIN,
+  SOLANA_PROGRAM_ID as SOLANA_LOCAL_PROGRAM_ID,
+  SOLANA_RPC_URL,
+  SOLANA_USDC_MINT,
 } from './topology.js';
 
 // ---------------------------------------------------------------------------
@@ -59,16 +63,31 @@ export { PEER1_ILP_ADDRESS };
 export const PEER1_EVM_ADDRESS = MAKER_EVM_ADDRESS;
 
 /**
- * Solana / Mina endpoints. These literal defaults are asserted verbatim by
- * `docker-swap-flow-solana-e2e.test.ts` / `docker-swap-flow-mina-e2e.test.ts`
- * (config-drift guards) — only reached once `waitForSolanaHealth()` /
- * `waitForMinaHealth()` report ready, i.e. once an operator has actually
- * brought up the matching infra (see `tests/e2e/README.md`) and overridden
- * `SOLANA_E2E_PROGRAM_ID` / `MINA_E2E_ZKAPP_ADDRESS`.
+ * Solana endpoints (swap#160).
+ *
+ * These now default to the harness's OWN validator — `global-setup.ts` boots a
+ * real `solana-test-validator` with the vendored payment-channel program baked
+ * into genesis, so there is nothing for an operator to bring up and nothing to
+ * export. The env vars survive as overrides for pointing the suites at an
+ * externally-managed validator; the literal defaults are asserted verbatim by
+ * the Solana suites as config-drift guards.
+ *
+ * `SOLANA_PROGRAM_ID` used to default to the empty string (no deployment
+ * existed), which is why `S-2` had to assert it was non-empty before it could
+ * build a settlement bundle. It now names the address `solana-validator.ts`
+ * loads the program at.
  */
-export const SOLANA_RPC =
-  process.env['SOLANA_E2E_RPC_URL'] || 'http://localhost:19899';
-export const SOLANA_PROGRAM_ID = process.env['SOLANA_E2E_PROGRAM_ID'] || '';
+export const SOLANA_RPC = process.env['SOLANA_E2E_RPC_URL'] || SOLANA_RPC_URL;
+export const SOLANA_PROGRAM_ID =
+  process.env['SOLANA_E2E_PROGRAM_ID'] || SOLANA_LOCAL_PROGRAM_ID;
+/** The mock USDC SPL mint the seeded Solana channels settle in. */
+export const SOLANA_TOKEN_MINT =
+  process.env['SOLANA_E2E_TOKEN_MINT'] || SOLANA_USDC_MINT;
+
+/**
+ * Mina endpoints. Unlike Solana, still operator-supplied: this repo vendors no
+ * lightnet (see `tests/e2e/README.md`).
+ */
 export const MINA_GRAPHQL =
   process.env['MINA_E2E_GRAPHQL_URL'] || 'http://localhost:19085/graphql';
 export const MINA_ZKAPP_ADDRESS = process.env['MINA_E2E_ZKAPP_ADDRESS'] || '';
@@ -132,7 +151,7 @@ export const DOCKER_CHAIN_EVM = `${EVM_CHAIN_PREFIX}${CHAIN_ID}` as const;
  * harness that crosses a chain boundary without operator-supplied infra.
  */
 export const DOCKER_CHAIN_EVM_B = `${EVM_CHAIN_PREFIX}${CHAIN_B_ID}` as const;
-export const DOCKER_CHAIN_SOLANA = 'solana:devnet' as const;
+export const DOCKER_CHAIN_SOLANA = SOLANA_CHAIN;
 export const DOCKER_CHAIN_MINA = 'mina:devnet' as const;
 
 export const DOCKER_CHAINS = [
@@ -186,6 +205,19 @@ export const ROLLING_PAIR_MATRIX: readonly {
 export const PEER1_ADVERTISED_PAIRS: ReadonlySet<string> = new Set([
   `${DOCKER_CHAIN_EVM}->${DOCKER_CHAIN_EVM}`,
   `${DOCKER_CHAIN_EVM}->${DOCKER_CHAIN_EVM_B}`,
+  // swap#160 — peer1 advertises a pair across a chain FAMILY boundary as soon
+  // as `global-setup.ts` has a validator to back it. Note the ARROW: only
+  // `evm → solana`.
+  //
+  // `solana → evm` is deliberately NOT here, and must not be added. Nothing
+  // stops the maker QUOTING it, but the harness sender pays leg A through its
+  // connector's `PerPacketClaimService`, which can only sign against an EVM
+  // channel — so the maker would be paid in EVM for a pair whose `from.chain`
+  // says Solana, and it never checks one against the other. The swap would
+  // "complete" and the test would be a lie. `S-4` in
+  // `docker-rolling-swap-solana-e2e.test.ts` asserts the refusal instead, and
+  // records what it would take to make the direction real.
+  `${DOCKER_CHAIN_EVM}->${DOCKER_CHAIN_SOLANA}`,
 ]);
 
 export function peer1AdvertisesPair(from: string, to: string): boolean {
@@ -349,19 +381,39 @@ export async function waitForPeer2Bootstrap(
 let warnedSolana = false;
 let warnedMina = false;
 
-export async function waitForSolanaHealth(timeoutMs: number): Promise<boolean> {
-  if (!process.env['SOLANA_E2E_RPC_URL']) {
-    if (!warnedSolana) {
-      warnedSolana = true;
-      console.warn(
-        '[swap e2e] Solana infra not configured — set SOLANA_E2E_RPC_URL ' +
-          '(and SOLANA_E2E_PROGRAM_ID) to a running solana-test-validator ' +
-          'to exercise solana:devnet suites. See tests/e2e/README.md.'
-      );
-    }
-    return false;
+/** Last observed Solana readiness — drives `skipIfNotReady()`'s hard-fail. */
+let lastSolanaReady = false;
+
+/**
+ * True once the harness's `solana-test-validator` is serving (swap#160).
+ *
+ * No longer gated on an env var. `global-setup.ts` boots the validator itself,
+ * so the only honest question is whether the RPC answers — exactly the shape
+ * of the anvil probes. Memoized like the EVM core: the validator is booted once
+ * per run and shared across every suite file, and the pair-matrix suite
+ * otherwise pays the probe cost again for every Solana-touching pair.
+ */
+let cachedSolanaReady: Promise<boolean> | null = null;
+
+async function probeSolana(timeoutMs: number): Promise<boolean> {
+  const ready = await probeSolanaRpc(SOLANA_RPC, timeoutMs);
+  lastSolanaReady = ready;
+  if (!ready && !warnedSolana) {
+    warnedSolana = true;
+    console.warn(
+      `[swap e2e] No Solana validator at ${SOLANA_RPC} — solana:devnet ` +
+        'suites will skip. `global-setup.ts` boots one automatically when ' +
+        '`solana-test-validator` + `spl-token` are on PATH (install: ' +
+        'https://release.anza.xyz/v2.1.21/install); CI does this in the ' +
+        '`solana-e2e` job. See tests/e2e/README.md.'
+    );
   }
-  return probeSolanaRpc(SOLANA_RPC, timeoutMs);
+  return ready;
+}
+
+export function waitForSolanaHealth(timeoutMs: number): Promise<boolean> {
+  if (!cachedSolanaReady) cachedSolanaReady = probeSolana(timeoutMs);
+  return cachedSolanaReady;
 }
 
 export async function waitForMinaHealth(timeoutMs: number): Promise<boolean> {
@@ -414,13 +466,23 @@ export async function releaseMinaAccount(pk: string): Promise<void> {
 let warnedSkip = false;
 
 /**
- * AC-2: skip (return `true`) when infra isn't ready, EXCEPT under CI when
- * the failure is attributable to the self-contained EVM core this harness
- * owns and boots itself — that's a real regression (this repo's `anvil` is
- * devbox-pinned and CI-installed), so it fails loud instead of masking the
- * gap as a pass-via-skip. Solana/Mina unreadiness never fails CI: nothing
- * in this repo's CI provisions those chains today, so it is an expected,
- * permanent condition rather than a regression signal.
+ * AC-2: skip (return `true`) when infra isn't ready, EXCEPT when the failure is
+ * attributable to infra this harness owns and boots itself — then it fails
+ * loud instead of masking the gap as a pass-via-skip.
+ *
+ * Two such cases:
+ *
+ * - the self-contained EVM core, under `CI` (this repo's `anvil` is
+ *   devbox-pinned and CI-installed, so its absence there is a regression);
+ * - Solana, under `SWAP_E2E_REQUIRE_SOLANA` (swap#160). The `solana-e2e` CI job
+ *   installs the Solana CLI and `global-setup.ts` boots the validator from a
+ *   vendored program, so in THAT job a skip would mean the thing the job exists
+ *   to run did not run — which is precisely the pass-via-skip this harness has
+ *   been bitten by twice. Every other context (a plain `devbox` job, a laptop
+ *   without the CLI) still skips with the warning `probeSolana()` logs.
+ *
+ * Mina unreadiness never fails: nothing provisions a lightnet, so it is an
+ * expected, permanent condition rather than a regression signal.
  */
 export function skipIfNotReady(ready: boolean): boolean {
   if (ready) return false;
@@ -430,6 +492,16 @@ export function skipIfNotReady(ready: boolean): boolean {
         "come up under CI — this is this harness's own responsibility " +
         '(devbox pins `anvil`). Check the global-setup logs rather than ' +
         'silently skipping. See tests/e2e/README.md.'
+    );
+  }
+  if (process.env['SWAP_E2E_REQUIRE_SOLANA'] && !lastSolanaReady) {
+    throw new Error(
+      '[swap e2e] SWAP_E2E_REQUIRE_SOLANA is set but no Solana validator is ' +
+        `serving at ${SOLANA_RPC}. This harness boots its own: it needs ` +
+        '`solana-test-validator` + `solana` + `spl-token` on PATH and the ' +
+        'vendored program at tests/e2e/fixtures/solana/payment_channel.so. ' +
+        'Check the global-setup logs for the reason it did not come up — ' +
+        'skipping here would report a pass for a suite that never ran.'
     );
   }
   if (!warnedSkip) {

@@ -3,8 +3,15 @@
  *
  * GREEN-PHASE. Drives `streamSwap()` with `swapPair.to.chain === 'solana:devnet'`
  * against sender → peer1 over real BTP, then submits the accumulated claim via
- * raw Solana JSON-RPC (`sendTransaction`) to `http://localhost:19899` and
- * asserts an on-chain effect on the channel program account.
+ * raw Solana JSON-RPC (`sendTransaction`) and asserts an on-chain effect on the
+ * channel program account.
+ *
+ * swap#160: this suite now EXECUTES. It used to collect two tests and skip both
+ * because nothing ever brought a validator up; `global-setup.ts` now boots a
+ * real one with the vendored payment-channel program baked into genesis. Kept
+ * as-is otherwise — it is the legacy `streamSwap()` twin of
+ * `docker-rolling-swap-solana-e2e.test.ts` and stays until Stage 5 of
+ * toon-meta#411 retires the legacy path.
  *
  * Settlement rubric (from story Dev Notes):
  *   Solana minimum = `CLAIM_FROM_CHANNEL` discriminator txn submitted,
@@ -36,6 +43,7 @@ import {
   DOCKER_CHAIN_EVM,
   DOCKER_CHAIN_SOLANA,
 } from './helpers/infra-gate.js';
+import { SOLANA_RPC_URL } from './helpers/topology.js';
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -137,9 +145,9 @@ describe('Docker Swap-Flow Solana E2E (Story 12.10, Task 3)', () => {
 
     expect(
       SOLANA_PROGRAM_ID,
-      'SOLANA_PROGRAM_ID not exported — rerun ./scripts/sdk-e2e-infra.sh up'
+      'SOLANA_PROGRAM_ID unset — solana-validator.ts should default it'
     ).not.toBe('');
-    expect(SOLANA_RPC).toBe('http://localhost:19899');
+    expect(SOLANA_RPC).toBe(SOLANA_RPC_URL);
 
     expect(sender, 'Sender must be built').not.toBeNull();
     expect(swapResult, 'streamSwap must have completed').not.toBeNull();

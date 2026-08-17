@@ -2,6 +2,8 @@
 
 Ten suites here drive a real swap session over real BTP against a real swap
 node (`peer1`), then check settlement-bundle construction on each target chain.
+As of swap#160 a full local run collects **52 tests and skips only the 4 Mina
+ones** — every EVM and Solana case executes.
 There are **two families**, and they run side by side:
 
 ### Rolling (swap#153) — the protocol ADR 0003 keeps
@@ -14,7 +16,7 @@ sender-minted execution condition, with the chain-B claim arriving on **leg B**.
 | `docker-rolling-swap-evm-e2e.test.ts` | 5 | RFQ, coupled fills, R4/R6 coupling, R5/R8 withhold, EVM settlement bundle |
 | `docker-rolling-swap-cross-chain-e2e.test.ts` | 3 | `evm:base:31337 → evm:base:31338` — a REAL chain boundary, no operator infra |
 | `docker-rolling-swap-pair-matrix-e2e.test.ts` | 17 | 16 ordered pairs over 4 chains + a coverage guard |
-| `docker-rolling-swap-solana-e2e.test.ts` | 2 | Solana target (skips without a validator) |
+| `docker-rolling-swap-solana-e2e.test.ts` | 4 | `evm:base:31337 → solana:devnet` against a REAL vendored-program validator: leg-B ed25519 claims, the Solana settlement bundle, a real channel PDA read back through swap#141's decoder, and the refusal of the reverse direction (swap#160) |
 | `docker-rolling-swap-mina-e2e.test.ts` | 2 | Mina target (skips without a lightnet) |
 | `docker-rolling-leg-b-routing-e2e.test.ts` | 3 | the swap#148 `F02` and `T00` routing shapes |
 
@@ -32,7 +34,14 @@ were the project's only multi-chain E2E swap coverage, and swap#106 had already
 found four of them silently collecting *zero* tests while reporting a pass.
 The counts in the tables above are the guard against that happening again: a
 suite that collects fewer than its number has lost coverage, whatever colour CI
-reports.
+reports. The `solana-e2e` CI job enforces the two Solana rows mechanically (it
+greps the vitest output for the exact collected count), because "green" has
+twice now meant "ran nothing".
+
+Whole-run totals, as a second guard on the same thing: **52 collected, 48
+passing, 4 skipped** under `SWAP_E2E_REQUIRE_SOLANA=1` (the `solana-e2e` job).
+The 4 skips are Mina's, and only Mina's. Before swap#160 it was 50 / 42 / 8 —
+the extra 8th..5th skips were the four Solana tests that had never once run.
 
 Run with:
 
@@ -125,37 +134,99 @@ identity or behavior — `waitForPeer2Bootstrap()` was always just a boolean
 readiness gate — so this harness has one peer and `waitForPeer2Bootstrap()`
 is an alias for the same EVM-core readiness check.
 
-### Solana / Mina — optional, real infra required
+### Solana legs — fully automatic too (swap#160)
 
-Neither chain has an equivalent to Anvil's "spawn a fresh local binary and
-load a state snapshot" — they need a real `solana-test-validator` process
-and a real Mina lightnet. This repo doesn't vendor either, so by default
-`waitForSolanaHealth()` / `waitForMinaHealth()` return `false` and the
-Solana/Mina-only suites (and the 5 Solana/Mina-touching pairs in the
-pair-matrix suite) skip.
+`global-setup.ts` boots a **real `solana-test-validator`** and everything the
+maker needs to price and settle on it. Nothing is operator-supplied:
+
+1. the **payment-channel program**, baked into the validator's genesis via
+   `--bpf-program HY4AYFNe5Vg5BkEwAURNsGY3uFAvGMNpAQPRtgoasJiR
+   fixtures/solana/payment_channel.so`. No deploy transaction, no program
+   keypair — the same mechanism connector's Rust test harness uses. The binary
+   is vendored (109 KB); `fixtures/solana/README.md` records its source commit,
+   build command and hash, and `solana-validator.ts` verifies both before boot.
+2. a mock 6-decimal **USDC SPL mint** at a fixed address, created through the
+   `spl-token` CLI (as connector's `infra/solana/create-usdc-mint.sh` does).
+3. **eight REAL channel PDAs** between derived openers and peer1, opened
+   on-chain through `@toon-protocol/client`'s `OnChainChannelClient` — the same
+   class the toon-meta#394 T6 rig used. `peer-node.ts` seeds
+   `channels['solana:devnet']` with these, because a Solana `channelId` IS its
+   channel PDA: seeding synthetic ids would leave the maker's chain-truth reader
+   with nothing real to read.
+
+Peer1 then advertises `evm:base:31337 → solana:devnet` and issues real ed25519
+balance proofs on it.
+
+Requirement: `solana-test-validator`, `solana` and `spl-token` on PATH
+(`https://release.anza.xyz/v2.1.21/install`). The **`solana-e2e` CI job**
+installs them, and sets `SWAP_E2E_REQUIRE_SOLANA=1` so a Solana skip in that
+job is a hard failure rather than a green tick over a suite that never ran.
+Without the CLI, Solana stays down, `waitForSolanaHealth()` reports not-ready,
+and the Solana suites skip with a message naming the missing binary.
+
+Why v2.1.21 and not v3.x: v3's validator hard-requires `io_uring`, which is
+unavailable under some sandboxed runners. It also matches the `=2.1.0`
+`solana-program` pin the vendored binary was built against.
+
+Why a local validator at all, when the public devnet exists: the devnet blocker
+is **supply**, not code — its airdrop is dry, the TOON faucet's Solana route is
+unconfigured, and the mock-USDC mint authority lives off-repo. A local validator
+mints freely and confirms in a slot, which is exactly why this is tractable in
+CI when it is not on devnet.
+
+### Mina — still optional, real infra required
+
+Mina has no equivalent of "one binary plus a vendored blob": it needs a real
+lightnet. This repo doesn't vendor one, so `waitForMinaHealth()` returns `false`
+by default and the Mina suites (and the Mina-touching pair-matrix pairs) skip.
+That is the only thing in this directory that still skips on a normal run.
 
 To exercise them:
 
 ```sh
-./scripts/sdk-e2e-infra.sh up    # docker compose: solana-test-validator + mina-lightnet
+./scripts/sdk-e2e-infra.sh up    # docker compose: mina-lightnet
 ```
 
-then export the env vars the script prints (`SOLANA_E2E_RPC_URL`,
-`SOLANA_E2E_PROGRAM_ID`, `MINA_E2E_GRAPHQL_URL`,
-`MINA_E2E_ACCOUNTS_MANAGER_URL`, `MINA_E2E_ZKAPP_ADDRESS`) before rerunning
-`test:e2e:docker`. `SOLANA_E2E_PROGRAM_ID` / `MINA_E2E_ZKAPP_ADDRESS` have no
-default — deploying the swap-channel program / zkApp against a fresh
-validator/lightnet is a separate, chain-specific step this script does not
-perform.
+then export `MINA_E2E_GRAPHQL_URL`, `MINA_E2E_ACCOUNTS_MANAGER_URL` and
+`MINA_E2E_ZKAPP_ADDRESS` before rerunning `test:e2e:docker`.
+`MINA_E2E_ZKAPP_ADDRESS` has no default — deploying the zkApp against a fresh
+lightnet is a separate step that script does not perform. Tear down with
+`./scripts/sdk-e2e-infra.sh down`.
 
-`peer-node.ts` currently only wires an EVM `chainProviders` entry for
-peer1. Extending it to advertise/settle Solana and Mina pairs too (mirroring
-the EVM wiring, using the env vars above) is a natural follow-up once an
-operator has real infra to develop against — the suites already gate
-correctly on `waitForSolanaHealth()` / `waitForMinaHealth()` either way, so
-this is additive, not blocking.
+`SOLANA_E2E_RPC_URL` / `SOLANA_E2E_PROGRAM_ID` / `SOLANA_E2E_TOKEN_MINT` still
+work as overrides if you want the suites pointed at a validator you manage
+yourself.
 
-Tear down with `./scripts/sdk-e2e-infra.sh down`.
+### What does NOT run: `solana → evm` (leg A paid on Solana)
+
+The direction the T6 rig proved by hand — the client paying **on Solana** and
+receiving an EVM claim — is not drivable from this harness, and peer1
+deliberately does not advertise it. `S-4` in
+`docker-rolling-swap-solana-e2e.test.ts` asserts the refusal and carries the
+full reasoning; in short:
+
+1. **the sender cannot pay on Solana.** Leg A is paid by the sender connector's
+   `PerPacketClaimService`, and `ConnectorNode` can only open EVM channels
+   (`ChannelManager.openChannelForPeer` calls the EVM `PaymentChannelSDK` with
+   no chain dispatch; the manager is only built `if (hasEvm)`; the admin surface
+   answers `400 Unsupported blockchain: solana`). Only
+   `@toon-protocol/client`'s `OnChainChannelClient` can — which is what this
+   harness uses to *seed* channels, and moving the sender onto it is a rewrite
+   of `build-live-sender.ts`, not a config change. There is also no upstream to
+   wait on: the TypeScript connector was retired (toon-protocol/connector#543),
+   so `^3.30.0` is the last line shipping `ConnectorNode` at all.
+2. **the maker could not verify such a claim.** `startSwapNode` defaults every
+   `chainProviders[].keyId` to the 0x-hex EVM key regardless of `chainType`
+   (`src/swap-node.ts`), the connector base58-decodes it, and the decode throws
+   on `0` — so the Solana provider registration always fails (swallowed as a
+   `chain_provider_registration_failed` warn) and inbound Solana claims are
+   rejected with `No settlement provider registered for blockchain: solana`.
+3. **nothing would have told us.** `pair.from.chain` is never validated in
+   `validateConfig` — only `to.chain` is — so such a maker boots silently and
+   quotes RFQs it can never be paid for.
+
+Items 2 and 3 are this repo's own product gaps and are tracked as follow-ups;
+item 1 is the sender rewrite that has to come with them.
 
 ## A known, tracked gap
 
