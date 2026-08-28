@@ -1,6 +1,7 @@
 /**
- * Issue #138 end-to-end through `startSwapNode()`: a successful LEGACY swap
- * followed by an on-chain redemption gives the capacity back.
+ * Issue #138 end-to-end through `startSwapNode()`: a successful rolling
+ * claim, committed to unsettled liability, followed by an on-chain
+ * redemption gives the capacity back.
  *
  * Drives the real `MultiChainClaimIssuer` the node built (via the
  * `onClaimIssuerBuilt` hook) against the real
@@ -8,10 +9,10 @@
  * server — the same fixture shape `swap-node.channel-rebind.test.ts` uses —
  * so the wiring under test is the deployed one, not a stand-in.
  *
- * Before the fix, the claim below permanently debited `available` and NOTHING
- * in the process could restore it: `recordSettlement` only shrank `unsettled`,
- * which the legacy path never populated, and the container exposed no route
- * to credit it back.
+ * Before the fix, a claim like this one permanently debited `available` and
+ * NOTHING in the process could restore it: `recordSettlement` only shrank
+ * `unsettled`, which the pre-#138 legacy path never populated, and the
+ * container exposed no route to credit it back.
  */
 
 import { describe, it, expect, afterEach } from 'vitest';
@@ -180,26 +181,33 @@ async function readAdminReport(
   return (await res.json()) as AdminInventoryReport;
 }
 
-describe('issue #138 — a legacy swap plus an on-chain redemption restores capacity', () => {
+const SWAP_PAIR = {
+  from: { assetCode: ASSET, assetScale: 6, chain: EVM_CHAIN },
+  to: { assetCode: ASSET, assetScale: 6, chain: EVM_CHAIN },
+  rate: '1.0',
+};
+
+describe('issue #138 — a rolling claim plus an on-chain redemption restores capacity', () => {
   it('[P0] the redeemed value comes back; before the fix it was burned forever', async () => {
     const chain = { cumulativePaid: 0n };
     const rpcUrl = await startFakeChainRpc(chain);
     const { instance, issuer } = await bootMaker(rpcUrl);
     try {
-      // 1. A successful LEGACY swap.
-      const claim = await issuer.issueClaim({
+      // 1. A successful rolling claim, committed as if leg B fulfilled.
+      const claim = await issuer.issueRollingClaim({
         sourceAmount: SWAP_AMOUNT,
         targetAmount: SWAP_AMOUNT,
-        pair: {
-          from: { assetCode: ASSET, assetScale: 6, chain: EVM_CHAIN },
-          to: { assetCode: ASSET, assetScale: 6, chain: EVM_CHAIN },
-          rate: '1.0',
-        },
+        pair: SWAP_PAIR,
         senderPubkey: SENDER,
         chainRecipient: RECIPIENT,
         rumor: {},
-      } as Parameters<MultiChainClaimIssuer['issueClaim']>[0]);
+      } as Parameters<MultiChainClaimIssuer['issueRollingClaim']>[0]);
       expect(claim.claim).toBeInstanceOf(Uint8Array);
+      issuer.commitRollingClaim({
+        reservationId: claim.reservationId,
+        pair: SWAP_PAIR,
+        targetAmount: SWAP_AMOUNT,
+      });
 
       // Capacity is held as liability, and `available` — the real capital —
       // is untouched (pre-#138 it was permanently debited here).
@@ -236,18 +244,19 @@ describe('issue #138 — a legacy swap plus an on-chain redemption restores capa
     const rpcUrl = await startFakeChainRpc(chain);
     const { instance, issuer } = await bootMaker(rpcUrl);
     try {
-      await issuer.issueClaim({
+      const claim = await issuer.issueRollingClaim({
         sourceAmount: SWAP_AMOUNT,
         targetAmount: SWAP_AMOUNT,
-        pair: {
-          from: { assetCode: ASSET, assetScale: 6, chain: EVM_CHAIN },
-          to: { assetCode: ASSET, assetScale: 6, chain: EVM_CHAIN },
-          rate: '1.0',
-        },
+        pair: SWAP_PAIR,
         senderPubkey: SENDER,
         chainRecipient: RECIPIENT,
         rumor: {},
-      } as Parameters<MultiChainClaimIssuer['issueClaim']>[0]);
+      } as Parameters<MultiChainClaimIssuer['issueRollingClaim']>[0]);
+      issuer.commitRollingClaim({
+        reservationId: claim.reservationId,
+        pair: SWAP_PAIR,
+        targetAmount: SWAP_AMOUNT,
+      });
 
       const totals = must(
         (await instance.reconcileInventory()).pools[0],

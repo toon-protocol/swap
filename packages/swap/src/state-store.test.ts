@@ -378,7 +378,17 @@ describe('SwapStatePersister', () => {
       senderPubkey: SENDER_PUBKEY,
       cumulativeDelta: 7n,
     });
-    inventory.debit('ETH', 'evm:base:8453', 7n);
+    const { reservationId } = inventory.reserve({
+      assetCode: 'ETH',
+      chain: 'evm:base:8453',
+      amount: 7n,
+    });
+    inventory.commitReservation({
+      reservationId,
+      assetCode: 'ETH',
+      chain: 'evm:base:8453',
+      amount: 7n,
+    });
     const seen = new PersistentSeenPacketIds(['pkt-9']);
     const withSeen = new SwapStatePersister({
       store,
@@ -389,8 +399,9 @@ describe('SwapStatePersister', () => {
     withSeen.persist();
 
     const loaded = store.load()!;
-    expect(loaded.inventory['ETH:evm:base:8453']!.available).toBe('993');
+    expect(loaded.inventory['ETH:evm:base:8453']!.available).toBe('1000');
     expect(loaded.inventory['ETH:evm:base:8453']!.total).toBe('1000');
+    expect(loaded.inventory['ETH:evm:base:8453']!.unsettled).toBe('7');
     expect(loaded.channels['ETH:evm:base:8453:chan-a']).toMatchObject({
       channelId: 'chan-a',
       cumulativeAmount: '7',
@@ -562,10 +573,25 @@ describe('issue #46 — crash recovery through MultiChainClaimIssuer', () => {
     const path = join(makeTmpDir(), 'state.json');
     const store = new JsonFileSwapStateStore(path);
 
-    // Boot 1: issue two claims, then "crash" (drop all in-memory objects).
+    // Boot 1: issue two claims (leg B fulfilled, so commit each to unsettled
+    // liability), then "crash" (drop all in-memory objects).
     const boot1 = makeLiveSwapNode(store);
-    const c1 = await boot1.issuer.issueClaim(issueParams(SENDER_PUBKEY, 50n));
-    const c2 = await boot1.issuer.issueClaim(issueParams(SENDER_PUBKEY, 30n));
+    const c1 = await boot1.issuer.issueRollingClaim(
+      issueParams(SENDER_PUBKEY, 50n)
+    );
+    boot1.issuer.commitRollingClaim({
+      reservationId: c1.reservationId,
+      pair: PAIR_USDC_TO_ETH,
+      targetAmount: 50n,
+    });
+    const c2 = await boot1.issuer.issueRollingClaim(
+      issueParams(SENDER_PUBKEY, 30n)
+    );
+    boot1.issuer.commitRollingClaim({
+      reservationId: c2.reservationId,
+      pair: PAIR_USDC_TO_ETH,
+      targetAmount: 30n,
+    });
     expect(c1.claim).toBeInstanceOf(Uint8Array);
     expect(c2.claim).toBeInstanceOf(Uint8Array);
     const preCrash = boot1.channelState.get({
@@ -578,7 +604,14 @@ describe('issue #46 — crash recovery through MultiChainClaimIssuer', () => {
 
     // Boot 2: rehydrate purely from the persisted snapshot.
     const boot2 = makeLiveSwapNode(store, store.load());
-    const r3 = await boot2.issuer.issueClaim(issueParams(SENDER_PUBKEY, 20n));
+    const r3 = await boot2.issuer.issueRollingClaim(
+      issueParams(SENDER_PUBKEY, 20n)
+    );
+    boot2.issuer.commitRollingClaim({
+      reservationId: r3.reservationId,
+      pair: PAIR_USDC_TO_ETH,
+      targetAmount: 20n,
+    });
     expect(r3.claim).toBeInstanceOf(Uint8Array);
     const post = boot2.channelState.get({
       assetCode: 'ETH',
@@ -613,7 +646,12 @@ describe('issue #46 — crash recovery through MultiChainClaimIssuer', () => {
       order.push('sign');
       return new Uint8Array([0x01]);
     });
-    await swapNode.issuer.issueClaim(issueParams());
+    const issued = await swapNode.issuer.issueRollingClaim(issueParams());
+    swapNode.issuer.commitRollingClaim({
+      reservationId: issued.reservationId,
+      pair: PAIR_USDC_TO_ETH,
+      targetAmount: 50n,
+    });
     // Write-ahead persist strictly precedes the signature. The trailing
     // persist is issue #138's liability commit (reservation → unsettled),
     // which by construction can only run once the claim exists.
@@ -629,7 +667,7 @@ describe('issue #46 — crash recovery through MultiChainClaimIssuer', () => {
     };
     const swapNode = makeLiveSwapNode(store);
     await expect(
-      swapNode.issuer.issueClaim(issueParams())
+      swapNode.issuer.issueRollingClaim(issueParams())
     ).rejects.toMatchObject({
       name: 'SwapWalletError',
       code: 'PERSISTENCE_FAILED',
@@ -656,7 +694,7 @@ describe('issue #46 — crash recovery through MultiChainClaimIssuer', () => {
       new Error('hsm down')
     );
     await expect(
-      swapNode.issuer.issueClaim(issueParams())
+      swapNode.issuer.issueRollingClaim(issueParams())
     ).rejects.toBeInstanceOf(SwapWalletError);
     const loaded = store.load()!;
     expect(loaded.inventory['ETH:evm:base:8453']!.available).toBe('1000');
@@ -686,7 +724,7 @@ describe('issue #46 — crash recovery through MultiChainClaimIssuer', () => {
       new Error('process died mid-sign')
     );
     await expect(
-      swapNode.issuer.issueClaim(issueParams())
+      swapNode.issuer.issueRollingClaim(issueParams())
     ).rejects.toBeInstanceOf(SwapWalletError);
 
     // Disk kept the write-ahead (over-reserved) snapshot: nonce 1 plus a live
@@ -705,7 +743,9 @@ describe('issue #46 — crash recovery through MultiChainClaimIssuer', () => {
     // Recovery: reboot from that snapshot; the next claim continues ABOVE the
     // aborted reservation — monotone, no possible watermark regression.
     const boot2 = makeLiveSwapNode(realStore, realStore.load());
-    const r = await boot2.issuer.issueClaim(issueParams(SENDER_PUBKEY, 10n));
+    const r = await boot2.issuer.issueRollingClaim(
+      issueParams(SENDER_PUBKEY, 10n)
+    );
     expect(r.claim).toBeInstanceOf(Uint8Array);
     const entry = boot2.channelState.get({
       assetCode: 'ETH',
@@ -741,7 +781,7 @@ describe('issue #46 — crash recovery through MultiChainClaimIssuer', () => {
       },
       channelState,
     });
-    const result = await issuer.issueClaim(issueParams());
+    const result = await issuer.issueRollingClaim(issueParams());
     expect(result.claim).toBeInstanceOf(Uint8Array);
   });
 });

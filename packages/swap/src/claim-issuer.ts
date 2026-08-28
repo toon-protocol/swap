@@ -1,24 +1,17 @@
 /**
- * `MultiChainClaimIssuer` (Story 12.4 AC-6, AC-8, AC-10; issue #49 window).
+ * `MultiChainClaimIssuer` (Story 12.4 AC-6, AC-8; issue #49 window) — the
+ * leg-B claim signer for the rolling coupled-leg protocol (the only swap
+ * protocol this maker serves as of toon-meta#411 Stage 5/6).
  *
- * Implements the `ClaimIssuer` interface from `@toon-protocol/sdk` (type-only
- * import — no runtime cycle), plus the rolling-path reservation entrypoints.
- *
- * Two claim flows share one core (acquire inventory hold → reserve channel
- * state → write-ahead persist (issue #46) → await signer.signBalanceProof →
- * return { claim, claimId }; on signer failure everything is reversed and
- * the reversal re-persisted, best-effort):
- *
- * - {@link issueClaim} — LEGACY gift-wrap path: the inventory hold is a
- *   window reservation committed to `unsettled` liability as soon as the
- *   claim is issued (issue #138 — was a permanent `debit`, which no
- *   settlement could ever recycle).
- * - {@link issueRollingClaim} — rolling coupled-leg path (issue #49): the
- *   inventory hold is a TTL'd in-flight window **reservation**
- *   (`SwapInventory.reserve`). The caller then either
- *   {@link commitRollingClaim}s it (leg-B fulfilled → unsettled liability)
- *   or {@link rollbackRollingClaim}s it (leg-B failed → capacity released,
- *   exactly once). No permanent debit exists on this flow.
+ * {@link issueRollingClaim} shares one core with the removed legacy
+ * gift-wrap path (acquire inventory hold → reserve channel state →
+ * write-ahead persist (issue #46) → await signer.signBalanceProof → return
+ * { claim, claimId }; on signer failure everything is reversed and the
+ * reversal re-persisted, best-effort). The inventory hold is a TTL'd
+ * in-flight window **reservation** (`SwapInventory.reserve`). The caller
+ * then either {@link commitRollingClaim}s it (leg-B fulfilled → unsettled
+ * liability) or {@link rollbackRollingClaim}s it (leg-B failed → capacity
+ * released, exactly once). No permanent debit exists on this flow.
  *
  * Issue #46 crash-consistency: when `persistState` is configured, the
  * post-reserve watermark hits durable storage BEFORE the balance proof is
@@ -30,11 +23,7 @@
  * for the full recovery rules.
  */
 
-import type {
-  ClaimIssuer,
-  IssueClaimParams,
-  IssueClaimResult,
-} from '@toon-protocol/sdk';
+import type { IssueClaimParams, IssueClaimResult } from '@toon-protocol/sdk';
 import type { SwapPair } from '@toon-protocol/core';
 
 import type { SwapInventory } from './inventory.js';
@@ -51,8 +40,9 @@ import { SwapWalletError } from './errors.js';
 // claim-issuer (pre-sign). The sender and handler already do this; this
 // block adds the third boundary as defense-in-depth, guarding against:
 //   - future non-EVM signers (Solana, Mina) that may not enforce shape;
-//   - direct callers of `MultiChainClaimIssuer.issueClaim()` that bypass the
-//     swap-handler (e.g., unit tests, internal swap node integrations);
+//   - direct callers of `MultiChainClaimIssuer.issueRollingClaim()` that
+//     bypass the RFQ intake (e.g., unit tests, internal swap node
+//     integrations);
 //   - any downstream regression that silently relaxes handler-side validation.
 //
 // Rules MUST stay byte-for-byte in sync with
@@ -106,10 +96,9 @@ function normalizeClaimIssuerChainRecipient(
 }
 
 /**
- * Inventory hold abstraction — how {@link MultiChainClaimIssuer.issueWithHold}
- * stays byte-equal across the legacy and rolling flows — both now
- * reserve/release (issue #138). `undo()` reverses the hold and must be
- * exception-free.
+ * Inventory hold abstraction acquired synchronously before the claim-issuer
+ * core's first `await` (issue #138: a reserve/release window reservation).
+ * `undo()` reverses the hold and must be exception-free.
  */
 interface InventoryHold {
   undo(): void;
@@ -166,7 +155,7 @@ export interface MultiChainClaimIssuerConfig {
   persistState?: () => void;
 }
 
-export class MultiChainClaimIssuer implements ClaimIssuer {
+export class MultiChainClaimIssuer {
   private readonly inventory: SwapInventory;
   private readonly signers: Record<string, PaymentChannelSigner>;
   private readonly channelState: SwapChannelState;
@@ -222,115 +211,6 @@ export class MultiChainClaimIssuer implements ClaimIssuer {
   }
 
   /**
-   * LEGACY gift-wrap path (issue #138: same capital model as the rolling
-   * path). The inventory hold is an in-flight window **reservation**, and
-   * the instant the signed claim is about to leave the process the
-   * reservation is committed to `unsettled` channel liability — the legacy
-   * flow has no coupled leg B to wait on, so reserve and commit are
-   * adjacent.
-   *
-   * Before #138 the hold was a permanent `debit`, which nothing could ever
-   * give back: the legacy path never populated `unsettled`, so
-   * `recordSettlement` (the only recycler) was a no-op for it and
-   * `available` ratcheted to zero over the maker's lifetime, ending in
-   * permanent T04 refusals however faithfully counterparties redeemed. With
-   * the hold in the shared model, an on-chain redemption recycles it —
-   * `SwapInventory.recordChainRedemption`, driven by the swap node's
-   * chain-truth reconciler.
-   *
-   * Capacity semantics are unchanged for the default deployment: with no
-   * `windowBudget` configured the reservation ceiling IS `available`, so the
-   * refusal threshold (and its `INSUFFICIENT_INVENTORY` → ILP T04 mapping)
-   * is the same one `debit` enforced. An operator who configures a
-   * `windowBudget` now has it bound legacy issuance too — one budget, both
-   * paths.
-   */
-  async issueClaim(params: IssueClaimParams): Promise<IssueClaimResult> {
-    const { pair, targetAmount } = params;
-    const targetAsset = pair.to.assetCode;
-    const targetChain = pair.to.chain;
-    let reservationId = '';
-    const { result } = await this.issueWithHold(params, () => {
-      // 2. Take the window hold SYNCHRONOUSLY (before any await). Throws
-      //    SwapInventoryError('INSUFFICIENT_INVENTORY') when the window has
-      //    no free capacity — Story 12.3's handler maps this to ILP T04.
-      const reserved = this.inventory.reserve({
-        assetCode: targetAsset,
-        chain: targetChain,
-        amount: targetAmount,
-      });
-      reservationId = reserved.reservationId;
-      return {
-        // swap#136 fixed the unwind to `refundDebit` (never `credit`, which
-        // also inflates `total`). Issue #138 removes the debit altogether:
-        // releasing the reservation restores exactly the capacity the hold
-        // took, with no `total` to get wrong.
-        undo: () => {
-          this.inventory.releaseReservation(reserved.reservationId);
-        },
-      };
-    });
-    // The claim is signed and is returned to the caller on the next line, so
-    // the counterparty holds redeemable value: the hold becomes liability.
-    // A TTL-expired reservation still commits ('late') — liability follows
-    // the revealed claim, not the local clock.
-    this.commitIssuedHold({
-      reservationId,
-      assetCode: targetAsset,
-      chain: targetChain,
-      targetAmount,
-      path: 'legacy',
-    });
-    return result;
-  }
-
-  /**
-   * Issue #138 — turn an issued claim's window reservation into unsettled
-   * channel liability and re-persist best-effort. Shared shape with
-   * {@link commitRollingClaim}; the claim is already externalized by the time
-   * this runs, so a failed persist under-reports liability by at most this
-   * claim until the next snapshot (state-store crash rule 6's bounded
-   * window) and must never propagate as a claim failure.
-   */
-  private commitIssuedHold(p: {
-    reservationId: string;
-    assetCode: string;
-    chain: string;
-    targetAmount: bigint;
-    path: 'legacy';
-  }): void {
-    const status = this.inventory.commitReservation({
-      reservationId: p.reservationId,
-      assetCode: p.assetCode,
-      chain: p.chain,
-      amount: p.targetAmount,
-    });
-    if (status === 'late') {
-      this.logger?.warn?.('swap.issueClaim.commit_late', {
-        reservationId: p.reservationId,
-        chain: p.chain,
-        asset: p.assetCode,
-        path: p.path,
-        targetAmount: p.targetAmount.toString(),
-        reason:
-          'reservation TTL-expired before the claim was signed; liability recorded anyway (a signed claim is redeemable regardless of the local clock)',
-      });
-    }
-    if (this.persistState) {
-      try {
-        this.persistState();
-      } catch (persistErr) {
-        this.logger?.error?.('swap.issueClaim.commit_persist_failed', {
-          err: persistErr,
-          chain: p.chain,
-          asset: p.assetCode,
-          path: p.path,
-        });
-      }
-    }
-  }
-
-  /**
    * Rolling coupled-leg path (issue #49): the inventory hold is a TTL'd
    * in-flight window reservation sized to the leg-B amount. The reservation
    * is durable (write-ahead persist) BEFORE the signed claim — and therefore
@@ -351,7 +231,7 @@ export class MultiChainClaimIssuer implements ClaimIssuer {
     const targetAsset = pair.to.assetCode;
     const targetChain = pair.to.chain;
     let reservationId = '';
-    const { result } = await this.issueWithHold(params, () => {
+    const result = await this.issueWithHold(params, () => {
       const reserved = this.inventory.reserve({
         assetCode: targetAsset,
         chain: targetChain,
@@ -368,11 +248,11 @@ export class MultiChainClaimIssuer implements ClaimIssuer {
     return { ...result, reservationId };
   }
 
-  /** Shared issueClaim core — see the class docblock for the two flows. */
+  /** Claim-issuance core behind {@link issueRollingClaim} — see the class docblock. */
   private async issueWithHold(
     params: IssueClaimParams,
     acquireHold: () => InventoryHold
-  ): Promise<{ result: IssueClaimResult }> {
+  ): Promise<IssueClaimResult> {
     const { pair, senderPubkey, chainRecipient, targetAmount } = params;
     const targetChain = pair.to.chain;
     const targetAsset = pair.to.assetCode;
@@ -407,8 +287,10 @@ export class MultiChainClaimIssuer implements ClaimIssuer {
       targetChain
     );
 
-    // 2. Acquire the inventory hold SYNCHRONOUSLY (before any await):
-    //    an in-flight window reservation on both paths (issue #138).
+    // 2. Acquire the inventory hold SYNCHRONOUSLY (before any await): an
+    //    in-flight window reservation (issue #138). Passed in by the caller
+    //    rather than taken here so the AC-2 validation above provably runs
+    //    first — see the pre-hold-rejection test in `claim-issuer.test.ts`.
     const hold = acquireHold();
 
     // 3. Reserve channel state. The common paths (existing sticky binding;
@@ -538,8 +420,9 @@ export class MultiChainClaimIssuer implements ClaimIssuer {
     });
 
     // Story 12.6: include settlement-context fields when the caller has
-    // provided a signer-address map. Absent signer address = legacy caller,
-    // metadata stays in the pre-12.6 shape.
+    // provided a signer-address map. `startSwapNode()` always does; the
+    // absent case remains for callers that construct the issuer directly
+    // (e.g. unit tests), where the result stays in the pre-12.6 shape.
     const result: IssueClaimResult = { claim, claimId };
     const swapSignerAddress = this.signerAddresses[targetChain];
     if (swapSignerAddress !== undefined) {
@@ -554,7 +437,7 @@ export class MultiChainClaimIssuer implements ClaimIssuer {
       result.recipient = normalizedChainRecipient;
       result.swapSignerAddress = swapSignerAddress;
     }
-    return { result };
+    return result;
   }
 
   /**

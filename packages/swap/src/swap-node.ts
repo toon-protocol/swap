@@ -600,7 +600,7 @@ export interface SwapNodeConfig {
     onChannelStateBuilt?: (channelState: SwapChannelState) => void;
     /**
      * @internal — issue #138 test hook. Called exactly once with the
-     * constructed `MultiChainClaimIssuer`, so tests can drive a REAL legacy
+     * constructed `MultiChainClaimIssuer`, so tests can drive a REAL rolling
      * claim through the node's own inventory/channel/persistence wiring and
      * then observe the chain-truth recycle. NOT part of the public contract.
      */

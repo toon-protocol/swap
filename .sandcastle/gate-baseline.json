@@ -1,11 +1,11 @@
 {
   "$schema": "https://toon-protocol.github.io/schemas/gate-baseline.v1.json",
   "repo": "swap",
-  "capturedAt": "2026-08-17T13:27:19Z",
-  "capturedFromCommit": "69ac5859ce8302774987f2c3156d90d8816eec95",
-  "capturedFromBranch": "sandcastle/issue-154",
+  "capturedAt": "2026-08-28T14:55:00Z",
+  "capturedFromCommit": "fac795495f1ece378e1b6acf6b037c426869ff72",
+  "capturedFromBranch": "sandcastle/issue-155",
   "regressionTolerancePct": 25,
-  "recaptureNote": "Rebaselined for swap#154 (toon-meta#411 Stage 5), which the ticket requires: the maker's legacy claim-in-FULFILL dispatch (createSwapHandler/withMaxRateAge wiring, the HandlerRegistry, the CONDITION_UNSUPPORTED_LEGACY reject) is deleted and rfqIntake.handle() is made terminal, so this is a net deletion of both product and test code, not a growth recapture like #131/#152 were. gateCorrectness's lint/typecheck allowlists are LOWERED, not just left unratcheted: lint 352→271 warnings (byRule no-non-null-assertion 350→269, unused-eslint-disable-directive unchanged at 2), typecheck 25→4 errors (all 4 still test-side, swap#69 — the deleted legacy suites and the fixture they shared accounted for the rest of the drop). gateCorrectness.test counts are 42/517→44/537 passing files/tests at the root `pnpm test` level. That is a net RISE despite this PR deleting four legacy tests/e2e/docker-swap-flow-*.test.ts suites (18 tests), tests/integration/swap-flow.integration.test.ts, tests/integration/swap-flow-anvil.integration.test.ts, tests/integration/staleness-reject.integration.test.ts, src/swap-node.claim-refusal.test.ts and tests/integration/helpers/fixture-topology.ts outright (their scenarios all depended on legacy dispatch, which no longer exists) — every unrelated PR merged to main between #152's capture and this one (see recent-commits: #153, #159, #160/#162, #164/#165, #166) added real coverage of its own, and this recapture does not attempt to separate that growth from swap#154's own (larger) deletion. gateSpeed re-measured the same way as every prior recapture (method below); no regression, well inside tolerance.",
+  "recaptureNote": "Rebaselined for swap#155 (toon-meta#411 Stage 6), which the ticket requires: the package's legacy public API (createSwapHandler / withMaxRateAge and their types, MultiChainClaimIssuer.issueClaim, SwapInventory.debit/refundDebit, with credit made private) is deleted now that swap#154 stopped serving the protocol, so this is another net deletion of product and test code. Only the lint allowlist moved, and it is LOWERED, not left unratcheted: lint 271→261 warnings (byRule no-non-null-assertion 269→259, unused-eslint-disable-directive unchanged at 2). typecheck is unchanged at 4 errors (all still test-side, swap#69), and gateCorrectness.test measures 44/537 passing files/tests, the same numbers as the #154 capture: this PR deletes src/claim-issuer.inventory-rollback.test.ts (5 tests), the inventory debit/credit cases and the withMaxRateAge gate suite, and ports the remaining legacy-path tests onto issueRollingClaim, while #169/#170/#172 landed coverage of their own in between — this recapture does not attempt to separate the two. gateSpeed is NOT re-measured here: the deletion cannot make the gate slower, gate-no-regression measured 43665ms against the frozen 44702ms on the same runner, and leaving the frozen ceiling in place keeps the tighter bound.",
   "gateShape": {
     "packageManager": "pnpm@8.15.9",
     "order": ["lint", "build", "typecheck", "test"],
@@ -56,9 +56,9 @@
     "lint": {
       "tool": "eslint . (flat config)",
       "errors": 0,
-      "warnings": 271,
+      "warnings": 261,
       "byRule": {
-        "@typescript-eslint/no-non-null-assertion": 269,
+        "@typescript-eslint/no-non-null-assertion": 259,
         "unused-eslint-disable-directive": 2
       }
     },

@@ -207,20 +207,28 @@ async function awaitBootReconcile(instance: SwapNodeInstance): Promise<void> {
   throw new Error('boot reconcile pass never completed');
 }
 
+const SWAP_PAIR = {
+  from: { assetCode: ASSET, assetScale: 6, chain: SOLANA_CHAIN },
+  to: { assetCode: ASSET, assetScale: 6, chain: SOLANA_CHAIN },
+  rate: '1.0',
+};
+
+/** Issue a rolling claim and commit it, as if leg B fulfilled. */
 async function issueOneClaim(issuer: MultiChainClaimIssuer): Promise<void> {
-  const claim = await issuer.issueClaim({
+  const claim = await issuer.issueRollingClaim({
     sourceAmount: SWAP_AMOUNT,
     targetAmount: SWAP_AMOUNT,
-    pair: {
-      from: { assetCode: ASSET, assetScale: 6, chain: SOLANA_CHAIN },
-      to: { assetCode: ASSET, assetScale: 6, chain: SOLANA_CHAIN },
-      rate: '1.0',
-    },
+    pair: SWAP_PAIR,
     senderPubkey: SENDER,
     chainRecipient: RECIPIENT,
     rumor: {},
-  } as Parameters<MultiChainClaimIssuer['issueClaim']>[0]);
+  } as Parameters<MultiChainClaimIssuer['issueRollingClaim']>[0]);
   expect(claim.claim).toBeInstanceOf(Uint8Array);
+  issuer.commitRollingClaim({
+    reservationId: claim.reservationId,
+    pair: SWAP_PAIR,
+    targetAmount: SWAP_AMOUNT,
+  });
 }
 
 async function readAdminReport(
