@@ -8,23 +8,17 @@
  * market moving faster than the maker's feed farms the difference packet by
  * packet.
  *
- * ## Placement (prototype)
+ * ## Placement
  *
  * The spec's final placement is the connector's inbound gate
- * (`InboundClaimValidatorFn`, before leg-A claim ingestion). This prototype
- * enforces the bound at the nearest seam the swap repo owns: a decorator
- * around the SDK's kind:1059 swap handler ({@link withMaxRateAge}), which
- * runs BEFORE the handler's replay-reservation, rate application, and claim
- * issuance — so a staleness reject leaves no `seenPacketIds` entry, no
- * inventory debit, and no issued leg-B claim. What it CANNOT undo (and the
- * connector gate ultimately must) is the leg-A claim watermark already
- * ingested by the connector on the inbound hop. That gap is a placement
- * finding for the epic, not silently papered over here.
- *
- * The decorator has to unwrap the NIP-59 gift wrap itself to learn the pair
- * (the connector-visible packet is opaque by design — same problem the final
- * inbound-gate placement will face). The unwrap is only paid when
- * `maxRateAge` is configured; unguarded swap nodes are byte-identical in behavior.
+ * (`InboundClaimValidatorFn`, before leg-A claim ingestion). Until that
+ * lands, {@link RateFreshnessGuard} is consulted directly by the two seams
+ * the swap repo owns: the rolling engine (`rolling-engine.ts`, its own
+ * `stale_rate` refusal before a fill is priced) and the RFQ intake
+ * (`rolling-rfq.ts`, which advertises the freshness bound in its quote).
+ * toon-meta#411 Stage 5/6 retired this package's other consumer — a
+ * decorator around the withdrawn legacy `createSwapHandler` — along with the
+ * legacy path itself.
  *
  * ## Reject contract (consumed by the sender-side story)
  *
@@ -59,10 +53,7 @@
  * staleness-exposure calibration behind {@link RECOMMENDED_MAX_RATE_AGE_MS}.
  */
 
-import type {
-  HandlePacketRejectResponse,
-  SwapPair,
-} from '@toon-protocol/core';
+import type { HandlePacketRejectResponse, SwapPair } from '@toon-protocol/core';
 
 // ---------------------------------------------------------------------------
 // Reject contract constants

@@ -1,16 +1,19 @@
 /**
- * `MultiChainClaimIssuer` tests — Story 12.4 AC-6, AC-8, AC-10, AC-11
- * (claim-issuer block).
+ * `MultiChainClaimIssuer` tests — Story 12.4 AC-6, AC-8, AC-11 (claim-issuer
+ * block).
  *
- * T-026 (concurrent issuance) + T-int-1 (structural compatibility with
- * createSwapHandler, AC-10) — test-design-epic-12 Story 12-4.
+ * T-026 (concurrent issuance) — test-design-epic-12 Story 12-4. Exercised
+ * through {@link MultiChainClaimIssuer.issueRollingClaim} — the only public
+ * entrypoint since toon-meta#411 Stage 6 removed the legacy `issueClaim()`.
+ * A helper below (`issueAndCommit`) issues + commits in one call to
+ * reproduce the legacy path's immediate unsettled-liability semantics where
+ * a test's assertions depend on it.
  */
 import { describe, it, expect, vi, type Mock } from 'vitest';
 import type { SwapPair } from '@toon-protocol/core';
-// Type-only — keeps this package from taking a runtime cycle on @toon-protocol/sdk.
-import type { ClaimIssuer } from '@toon-protocol/sdk';
 
 import { MultiChainClaimIssuer } from './claim-issuer.js';
+import type { RollingIssueClaimResult } from './claim-issuer.js';
 import { SwapInventory } from './inventory.js';
 import { SwapChannelState } from './channel-state.js';
 import { SwapInventoryError, SwapWalletError } from './errors.js';
@@ -53,6 +56,25 @@ function makeRumor() {
   };
 }
 
+/**
+ * Issue a rolling claim and immediately commit it — reproduces the legacy
+ * `issueClaim()`'s immediate unsettled-liability semantics (reserve + commit
+ * adjacent, no coupled leg B to wait on) for tests written against that
+ * shape.
+ */
+async function issueAndCommit(
+  issuer: MultiChainClaimIssuer,
+  params: Parameters<MultiChainClaimIssuer['issueRollingClaim']>[0]
+): Promise<RollingIssueClaimResult> {
+  const result = await issuer.issueRollingClaim(params);
+  issuer.commitRollingClaim({
+    reservationId: result.reservationId,
+    pair: params.pair,
+    targetAmount: params.targetAmount,
+  });
+  return result;
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -79,7 +101,7 @@ describe('MultiChainClaimIssuer (Story 12.4 AC-6, AC-8, AC-10)', () => {
       channelState,
     });
 
-    const result = await issuer.issueClaim({
+    const result = await issueAndCommit(issuer, {
       sourceAmount: 100_000n,
       targetAmount: 50n,
       pair: PAIR_USDC_TO_ETH,
@@ -129,7 +151,7 @@ describe('MultiChainClaimIssuer (Story 12.4 AC-6, AC-8, AC-10)', () => {
       channelState,
     });
 
-    await issuer.issueClaim({
+    await issuer.issueRollingClaim({
       sourceAmount: 100_000n,
       targetAmount: 50n,
       pair: PAIR_USDC_TO_ETH,
@@ -167,7 +189,7 @@ describe('MultiChainClaimIssuer (Story 12.4 AC-6, AC-8, AC-10)', () => {
     });
 
     await expect(
-      issuer.issueClaim({
+      issuer.issueRollingClaim({
         sourceAmount: 1n,
         targetAmount: 100n,
         pair: PAIR_USDC_TO_ETH,
@@ -184,7 +206,7 @@ describe('MultiChainClaimIssuer (Story 12.4 AC-6, AC-8, AC-10)', () => {
     expect(SwapInventoryError.name).toBe('SwapInventoryError');
   });
 
-  it('[P0] unsupported target chain throws SwapWalletError(UNSUPPORTED_CHAIN); inventory NOT debited', async () => {
+  it('[P0] unsupported target chain throws SwapWalletError(UNSUPPORTED_CHAIN); no window reservation taken', async () => {
     const inventory = new SwapInventory({
       balances: { 'ETH:evm:base:8453': { available: 1_000n, total: 1_000n } },
     });
@@ -197,7 +219,7 @@ describe('MultiChainClaimIssuer (Story 12.4 AC-6, AC-8, AC-10)', () => {
     });
 
     await expect(
-      issuer.issueClaim({
+      issuer.issueRollingClaim({
         sourceAmount: 1n,
         targetAmount: 50n,
         pair: PAIR_USDC_TO_ETH,
@@ -213,7 +235,7 @@ describe('MultiChainClaimIssuer (Story 12.4 AC-6, AC-8, AC-10)', () => {
     expect(SwapWalletError.name).toBe('SwapWalletError');
   });
 
-  it('[P1] signer throws → issuer reverses debit via inventory.credit; final throw code = SIGNING_FAILED', async () => {
+  it('[P1] signer throws → issuer releases the window reservation, leaving the pool byte-identical; final throw code = SIGNING_FAILED', async () => {
     const inventory = new SwapInventory({
       balances: { 'ETH:evm:base:8453': { available: 1_000n, total: 1_000n } },
     });
@@ -240,8 +262,14 @@ describe('MultiChainClaimIssuer (Story 12.4 AC-6, AC-8, AC-10)', () => {
       channelState,
     });
 
+    const buckets = (): Record<string, bigint> => {
+      const b = inventory.get('ETH', 'evm:base:8453')!;
+      return { available: b.available, total: b.total, unsettled: b.unsettled };
+    };
+    const before = buckets();
+
     await expect(
-      issuer.issueClaim({
+      issuer.issueRollingClaim({
         sourceAmount: 1n,
         targetAmount: 50n,
         pair: PAIR_USDC_TO_ETH,
@@ -254,10 +282,13 @@ describe('MultiChainClaimIssuer (Story 12.4 AC-6, AC-8, AC-10)', () => {
       code: 'SIGNING_FAILED',
     });
 
-    expect(inventory.get('ETH', 'evm:base:8453')!.available).toBe(1_000n);
+    // swap#136: a failed issuance is a no-op on EVERY bucket, not just
+    // `available` — `total` is what kind:10032 advertises, and an unwind
+    // that raised it made the maker over-advertise its own capital.
+    expect(buckets()).toEqual(before);
   });
 
-  it('[P0] (T-026) 10 concurrent issueClaim calls produce 10 distinct claimIds and monotonic nonces; cumulativeAmount = sum(targetAmount)', async () => {
+  it('[P0] (T-026) 10 concurrent issueRollingClaim calls produce 10 distinct claimIds and monotonic nonces; cumulativeAmount = sum(targetAmount)', async () => {
     const inventory = new SwapInventory({
       balances: {
         'ETH:evm:base:8453': { available: 10_000n, total: 10_000n },
@@ -288,7 +319,7 @@ describe('MultiChainClaimIssuer (Story 12.4 AC-6, AC-8, AC-10)', () => {
     const N = 10;
     const results = await Promise.all(
       Array.from({ length: N }, () =>
-        issuer.issueClaim({
+        issueAndCommit(issuer, {
           sourceAmount: 100_000n,
           targetAmount: per,
           pair: PAIR_USDC_TO_ETH,
@@ -317,19 +348,6 @@ describe('MultiChainClaimIssuer (Story 12.4 AC-6, AC-8, AC-10)', () => {
     expect(entry!.nonce).toBe(BigInt(N));
   });
 
-  it('[P0] (AC-10) MultiChainClaimIssuer is structurally assignable to ClaimIssuer from @toon-protocol/sdk', async () => {
-    const inventory = new SwapInventory({
-      balances: { 'ETH:evm:base:8453': { available: 1n, total: 1n } },
-    });
-    const channelState = new SwapChannelState({ channels: {} });
-    const issuer: ClaimIssuer = new MultiChainClaimIssuer({
-      inventory,
-      signers: {},
-      channelState,
-    });
-    expect(typeof issuer.issueClaim).toBe('function');
-  });
-
   it('[P1] custom newClaimId generator is honored (AC-6 contract)', async () => {
     const inventory = new SwapInventory({
       balances: { 'ETH:evm:base:8453': { available: 1_000n, total: 1_000n } },
@@ -354,7 +372,7 @@ describe('MultiChainClaimIssuer (Story 12.4 AC-6, AC-8, AC-10)', () => {
       newClaimId,
     });
 
-    const r1 = await issuer.issueClaim({
+    const r1 = await issuer.issueRollingClaim({
       sourceAmount: 100_000n,
       targetAmount: 50n,
       pair: PAIR_USDC_TO_ETH,
@@ -362,7 +380,7 @@ describe('MultiChainClaimIssuer (Story 12.4 AC-6, AC-8, AC-10)', () => {
       chainRecipient: FIXTURE_EVM_RECIPIENT,
       rumor: makeRumor(),
     });
-    const r2 = await issuer.issueClaim({
+    const r2 = await issuer.issueRollingClaim({
       sourceAmount: 100_000n,
       targetAmount: 50n,
       pair: PAIR_USDC_TO_ETH,
@@ -404,7 +422,7 @@ describe('MultiChainClaimIssuer (Story 12.4 AC-6, AC-8, AC-10)', () => {
     });
 
     await expect(
-      issuer.issueClaim({
+      issuer.issueRollingClaim({
         sourceAmount: 1n,
         targetAmount: 50n,
         pair: PAIR_USDC_TO_ETH,
@@ -448,7 +466,7 @@ describe('MultiChainClaimIssuer (Story 12.4 AC-6, AC-8, AC-10)', () => {
       channelState,
     });
 
-    const result = await issuer.issueClaim({
+    const result = await issuer.issueRollingClaim({
       sourceAmount: 1n,
       targetAmount: 10n,
       pair: PAIR_USDC_TO_ETH,
@@ -459,67 +477,6 @@ describe('MultiChainClaimIssuer (Story 12.4 AC-6, AC-8, AC-10)', () => {
     expect(typeof result.claimId).toBe('string');
     expect((result.claimId ?? '').length).toBeGreaterThan(0);
   });
-
-  it('[P0] (T-int-1) structural compatibility: createSwapHandler accepts MultiChainClaimIssuer without throwing', async () => {
-    // This test validates the AC-10 structural contract without bringing up
-    // a full gift-wrapped packet — the Handler returned by createSwapHandler
-    // is a closure over `config`, and the factory performs construction-time
-    // shape validation on `config.claimIssuer`. End-to-end packet flow is
-    // validated by Story 12.8 E2E tests (Docker SDK E2E infra).
-    const { createSwapHandler } = await import('@toon-protocol/sdk');
-
-    const inventory = new SwapInventory({
-      balances: { 'ETH:evm:base:8453': { available: 1_000n, total: 1_000n } },
-    });
-    const channelState = new SwapChannelState({
-      channels: {
-        [`ETH:evm:base:8453:${SENDER_PUBKEY}`]: {
-          channelId: '0xchan',
-          cumulativeAmount: 0n,
-          nonce: 0n,
-          updatedAt: 0,
-        },
-      },
-    });
-    const signer = makeMockSigner('evm');
-    const issuer = new MultiChainClaimIssuer({
-      inventory,
-      signers: { 'evm:base:8453': signer },
-      channelState,
-    });
-
-    // 32-byte Uint8Array for the recipientSecretKey (not used here since we
-    // do not invoke the handler with a real packet).
-    const recipientSecretKey = new Uint8Array(32);
-    for (let i = 0; i < 32; i++) recipientSecretKey[i] = i + 1;
-
-    const handler = createSwapHandler({
-      recipientSecretKey,
-      swapPairs: [PAIR_USDC_TO_ETH],
-      claimIssuer: issuer,
-    });
-
-    expect(typeof handler).toBe('function');
-    // Direct issueClaim smoke so the structural path is also exercised.
-    const result = await issuer.issueClaim({
-      sourceAmount: 1_000n,
-      targetAmount: 50n,
-      pair: PAIR_USDC_TO_ETH,
-      senderPubkey: SENDER_PUBKEY,
-      chainRecipient: FIXTURE_EVM_RECIPIENT,
-      rumor: makeRumor(),
-    });
-    expect(result.claim).toBeInstanceOf(Uint8Array);
-    expect(inventory.snapshot()[0]?.available).toBe(1_000n);
-    expect(inventory.snapshot()[0]?.unsettled).toBe(50n);
-    expect(
-      channelState.get({
-        assetCode: 'ETH',
-        chain: 'evm:base:8453',
-        senderPubkey: SENDER_PUBKEY,
-      })!.nonce
-    ).toBe(1n);
-  });
 });
 
 // ---------------------------------------------------------------------------
@@ -527,11 +484,12 @@ describe('MultiChainClaimIssuer (Story 12.4 AC-6, AC-8, AC-10)', () => {
 // to IssueClaimResult.
 //
 // When the issuer is constructed with a `signerAddresses` map, every
-// `issueClaim()` result MUST expose channelId/nonce/cumulativeAmount/
+// `issueRollingClaim()` result MUST expose channelId/nonce/cumulativeAmount/
 // recipient/swapSignerAddress so the swap node's swap handler can emit them in
 // FULFILL metadata (the load-bearing contract for `buildSettlementTx()`).
 //
-// When `signerAddresses` is omitted (legacy caller), the result MUST stay in
+// When `signerAddresses` is omitted (a directly-constructed issuer, e.g. a
+// unit test), the result MUST stay in
 // the pre-12.6 shape ({ claim, claimId } only) — this is the "one story-cycle
 // of compatibility" AC-3 calls out.
 // ---------------------------------------------------------------------------
@@ -562,7 +520,7 @@ describe('Story 12.6 AC-3 — IssueClaimResult settlement-context fields', () =>
       signerAddresses: { [CHAIN]: EVM_SWAP_SIGNER },
     });
 
-    const result = await issuer.issueClaim({
+    const result = await issuer.issueRollingClaim({
       sourceAmount: 100_000n,
       targetAmount: 50n,
       pair: PAIR_USDC_TO_ETH,
@@ -608,7 +566,7 @@ describe('Story 12.6 AC-3 — IssueClaimResult settlement-context fields', () =>
       signerAddresses: { [CHAIN]: EVM_SWAP_SIGNER },
     });
 
-    const r1 = await issuer.issueClaim({
+    const r1 = await issuer.issueRollingClaim({
       sourceAmount: 100_000n,
       targetAmount: 30n,
       pair: PAIR_USDC_TO_ETH,
@@ -616,7 +574,7 @@ describe('Story 12.6 AC-3 — IssueClaimResult settlement-context fields', () =>
       chainRecipient: FIXTURE_EVM_RECIPIENT,
       rumor: makeRumor(),
     });
-    const r2 = await issuer.issueClaim({
+    const r2 = await issuer.issueRollingClaim({
       sourceAmount: 50_000n,
       targetAmount: 20n,
       pair: PAIR_USDC_TO_ETH,
@@ -657,7 +615,7 @@ describe('Story 12.6 AC-3 — IssueClaimResult settlement-context fields', () =>
       // no signerAddresses -> legacy path
     });
 
-    const result = await issuer.issueClaim({
+    const result = await issuer.issueRollingClaim({
       sourceAmount: 100_000n,
       targetAmount: 50n,
       pair: PAIR_USDC_TO_ETH,
@@ -699,7 +657,7 @@ describe('Story 12.6 AC-3 — IssueClaimResult settlement-context fields', () =>
       signerAddresses: { 'solana:mainnet': 'So1111111' },
     });
 
-    const result = await issuer.issueClaim({
+    const result = await issuer.issueRollingClaim({
       sourceAmount: 100_000n,
       targetAmount: 50n,
       pair: PAIR_USDC_TO_ETH,
@@ -776,7 +734,7 @@ describe('Story 12.9 — chain-recipient threading to signBalanceProof', () => {
 
   it('[P0] T-10: signer receives 20-byte chainRecipient, NOT 32-byte senderPubkey (AC-11, AC-16a)', async () => {
     const { issuer, signer } = buildIssuer();
-    await issuer.issueClaim({
+    await issuer.issueRollingClaim({
       sourceAmount: 100_000n,
       targetAmount: 50n,
       pair: PAIR_USDC_TO_ETH,
@@ -797,7 +755,7 @@ describe('Story 12.9 — chain-recipient threading to signBalanceProof', () => {
 
   it('[P1] T-11: IssueClaimResult.recipient echoes chainRecipient when settlement context is emitted (AC-12, AC-16b)', async () => {
     const { issuer } = buildIssuer({ withSettlementAddresses: true });
-    const result = await issuer.issueClaim({
+    const result = await issuer.issueRollingClaim({
       sourceAmount: 100_000n,
       targetAmount: 50n,
       pair: PAIR_USDC_TO_ETH,
@@ -820,7 +778,7 @@ describe('Story 12.9 — chain-recipient threading to signBalanceProof', () => {
     const checksummed = '0xABaBaBaBABabABabAbAbABAbABabababaBaBABaB';
     expect(checksummed).not.toBe(checksummed.toLowerCase());
     const { issuer, signer } = buildIssuer({ withSettlementAddresses: true });
-    const result = await issuer.issueClaim({
+    const result = await issuer.issueRollingClaim({
       sourceAmount: 100_000n,
       targetAmount: 50n,
       pair: PAIR_USDC_TO_ETH,
@@ -842,7 +800,7 @@ describe('Story 12.9 — chain-recipient threading to signBalanceProof', () => {
       },
     });
     await expect(
-      issuer.issueClaim({
+      issuer.issueRollingClaim({
         sourceAmount: 1n,
         targetAmount: 50n,
         pair: PAIR_USDC_TO_ETH,
@@ -874,7 +832,7 @@ describe('Story 12.9 — chain-recipient threading to signBalanceProof', () => {
     // chainRecipient, this would fail.
     const { issuer, channelState } = buildIssuer();
     const reserveSpy = vi.spyOn(channelState, 'reserve');
-    await issuer.issueClaim({
+    await issuer.issueRollingClaim({
       sourceAmount: 100_000n,
       targetAmount: 50n,
       pair: PAIR_USDC_TO_ETH,
@@ -895,14 +853,14 @@ describe('Story 12.9 — chain-recipient threading to signBalanceProof', () => {
     // regime (sender / handler / claim-issuer). This test guards the third
     // tier: a malformed `chainRecipient` reaching the claim-issuer (e.g., a
     // direct caller that bypassed the swap-handler) MUST be rejected with
-    // SwapWalletError('SIGNING_FAILED') BEFORE any inventory debit or
+    // SwapWalletError('SIGNING_FAILED') BEFORE any inventory hold or
     // channel reservation occurs (no rollback needed because no state
     // change yet).
     const { issuer, signer, inventory, channelState } = buildIssuer();
     const reserveSpy = vi.spyOn(channelState, 'reserve');
-    const debitSpy = vi.spyOn(inventory, 'debit');
+    const inventoryReserveSpy = vi.spyOn(inventory, 'reserve');
     await expect(
-      issuer.issueClaim({
+      issuer.issueRollingClaim({
         sourceAmount: 100_000n,
         targetAmount: 50n,
         pair: PAIR_USDC_TO_ETH,
@@ -914,15 +872,15 @@ describe('Story 12.9 — chain-recipient threading to signBalanceProof', () => {
         rumor: makeRumor(),
       })
     ).rejects.toThrow(/missing or malformed/);
-    // Pre-debit rejection: signer, inventory debit, and channelState.reserve
+    // Pre-hold rejection: signer, inventory reserve, and channelState.reserve
     // MUST NOT have been called.
     expect(signer.signBalanceProof).not.toHaveBeenCalled();
-    expect(debitSpy).not.toHaveBeenCalled();
+    expect(inventoryReserveSpy).not.toHaveBeenCalled();
     expect(reserveSpy).not.toHaveBeenCalled();
     // And the error class is the SwapWalletError('SIGNING_FAILED') family so
     // the Story 12.3 swap-handler can map it to ILP T00.
     await expect(
-      issuer.issueClaim({
+      issuer.issueRollingClaim({
         sourceAmount: 100_000n,
         targetAmount: 50n,
         pair: PAIR_USDC_TO_ETH,
@@ -1184,15 +1142,14 @@ describe('MultiChainClaimIssuer — issueRollingClaim / commit / rollback (issue
 
 // ---------------------------------------------------------------------------
 // Issue #113 — on-chain-safety-checked sticky-binding rebind, exercised
-// through the LEGACY issueClaim path (mirrors a `POST /swap` client daemon
-// that mints a fresh ephemeral senderPubkey per request against a single
-// provisioned channel — see channel-state.test.ts for the
-// SwapChannelState-level cases, including the PR #119 finding #1
-// regression).
+// through issueRollingClaim (mirrors a `POST /swap` client daemon that mints
+// a fresh ephemeral senderPubkey per request against a single provisioned
+// channel — see channel-state.test.ts for the SwapChannelState-level cases,
+// including the PR #119 finding #1 regression).
 // ---------------------------------------------------------------------------
 
 describe('Issue #113 — on-chain-safety-checked sticky-binding rebind (claim-issuer integration)', () => {
-  it("[P0] a second ephemeral sender's issueClaim succeeds once the first sender's claim is fully redeemed on-chain", async () => {
+  it("[P0] a second ephemeral sender's issueRollingClaim succeeds once the first sender's claim is fully redeemed on-chain", async () => {
     const inventory = new SwapInventory({
       balances: { 'ETH:evm:base:8453': { available: 1_000n, total: 1_000n } },
     });
@@ -1222,7 +1179,7 @@ describe('Issue #113 — on-chain-safety-checked sticky-binding rebind (claim-is
     // `POST /swap` — looks like a brand-new sender to the sticky binding.
     const SENDER_2 = 'b'.repeat(64);
 
-    await issuer.issueClaim({
+    await issuer.issueRollingClaim({
       sourceAmount: 100_000n,
       targetAmount: 50n,
       pair: PAIR_USDC_TO_ETH,
@@ -1234,7 +1191,7 @@ describe('Issue #113 — on-chain-safety-checked sticky-binding rebind (claim-is
     // Pre-#113 (and pre-PR#119-review) this throws SwapWalletError
     // ('UNSUPPORTED_CHAIN', 'No channel provisioned for sender ...') — the
     // reported defect.
-    const result = await issuer.issueClaim({
+    const result = await issuer.issueRollingClaim({
       sourceAmount: 100_000n,
       targetAmount: 20n,
       pair: PAIR_USDC_TO_ETH,
@@ -1283,7 +1240,7 @@ describe('Issue #113 — on-chain-safety-checked sticky-binding rebind (claim-is
     const SENDER_1 = 'a'.repeat(64);
     const SENDER_2 = 'b'.repeat(64);
 
-    await issuer.issueClaim({
+    const issued = await issuer.issueRollingClaim({
       sourceAmount: 100_000n,
       targetAmount: 50n,
       pair: PAIR_USDC_TO_ETH,
@@ -1291,9 +1248,15 @@ describe('Issue #113 — on-chain-safety-checked sticky-binding rebind (claim-is
       chainRecipient: FIXTURE_EVM_RECIPIENT,
       rumor: makeRumor(),
     });
+    // Leg B fulfilled for SENDER_1: the reservation becomes booked liability.
+    issuer.commitRollingClaim({
+      reservationId: issued.reservationId,
+      pair: PAIR_USDC_TO_ETH,
+      targetAmount: 50n,
+    });
 
     await expect(
-      issuer.issueClaim({
+      issuer.issueRollingClaim({
         sourceAmount: 100_000n,
         targetAmount: 20n,
         pair: PAIR_USDC_TO_ETH,

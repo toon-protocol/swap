@@ -276,10 +276,6 @@ export {
 } from './rate-provider.js';
 export type { HttpRateProviderOptions } from './rate-provider.js';
 
-// Convenience re-export for operators (Story 12.7 AC-1) — do not wrap.
-export { createSwapHandler } from '@toon-protocol/sdk';
-export type { CreateSwapHandlerConfig } from '@toon-protocol/sdk';
-
 // Re-export transport config from connector for convenience
 
 // Settlement event payload (Story D3) — emitted when a swap-node-issued claim is

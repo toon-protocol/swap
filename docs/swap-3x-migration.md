@@ -1,7 +1,7 @@
 # `@toon-protocol/swap` 2.1.0 → 3.0.0 migration
 
 **Status:** written ahead of the 3.0.0 cut, from the `major` changesets queued on `main`
-(`issue-101`, `issue-133`, `issue-136`, `issue-164`, `rust-connector-maker`). **Read this before
+(`issue-101`, `issue-133`, `issue-136`, `issue-164`, `issue-155`, `rust-connector-maker`). **Read this before
 upgrading a running maker, and before pointing a released client at a 3.0.0 maker.**
 
 > **§0 supersedes much of what follows.** The maker no longer embeds a connector at all: it is an
@@ -29,9 +29,10 @@ upgrading a running maker, and before pointing a released client at a 3.0.0 make
 - A configured inventory `total` above the persisted snapshot now raises the pool (swap#130).
 
 
-This is a genuine major on four independent axes. A config that boots today stops booting; claims
+This is a genuine major on several independent axes. A config that boots today stops booting; claims
 are signed over different bytes on both chain families; an announce field keeps its name and
-changes its meaning; and refusals move to different ILP error classes. Nothing here is a rename.
+changes its meaning; refusals move to different ILP error classes; and the legacy public API is
+gone (§6). Nothing here is a rename.
 
 ## Who is affected
 
@@ -42,6 +43,7 @@ changes its meaning; and refusals move to different ILP error classes. Nothing h
 | A counterparty that redeems maker claims on chain | **Yes** — §3, EVM *and* Solana |
 | Anything that reacts programmatically to a swap refusal | **Yes** — §4 |
 | A client on `@toon-protocol/client@0.29.8` or earlier | **Yes, silently** — see §5 |
+| Code importing `createSwapHandler`, `withMaxRateAge`, `MultiChainClaimIssuer.issueClaim`, or `SwapInventory.debit`/`.credit`/`.refundDebit` from this package | **Yes** — §6, build-time failure |
 
 ---
 
@@ -171,3 +173,23 @@ which states the same gap honestly for the legacy-path removal.
 4. **Verify a live swap end to end** and settle the claim on chain — this is what proves §3 on the
    chain family you actually run. Leaving a claim unredeemed jams the maker (§4's `T04`).
 5. **Then** update counterparties' verifiers and any code branching on refusal codes (§3, §4).
+
+## 6. The legacy public API is gone — no throwing shim
+
+The maker itself stopped serving the legacy claim-in-FULFILL protocol in swap#154; 3.0.0 removes
+the now-dead exports so a published version no longer promises them (swap#155 / #177):
+
+| Withdrawn | Was |
+|---|---|
+| `createSwapHandler` / `CreateSwapHandlerConfig` | The `@toon-protocol/sdk` re-export `startSwapNode()` no longer wires in |
+| `withMaxRateAge` / `WithMaxRateAgeOptions` | The legacy handler's staleness-gate decorator |
+| `MultiChainClaimIssuer.issueClaim` | The legacy gift-wrap issuance entrypoint |
+| `SwapInventory.debit` / `.refundDebit` | The permanent-debit accounting the legacy path used |
+| `SwapInventory.credit` | Now `private` — reachable only through `creditCorroboratedFunding()` |
+
+**No throwing compatibility shim replaces any of these.** A removed *export* is a TypeScript error
+or a Node `SyntaxError: The requested module does not provide an export`; a removed method is a
+TypeScript error on the call site. `MultiChainClaimIssuer` (`issueRollingClaim` /
+`commitRollingClaim` / `rollbackRollingClaim`) and `SwapInventory` (`reserve` /
+`commitReservation` / `releaseReservation` / `recordChainRedemption` / `creditCorroboratedFunding`)
+remain, as the leg-B signer and the rolling window's capital.

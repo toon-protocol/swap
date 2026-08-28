@@ -8,8 +8,6 @@
  *   - untimestamped-quote inertness (warn once, treat as fresh)
  *   - the reject contract shape (T99 / 'stale_rate' / base64-JSON data /
  *     rejectReason NOT left to the generic ilpCodeToSemantic collapse)
- *   - the withMaxRateAge gate: stale reject BEFORE the inner handler runs,
- *     fresh/malformed/unsupported-pair pass-through, non-1059 pass-through
  *   - toSdkRateProvider: normalization + pricing-time staleness backstop
  *   - validateMaxRateAgeConfig / SwapNodeConfig.maxRateAge validation
  */
@@ -299,9 +297,8 @@ describe('normalizeRateProvider', () => {
 });
 
 // ---------------------------------------------------------------------------
-// withMaxRateAge — the gate decorator
+// Config validation
 // ---------------------------------------------------------------------------
-
 
 describe('validateMaxRateAgeConfig / SwapNodeConfig.maxRateAge validation', () => {
   it('accepts well-formed configs', () => {
@@ -351,6 +348,7 @@ describe('validateMaxRateAgeConfig / SwapNodeConfig.maxRateAge validation', () =
           channelAddress: '0x' + '33'.repeat(20),
         },
       ],
+      relayUrls: ['ws://localhost:0'],
       maxRateAge: { defaultMs: 1000 },
     } as unknown as SwapNodeConfig;
     expect(() => validateConfig(config)).toThrow(/rateProvider/);
