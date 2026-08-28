@@ -53,7 +53,31 @@ describe('@toon-protocol/swap public API exports (Story 12.4 AC-9)', () => {
     expect(typeof swapNode.SwapNodeStartError).toBe('function');
   });
 
-  it('[P2] re-exports createSwapHandler from @toon-protocol/sdk (Story 12.7)', () => {
-    expect(typeof swapNode.createSwapHandler).toBe('function');
+  it('[P0] (toon-meta#411 Stage 6) does NOT re-export the withdrawn legacy API surface', () => {
+    const legacy = swapNode as unknown as Record<string, unknown>;
+    expect(legacy['createSwapHandler']).toBeUndefined();
+    expect(legacy['CreateSwapHandlerConfig']).toBeUndefined();
+    expect(legacy['withMaxRateAge']).toBeUndefined();
+    expect(legacy['WithMaxRateAgeOptions']).toBeUndefined();
+    // MultiChainClaimIssuer and SwapInventory survive as the leg-B signer and
+    // the rolling window's capital — only their legacy methods are gone.
+    expect(
+      (
+        swapNode.MultiChainClaimIssuer.prototype as unknown as Record<
+          string,
+          unknown
+        >
+      )['issueClaim']
+    ).toBeUndefined();
+    expect(
+      (swapNode.SwapInventory.prototype as unknown as Record<string, unknown>)[
+        'debit'
+      ]
+    ).toBeUndefined();
+    expect(
+      (swapNode.SwapInventory.prototype as unknown as Record<string, unknown>)[
+        'refundDebit'
+      ]
+    ).toBeUndefined();
   });
 });

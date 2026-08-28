@@ -8,23 +8,15 @@
  *   - untimestamped-quote inertness (warn once, treat as fresh)
  *   - the reject contract shape (T99 / 'stale_rate' / base64-JSON data /
  *     rejectReason NOT left to the generic ilpCodeToSemantic collapse)
- *   - the withMaxRateAge gate: stale reject BEFORE the inner handler runs,
- *     fresh/malformed/unsupported-pair pass-through, non-1059 pass-through
  *   - toSdkRateProvider: normalization + pricing-time staleness backstop
  *   - validateMaxRateAgeConfig / SwapNodeConfig.maxRateAge validation
  */
 
 import { describe, it, expect, vi } from 'vitest';
-import { generateSecretKey, getPublicKey } from 'nostr-tools/pure';
-import type { UnsignedEvent } from 'nostr-tools/pure';
-import { wrapSwapPacket, createHandlerContext } from '@toon-protocol/sdk';
-import type { Handler, HandlerContext } from '@toon-protocol/sdk';
-import { encodeEventToToon } from '@toon-protocol/core';
 import type { SwapPair } from '@toon-protocol/core';
 
 import {
   RateFreshnessGuard,
-  withMaxRateAge,
   buildStaleRateReject,
   normalizeRateProvider,
   validateMaxRateAgeConfig,
@@ -301,144 +293,6 @@ describe('normalizeRateProvider', () => {
     await expect(normalized(PAIR_EVM)).resolves.toBe('3.14');
     const passthrough = normalizeRateProvider(() => '2.71');
     await expect(passthrough(PAIR_EVM)).resolves.toBe('2.71');
-  });
-});
-
-// ---------------------------------------------------------------------------
-// withMaxRateAge — the gate decorator
-// ---------------------------------------------------------------------------
-
-function buildWrappedSwapCtx(opts: {
-  recipientSecretKey: Uint8Array;
-  pair?: SwapPair;
-  tags?: string[][];
-  kind?: number;
-  toonOverride?: string;
-}): HandlerContext {
-  const senderSecretKey = generateSecretKey();
-  const senderPubkey = getPublicKey(senderSecretKey);
-  let toonBase64 = opts.toonOverride;
-  if (toonBase64 === undefined) {
-    const pair = opts.pair ?? PAIR_EVM;
-    const rumor: UnsignedEvent = {
-      kind: 30_078,
-      pubkey: senderPubkey,
-      created_at: Math.floor(Date.now() / 1000),
-      content: '',
-      tags: opts.tags ?? [
-        ['swap-from', `${pair.from.assetCode}:${pair.from.chain}`],
-        ['swap-to', `${pair.to.assetCode}:${pair.to.chain}`],
-        ['chain-recipient', '0x' + '11'.repeat(20)],
-      ],
-    };
-    const { giftWrap } = wrapSwapPacket({
-      rumor,
-      senderSecretKey,
-      recipientPubkey: getPublicKey(opts.recipientSecretKey),
-    });
-    toonBase64 = Buffer.from(encodeEventToToon(giftWrap)).toString('base64');
-  }
-  return createHandlerContext({
-    toon: toonBase64,
-    meta: {
-      kind: opts.kind ?? 1059,
-      pubkey: '0'.repeat(64),
-      id: '0'.repeat(64),
-      sig: '0'.repeat(128),
-      rawBytes: new Uint8Array(),
-    },
-    amount: 1_000_000n,
-    destination: 'g.toon.swap.test',
-    toonDecoder: () => {
-      throw new Error('not used');
-    },
-  });
-}
-
-describe('withMaxRateAge gate', () => {
-  const recipientSecretKey = generateSecretKey();
-
-  function innerSpy(): { handler: Handler; calls: HandlerContext[] } {
-    const calls: HandlerContext[] = [];
-    const handler: Handler = async (ctx) => {
-      calls.push(ctx);
-      return ctx.accept({ inner: true });
-    };
-    return { handler, calls };
-  }
-
-  it('stale pair → T99 stale_rate reject; the inner handler NEVER runs', async () => {
-    const t = 100_000;
-    const guard = guardWith({
-      maxRateAge: { defaultMs: 1000 },
-      provider: () => ({ rate: '0.0004', at: 90_000 }),
-      now: () => t,
-    });
-    const { handler, calls } = innerSpy();
-    const gated = withMaxRateAge(handler, {
-      guard,
-      recipientSecretKey,
-      swapPairs: [PAIR_EVM],
-    });
-
-    const res = await gated(buildWrappedSwapCtx({ recipientSecretKey }));
-    expect(res.accept).toBe(false);
-    if (!res.accept) {
-      expect(res.code).toBe(STALE_RATE_REJECT_CODE);
-      expect(res.message).toBe(STALE_RATE_REJECT_MESSAGE);
-      const data = decodeRejectData((res as { data?: string }).data as string);
-      expect(data.reason).toBe(STALE_RATE_REASON);
-      expect(data.maxRateAgeMs).toBe(1000);
-      expect(data.lastRateAt).toBe(90_000);
-      expect(data.pair).toBe(pairKey(PAIR_EVM));
-    }
-    expect(calls.length).toBe(0);
-  });
-
-  it('fresh pair → delegates to the inner handler untouched', async () => {
-    const t = 100_000;
-    const guard = guardWith({
-      maxRateAge: { defaultMs: 1000 },
-      provider: () => ({ rate: '0.0004', at: t - 100 }),
-      now: () => t,
-    });
-    const { handler, calls } = innerSpy();
-    const gated = withMaxRateAge(handler, {
-      guard,
-      recipientSecretKey,
-      swapPairs: [PAIR_EVM],
-    });
-    const res = await gated(buildWrappedSwapCtx({ recipientSecretKey }));
-    expect(res.accept).toBe(true);
-    expect(calls.length).toBe(1);
-  });
-
-  it('non-1059 / malformed wrap / unsupported pair all fall through to the inner handler', async () => {
-    const guard = guardWith({
-      maxRateAge: { defaultMs: 1 },
-      provider: () => ({ rate: '1', at: 0 }),
-      now: () => 1_000_000, // everything would be stale IF the gate applied
-    });
-    const { handler, calls } = innerSpy();
-    const gated = withMaxRateAge(handler, {
-      guard,
-      recipientSecretKey,
-      swapPairs: [PAIR_EVM],
-    });
-
-    // non-1059 kind
-    await gated(buildWrappedSwapCtx({ recipientSecretKey, kind: 1 }));
-    // malformed gift wrap (garbage TOON)
-    await gated(
-      buildWrappedSwapCtx({
-        recipientSecretKey,
-        toonOverride: Buffer.from([0xde, 0xad, 0xbe, 0xef]).toString('base64'),
-      })
-    );
-    // valid wrap, pair not advertised → inner's canonical F06 territory
-    await gated(buildWrappedSwapCtx({ recipientSecretKey, pair: PAIR_MINA }));
-
-    expect(calls.length).toBe(3);
   });
 });
 

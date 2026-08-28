@@ -133,18 +133,24 @@ describe('issue #141 — a Mina maker stays unrecycled, visibly and on purpose',
   it('[P0] a reconcile pass credits nothing and states why', async () => {
     const { instance, issuer } = await bootMinaMaker();
     try {
-      await issuer.issueClaim({
+      const pair = {
+        from: { assetCode: ASSET, assetScale: 6, chain: MINA_CHAIN },
+        to: { assetCode: ASSET, assetScale: 6, chain: MINA_CHAIN },
+        rate: '1.0',
+      };
+      const claim = await issuer.issueRollingClaim({
         sourceAmount: SWAP_AMOUNT,
         targetAmount: SWAP_AMOUNT,
-        pair: {
-          from: { assetCode: ASSET, assetScale: 6, chain: MINA_CHAIN },
-          to: { assetCode: ASSET, assetScale: 6, chain: MINA_CHAIN },
-          rate: '1.0',
-        },
+        pair,
         senderPubkey: SENDER,
         chainRecipient: RECIPIENT,
         rumor: {},
-      } as Parameters<MultiChainClaimIssuer['issueClaim']>[0]);
+      } as Parameters<MultiChainClaimIssuer['issueRollingClaim']>[0]);
+      issuer.commitRollingClaim({
+        reservationId: claim.reservationId,
+        pair,
+        targetAmount: SWAP_AMOUNT,
+      });
 
       const result = await instance.reconcileInventory();
       expect(result.pools).toEqual([]);

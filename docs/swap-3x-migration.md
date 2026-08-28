@@ -1,12 +1,13 @@
 # `@toon-protocol/swap` 2.1.0 → 3.0.0 migration
 
-**Status:** written ahead of the 3.0.0 cut, from the four `major` changesets queued on `main`
-(`issue-101`, `issue-133`, `issue-136`, `issue-164`). **Read this before upgrading a running
-maker, and before pointing a released client at a 3.0.0 maker.**
+**Status:** written ahead of the 3.0.0 cut, from the five `major` changesets queued on `main`
+(`issue-101`, `issue-133`, `issue-136`, `issue-164`, `issue-155`). **Read this before upgrading a
+running maker, and before pointing a released client at a 3.0.0 maker.**
 
-This is a genuine major on four independent axes. A config that boots today stops booting; claims
+This is a genuine major on five independent axes. A config that boots today stops booting; claims
 are signed over different bytes on both chain families; an announce field keeps its name and
-changes its meaning; and refusals move to different ILP error classes. Nothing here is a rename.
+changes its meaning; refusals move to different ILP error classes; and the legacy public API is
+gone. Nothing here is a rename.
 
 ## Who is affected
 
@@ -17,6 +18,7 @@ changes its meaning; and refusals move to different ILP error classes. Nothing h
 | A counterparty that redeems maker claims on chain | **Yes** — §3, EVM *and* Solana |
 | Anything that reacts programmatically to a swap refusal | **Yes** — §4 |
 | A client on `@toon-protocol/client@0.29.8` or earlier | **Yes, silently** — see §5 |
+| Code importing `createSwapHandler`, `withMaxRateAge`, `MultiChainClaimIssuer.issueClaim`, or `SwapInventory.debit`/`.credit`/`.refundDebit` from this package | **Yes** — §6, install-time failure |
 
 ---
 
@@ -136,6 +138,33 @@ until they send, and by then they will already have hit §2 or §4. **This note 
 mitigation** — see ADR 0003 (`toon-meta/docs/adr/0003-the-rolling-swap-is-the-only-swap.md`),
 which states the same gap honestly for the legacy-path removal.
 
+## 6. The legacy public API is gone — no throwing shim
+
+The maker itself stopped serving the legacy claim-in-FULFILL protocol in swap#154; 3.0.0 removes
+the now-dead exports so a published version no longer promises them:
+
+| Removed | Was |
+|---|---|
+| `createSwapHandler` / `CreateSwapHandlerConfig` | The `@toon-protocol/sdk` re-export `startSwapNode()` no longer wires in |
+| `withMaxRateAge` / `WithMaxRateAgeOptions` | The legacy handler's staleness-gate decorator |
+| `MultiChainClaimIssuer.issueClaim` | The legacy gift-wrap issuance entrypoint |
+| `SwapInventory.debit` / `.credit` / `.refundDebit` | The permanent-debit accounting the legacy path used (swap#138/#141: a honeypot sized to notional, with no refill loop) |
+
+**No throwing compatibility shim replaces any of these.** A caller importing one gets a missing
+export at install time — TypeScript fails the build, or Node throws `SyntaxError: The requested
+module does not provide an export` — rather than a runtime surprise deep in a request path.
+
+**What did not change:** `MultiChainClaimIssuer` remains the leg-B claim signer
+(`issueRollingClaim` / `commitRollingClaim` / `rollbackRollingClaim`) and `SwapInventory` remains
+the rolling window's capital (`reserve` / `commitReservation` / `releaseReservation` /
+`recordChainRedemption` / `creditCorroboratedFunding`). Neither class nor its rolling-path methods
+changed shape.
+
+**Action:** `createSwapHandler` had exactly one job — issue a claim from pre-funded inventory on
+receipt of a legacy gift-wrap — and there is no rolling equivalent to point a caller at, because
+rolling is not a handler you install onto a connector; it is a maker you run. Run one with
+`startSwapNode()`.
+
 ## Upgrade order
 
 1. **Place the config first** — add `tokenNetworkAddress` and `channelAddress` for every EVM chain
@@ -146,3 +175,6 @@ which states the same gap honestly for the legacy-path removal.
 4. **Verify a live swap end to end** and settle the claim on chain — this is what proves §3 on the
    chain family you actually run. Leaving a claim unredeemed jams the maker (§4's `T04`).
 5. **Then** update counterparties' verifiers and any code branching on refusal codes (§3, §4).
+6. **Before any of the above**, if you import this package directly (rather than only running
+   `toon-swap`), build against 3.0.0 first — a missing export from §6 fails at compile/import time,
+   which is the cheapest place to catch it.

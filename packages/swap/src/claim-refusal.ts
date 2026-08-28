@@ -191,10 +191,11 @@ function jsonSafe(value: unknown): unknown {
 }
 
 /**
- * Classify whatever `MultiChainClaimIssuer.issueClaim()` threw.
+ * Classify whatever `MultiChainClaimIssuer.issueRollingClaim()` threw.
  *
- * `INSUFFICIENT_INVENTORY` is deliberately NOT handled here: the SDK already
- * maps it to `T04 Insufficient liquidity` and logs it at warn, so leaving it
+ * `INSUFFICIENT_INVENTORY` is deliberately NOT handled here: callers (the
+ * rolling engine; historically the SDK's `createSwapHandler`) already map it
+ * to `T04 Insufficient liquidity` and log it at warn, so leaving it
  * alone keeps that byte-identical contract for existing senders.
  */
 export function classifyClaimIssuerError(err: unknown): ClaimRefusal {
