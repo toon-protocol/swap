@@ -165,7 +165,7 @@ describe('issue #101 — parseEvmChainId: chain-key shape parsing', () => {
   });
 });
 
-describe('issue #101 — boot refuses without a deployed RollingSwapChannel address', () => {
+describe('boot refuses without a deployed TokenNetwork address (leg B lives there)', () => {
   function baseConfig(chain: string): SwapNodeConfig {
     return {
       mnemonic: VALID_MNEMONIC,
@@ -209,23 +209,27 @@ describe('issue #101 — boot refuses without a deployed RollingSwapChannel addr
     expect(caught).toBeInstanceOf(SwapNodeStartError);
     expect((caught as SwapNodeStartError).code).toBe('INVALID_CONFIG');
     expect((caught as Error).message).toContain(chain);
-    expect((caught as Error).message).toContain('channelAddress');
+    expect((caught as Error).message).toContain('tokenNetworkAddress');
   });
 
-  it('[P0] a chainProviders entry present but missing channelAddress fails INVALID_CONFIG, naming the setting', () => {
+  it('[P0] a chainProviders entry present but missing tokenNetworkAddress fails INVALID_CONFIG, naming the setting', () => {
     const chain = 'evm:8453';
-    const { channelAddress: _drop, ...withoutChannelAddress } =
-      evmProvider(chain);
+    const { tokenNetworkAddress: _drop, ...withoutTokenNetwork } = evmProvider(chain);
     const config: SwapNodeConfig = {
       ...baseConfig(chain),
-      chainProviders: [
-        withoutChannelAddress as unknown as SwapNodeEvmChainProvider,
-      ],
+      chainProviders: [withoutTokenNetwork as unknown as SwapNodeEvmChainProvider],
     };
-    expect(() => validateConfig(config)).toThrow(/channelAddress/);
+    expect(() => validateConfig(config)).toThrow(/tokenNetworkAddress/);
   });
-
-
+  it('[P1] the 2.x channelAddress (RollingSwapChannel) is optional: a config without it boots', () => {
+    const chain = 'evm:8453';
+    const { channelAddress: _drop, ...withoutChannelAddress } = evmProvider(chain);
+    const config: SwapNodeConfig = {
+      ...baseConfig(chain),
+      chainProviders: [withoutChannelAddress],
+    };
+    expect(() => validateConfig(config)).not.toThrow();
+  });
   it('[P1] a fully-configured chainProviders entry (with channelAddress) boots cleanly, both key shapes', () => {
     for (const chain of ['evm:8453', 'evm:base:8453']) {
       const config: SwapNodeConfig = {

@@ -8,7 +8,7 @@ Two suites, each booting its own infra in `beforeAll` (no global setup):
 
 | suite | what it proves |
 | --- | --- |
-| `rust-connector-swap.e2e.test.ts` (9) | **The swap.** anvil + `solana-test-validator` + the `connector` binary/image with both settlement backends + `startSwapNode()` in-process. A taker RFQs, pays 3 fills on chain A through the connector's client edge, verifies each cumulative leg-B claim, redeems the last one on chain B, and the recipient balance grows by the swapped amount — **EVM→Solana and Solana→EVM**. Also: an unpaid fill is HTTP 402 at the edge, a replayed leg-A claim is refused before the maker is asked, and the maker recycles capacity from chain truth after the redemption. |
+| `rust-connector-swap.e2e.test.ts` (9) | **The swap.** anvil + `solana-test-validator` + the `connector` binary/image settling with the **maker's own keys** (one key) + `startSwapNode()` in-process. A taker opens one channel per chain to the maker, RFQs, pays 3 fills on chain A through the connector's client edge; the maker deposits its side of that same channel on demand (and tops up for fill 3); the taker verifies each cumulative leg-B claim and redeems on chain B (`claimFromChannel` on the `TokenNetwork`, +3 USDC; `ClaimFromChannel` recorded on the Solana PDA) — **EVM→Solana and Solana→EVM**. Also: an unpaid fill is HTTP 402 at the edge, a replayed leg-A claim is refused before the maker is asked, and the maker recycles capacity from chain truth after the redemption. |
 | `taker-toolkit.selfcheck.test.ts` (12) | The taker toolkit against the connector alone: wire-vector replays, sealed requests (free / EVM claim / Solana claim / replay / unpaid), and leg-B settlement on both chains. |
 
 ## Requirements

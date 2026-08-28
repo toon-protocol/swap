@@ -23,6 +23,23 @@ the Rust connector (PF-01, ADR 0019, no parent/child peering) and are removed al
   8080), env `SWAP_APP_PORT` / `SWAP_ILP_ADDRESS` / `SWAP_FILL_AMOUNT`. Solana
   `chainProviders[]` entries now require `programId` and `tokenMint`; EVM entries no longer
   require `tokenNetworkAddress`. `relayUrls` is no longer required.
+- **Leg B rides the normal channels, one per taker, opened by the maker on demand.** The
+  `RollingSwapChannel` is no longer used: its single per-channel watermark with a
+  recipient-per-claim let a maker void a taker's claim by redeeming a later one to another
+  address. Leg B now signs the fleet's `TokenNetwork`/`1` `BalanceProof`
+  (`TokenNetworkBalanceProofSigner`) on the (maker, taker) `TokenNetwork` channel, and the
+  Solana program's proof on the (maker, taker, mint) PDA; both have per-participant watermarks
+  and on-chain collateral checks. With `chainProviders[].channelDeposit` set, the maker opens
+  the channel (if the taker has not) and deposits its side at the taker's first paid fill, tops
+  up when a claim would exceed the deposit, and seeds its watermark from chain
+  (`createEvmLegBChannelProvisioner`, `createSolanaLegBChannelProvisioner`,
+  `MakerEngineConfig.ensureChannel`). The maker's connector should settle with the maker's
+  index-2 keys so one channel per taker per chain carries both legs. EVM `chainProviders[]`
+  require `tokenNetworkAddress` again; `channelAddress` is accepted and ignored; `channels`
+  may be empty when `channelDeposit` is set. The EVM chain-truth reader now reads
+  `TokenNetwork.participants(channelId, maker)` (`EvmChannelReaderProvider` takes
+  `tokenNetworkAddress` + `makerAddress`). `viem` and `@solana/web3.js` become runtime
+  dependencies.
 - **Solana claims** sign the 96-byte `TOON-BALPROOF-V2` message that binds the program id
   (connector ADR 0053) — `SolanaPaymentChannelSigner` takes `programId`,
   `solanaBalanceProofMessage(programId, channelId, nonce, amount)`. The 48-byte form 2.x signed

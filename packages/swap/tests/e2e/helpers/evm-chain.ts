@@ -670,3 +670,84 @@ export async function rollingClaimDigestOnChain(params: {
     args: [params.channelId, params.cumulativeAmount, params.nonce, params.recipient],
   })) as Hex;
 }
+
+// ---------------------------------------------------------------------------
+// Leg B on the TokenNetwork: the taker redeems the maker's balance proof
+// ---------------------------------------------------------------------------
+
+export interface TokenNetworkClaimResult {
+  txHash: Hex;
+  claimedAmount: bigint;
+  totalClaimed: bigint;
+}
+
+/**
+ * `TokenNetwork.claimFromChannel(channelId, proof, sig)` submitted BY THE
+ * CLAIMANT (a channel participant): pays it `transferredAmount − already
+ * claimed` immediately, leaves the channel open, and reverts unless the
+ * counterparty's deposit covers the cumulative — the on-chain collateral
+ * check. `signature` is the maker's 65-byte proof over the `TokenNetwork`/`1`
+ * `BalanceProof` (zero `lockedAmount`/`locksRoot`).
+ */
+export async function claimFromTokenNetworkChannel(params: {
+  rpcUrl: string;
+  tokenNetwork: Address;
+  claimantPrivateKey: Hex;
+  channelId: Hex;
+  nonce: bigint;
+  transferredAmount: bigint;
+  signature: Uint8Array | Hex;
+}): Promise<TokenNetworkClaimResult> {
+  const clients = await evmClients(params.rpcUrl);
+  const sig: Hex =
+    typeof params.signature === 'string'
+      ? params.signature
+      : (`0x${Buffer.from(params.signature).toString('hex')}` as Hex);
+  const hash = await sendAndWait(clients, params.claimantPrivateKey, {
+    to: params.tokenNetwork,
+    abi: TOKEN_NETWORK.abi,
+    functionName: 'claimFromChannel',
+    args: [
+      params.channelId,
+      {
+        channelId: params.channelId,
+        nonce: params.nonce,
+        transferredAmount: params.transferredAmount,
+        lockedAmount: 0n,
+        locksRoot: ZERO_LOCKS_ROOT,
+      },
+      sig,
+    ],
+  });
+  const receipt = await clients.publicClient.getTransactionReceipt({ hash });
+  const claimed = parseEventLogs({
+    abi: TOKEN_NETWORK.abi,
+    eventName: 'ChannelClaimed',
+    logs: receipt.logs,
+  });
+  const args = claimed[0]?.args as
+    | { claimedAmount?: bigint; totalClaimed?: bigint }
+    | undefined;
+  return {
+    txHash: hash,
+    claimedAmount: args?.claimedAmount ?? 0n,
+    totalClaimed: args?.totalClaimed ?? 0n,
+  };
+}
+
+/** The maker's `(deposit, nonce, transferredAmount)` slot on a TokenNetwork channel. */
+export async function readTokenNetworkParticipant(params: {
+  rpcUrl: string;
+  tokenNetwork: Address;
+  channelId: Hex;
+  participant: Address;
+}): Promise<{ deposit: bigint; nonce: bigint; transferredAmount: bigint }> {
+  const clients = await evmClients(params.rpcUrl);
+  const slot = (await clients.publicClient.readContract({
+    address: params.tokenNetwork,
+    abi: TOKEN_NETWORK.abi,
+    functionName: 'participants',
+    args: [params.channelId, params.participant],
+  })) as readonly [bigint, bigint, bigint];
+  return { deposit: slot[0], nonce: slot[1], transferredAmount: slot[2] };
+}

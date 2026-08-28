@@ -45,10 +45,10 @@ consumes:
 | --- | --- | --- |
 | `swapPairs` | yes | Non-empty array of `{ from, to, rate }` (`{ assetCode, assetScale, chain }` legs). `from.chain` must be `evm:*` or `solana:*` — what a Rust connector can be paid on. |
 | `chains` | yes | Families the maker derives leg-B keys for: `["evm", "solana", "mina"]` subset, covering every `to.chain`. |
-| `channels` | yes | Per `to.chain`: pre-opened leg-B channels `[{ channelId, cumulativeAmount, nonce, updatedAt }]`. EVM: a `RollingSwapChannel` channel id this maker's index-2 key is the `signer` of. Solana: the channel PDA between the maker's index-2 Solana key and the recipient (`deriveSolanaChannelPda`) — one per recipient. |
+| `channels` | no, when `channelDeposit` is set | Per `to.chain`: pre-opened leg-B channels `[{ channelId, cumulativeAmount, nonce, updatedAt }]` — the (maker, taker) `TokenNetwork` channel id on EVM, the (maker, taker, mint) PDA on Solana. Leave empty and set `chainProviders[].channelDeposit` to let the maker open and fund them on demand. |
 | `inventory` | yes | Per `to.chain`: leg-B capital in base units. A value **above** the persisted snapshot raises the pool on boot (new capital); below is left alone. |
 | `windowBudget` | no | Per `to.chain`: in-flight ceiling. |
-| `chainProviders` | yes | EVM: `{ chainType:"evm", chainId, rpcUrl, registryAddress, tokenAddress, channelAddress }` — `channelAddress` is the deployed `RollingSwapChannel` (leg B; `tokenNetworkAddress` is accepted and echoed but the maker no longer verifies leg A). Solana: `{ chainType:"solana", chainId, rpcUrl, programId, tokenMint }` — both required (the claim message binds `programId`; PDAs derive from `tokenMint`). Mina: `{ chainType:"mina", chainId, graphqlUrl, zkAppAddress }`. |
+| `chainProviders` | yes | EVM: `{ chainType:"evm", chainId, rpcUrl, registryAddress, tokenAddress, tokenNetworkAddress, channelDeposit?, settlementTimeoutSeconds? }` — `tokenNetworkAddress` is the fleet's `TokenNetwork`, where leg-B channels live and the EIP-712 `verifyingContract` (`channelAddress`, the 2.x `RollingSwapChannel`, is accepted and ignored). Solana: `{ chainType:"solana", chainId, rpcUrl, programId, tokenMint, channelDeposit?, challengeDurationSeconds? }` — `programId` and `tokenMint` required (the claim message binds `programId`; PDAs derive from `tokenMint`). `channelDeposit` (base units) enables on-demand leg-B channels: at a taker's first paid fill the maker deposits this much of its own into the (maker, taker) channel from its index-2 key and tops it up whenever a claim would exceed what it holds. Mina: `{ chainType:"mina", chainId, graphqlUrl, zkAppAddress }`. |
 | `ilpAddress` | no | The fill route's ILP destination (default `g.toon.swap.<pubkey16>`); `<ilpAddress>.rfq` is the RFQ route. Quotes name both. |
 | `fillAmount` | no | The fill route's price, base units — informational, echoed in quotes. `X-TOON-Amount` is the truth. |
 | `quote` | no | `{ ttlMs (60s), sessionTtlMs (1h), maxSessions (1024) }`. |
@@ -56,14 +56,14 @@ consumes:
 | `statePath` | no | Snapshot file (inventory, channel watermarks, bindings) — write-ahead of every claim. |
 | `maxRateAge` | no | Staleness bound on the rate feed; needs `SWAP_RATE_URL`. |
 | `adminToken`, `reconcileIntervalMs`, `identityAutogen` | no | See below. |
-| `mnemonic` / `secretKey` | one | Identity — or `identityAutogen` / `SWAP_AUTOGEN_IDENTITY`. The BIP-44 index-2 keys derived from the mnemonic sign leg B; a mnemonic is required. |
+| `mnemonic` / `secretKey` | one | Identity — or `identityAutogen` / `SWAP_AUTOGEN_IDENTITY`. The BIP-44 index-2 keys derived from the mnemonic sign leg B and fund leg-B channels, and are the keys the maker's **connector** must settle with (`[settlement.*.key]`) so one channel per taker carries both legs. A mnemonic is required. |
 
 **Retired (2.x) keys are accepted and ignored with a `swap.config.retired_key_ignored` warning:**
 `btpServerPort`, `btpEndpoint`, `relayUrls`, `knownPeers`, `transport`, `connectorUrl`,
 `parentPeerId`, `parentAuthToken`, `parentEvmAddress`, `nodeId`, `advertisedAsset`,
 `peerInfoIlpDestination`, `peerInfoPricePerByte`, `peerInfoTtlSeconds`,
-`peerInfoRefreshIntervalMs`, `rolling`, `rollingLegBSender`, `settlementPrivateKey`. A committed
-2.x config boots.
+`peerInfoRefreshIntervalMs`, `rolling`, `rollingLegBSender`, `settlementPrivateKey`,
+`chainProviders[].channelAddress`. A committed 2.x config boots.
 
 ## Environment variables (override the config file)
 

@@ -81,13 +81,10 @@ async function startFakeChainRpc(chain: {
       const result =
         '0x' +
         [
-          word('11'.repeat(20)),
-          word('22'.repeat(20)),
+          // TokenNetwork.participants(): (deposit, nonce, transferredAmount)
+          word(((chain.cumulativePaid + 1_000_000n).toString(16))),
           word(3n.toString(16)),
           word(chain.cumulativePaid.toString(16)),
-          word(1_000_000n.toString(16)),
-          word(0n.toString(16)),
-          word((1).toString(16)),
         ].join('');
       res.writeHead(200, { 'content-type': 'application/json' });
       res.end(JSON.stringify({ jsonrpc: '2.0', id: json.id, result }));

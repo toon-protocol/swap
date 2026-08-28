@@ -21,9 +21,8 @@ import { join } from 'node:path';
 
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { PublicKey } from '@solana/web3.js';
-import { keccak256, toHex, type Address, type Hex } from 'viem';
+import { type Address, type Hex } from 'viem';
 import { ed25519 } from '@noble/curves/ed25519.js';
-import { recoverEvmClaimSigner } from '@toon-protocol/settlement-digest';
 import { base58Encode } from '@toon-protocol/sdk';
 
 import { startSwapNode } from '../../src/swap-node.js';
@@ -35,14 +34,15 @@ import type { SwapAdvance, SwapQuote, SwapRefusal } from '../../src/wire.js';
 
 import {
   ANVIL_ACCOUNT1_KEY,
+  claimFromTokenNetworkChannel,
   deployEvmContracts,
   erc20Balance,
   evmAddressOf,
   fundEth,
   mintUsdc,
-  openMakerRollingChannel,
   openTakerEvmChannel,
-  settleRollingSwapChannel,
+  readTokenNetworkParticipant,
+  recoverEvmClientClaimSigner,
   signEvmClientClaim,
   startFreshAnvil,
   type EvmDeployment,
@@ -51,16 +51,13 @@ import {
 } from './helpers/evm-chain.js';
 import {
   airdropSol,
-  associatedTokenAddress,
   claimFromSolanaChannel,
-  closeSolanaChannel,
   keypairFromSeed,
   mintUsdcTo,
   openSolanaChannelAsDepositor,
+  readSolanaChannel,
   seedToHex,
-  settleSolanaChannel,
   signSolanaClientClaim,
-  splBalance,
   type DepositorSolanaChannel,
 } from './helpers/solana-chain.js';
 import {
@@ -105,9 +102,8 @@ let makerEvmAddress: Address;
 let makerSolanaSeed: Uint8Array;
 let makerSolanaPubkey: PublicKey;
 
-// The maker's connector: its own settlement identities (what leg A pays).
-const connectorEvmKey = `0x${randomBytes(32).toString('hex')}` as Hex;
-const connectorSolanaSeed = new Uint8Array(randomBytes(32));
+// ONE KEY: the maker's connector settles with the maker's own keys, so the
+// channel the taker pays leg A into is the channel the maker pays leg B from.
 let connectorEvmAddress: Address;
 let connectorSolanaPubkey: PublicKey;
 
@@ -119,9 +115,6 @@ let takerSolPubkey: PublicKey;
 let takerEvmChannel: TakerEvmChannel; // leg A for EVM→SOL
 let takerSolChannel: DepositorSolanaChannel; // leg A for SOL→EVM
 
-// Leg-B channels the maker pre-opens (operator provisioning).
-const EVM_LEG_B_CHANNEL = keccak256(toHex('swap-e2e-leg-b-evm'));
-let solLegBChannel: DepositorSolanaChannel; // maker → taker
 
 const cleanups: (() => Promise<void> | void)[] = [];
 
@@ -136,15 +129,15 @@ beforeAll(async () => {
   makerEvmAddress = keys.evm.address as Address;
   makerSolanaSeed = keys.solana.privateKey;
   makerSolanaPubkey = new PublicKey(base58Encode(keys.solana.publicKey));
-  connectorEvmAddress = evmAddressOf(connectorEvmKey);
-  connectorSolanaPubkey = keypairFromSeed(connectorSolanaSeed).publicKey;
+  connectorEvmAddress = makerEvmAddress;
+  connectorSolanaPubkey = makerSolanaPubkey;
 
   // ---- chains -----------------------------------------------------------
   log('booting anvil');
   anvil = await startFreshAnvil({ port: ANVIL_PORT, chainId: ANVIL_CHAIN_ID });
   cleanups.push(() => anvil.stop());
   evm = await deployEvmContracts(anvil.rpcUrl);
-  log(`evm: usdc=${evm.usdc} tokenNetwork=${evm.tokenNetwork} rolling=${evm.rollingSwapChannel}`);
+  log(`evm: usdc=${evm.usdc} tokenNetwork=${evm.tokenNetwork}`);
 
   log('booting solana-test-validator');
   validator = await startSolanaValidator();
@@ -156,11 +149,9 @@ beforeAll(async () => {
   log(`solana: mint=${sol.mint} taker=${takerSolPubkey.toBase58()} maker=${makerSolanaPubkey.toBase58()}`);
 
   // ---- funding ----------------------------------------------------------
-  await fundEth(anvil.rpcUrl, connectorEvmAddress, 10n * 10n ** 18n);
   await fundEth(anvil.rpcUrl, makerEvmAddress, 10n * 10n ** 18n);
   await mintUsdc(anvil.rpcUrl, evm.usdc, makerEvmAddress, 100n * USDC);
   await mintUsdc(anvil.rpcUrl, evm.usdc, takerEvmAddress, 100n * USDC);
-  await airdropSol(validator.rpcUrl, connectorSolanaPubkey, 10);
   await airdropSol(validator.rpcUrl, makerSolanaPubkey, 10);
   await mintUsdcTo({
     rpcUrl: validator.rpcUrl,
@@ -168,27 +159,6 @@ beforeAll(async () => {
     owner: makerSolanaPubkey,
     amount: 100n * USDC,
   });
-
-  // ---- the maker's leg-B channels (operator provisioning) ---------------
-  await openMakerRollingChannel({
-    rpcUrl: anvil.rpcUrl,
-    rollingSwapChannel: evm.rollingSwapChannel,
-    usdc: evm.usdc,
-    funderPrivateKey: makerEvmKey,
-    channelId: EVM_LEG_B_CHANNEL,
-    signer: makerEvmAddress,
-    deposit: 10n * USDC,
-  });
-  solLegBChannel = await openSolanaChannelAsDepositor({
-    rpcUrl: validator.rpcUrl,
-    programId: validator.programId,
-    mint: sol.mint,
-    depositorSeed: makerSolanaSeed,
-    counterparty: takerSolPubkey,
-    amount: 10n * USDC,
-    challengeDurationSeconds: 0,
-  });
-  log(`leg-B channels: evm=${EVM_LEG_B_CHANNEL} solana=${solLegBChannel.channelAccount.toBase58()}`);
 
   // ---- the maker app ----------------------------------------------------
   stateDir = mkdtempSync(join(tmpdir(), 'swap-e2e-'));
@@ -211,19 +181,8 @@ beforeAll(async () => {
       },
     ],
     chains: ['evm', 'solana'],
-    channels: {
-      [EVM_CHAIN]: [
-        { channelId: EVM_LEG_B_CHANNEL, cumulativeAmount: 0n, nonce: 0n, updatedAt: 0 },
-      ],
-      [SOL_CHAIN]: [
-        {
-          channelId: solLegBChannel.channelAccount.toBase58(),
-          cumulativeAmount: 0n,
-          nonce: 0n,
-          updatedAt: 0,
-        },
-      ],
-    },
+    // No pre-opened leg-B channels: the maker opens/deposits on demand.
+    channels: { [EVM_CHAIN]: [], [SOL_CHAIN]: [] },
     inventory: { [EVM_CHAIN]: 10n * USDC, [SOL_CHAIN]: 10n * USDC },
     chainProviders: [
       {
@@ -233,7 +192,9 @@ beforeAll(async () => {
         registryAddress: evm.registry,
         tokenAddress: evm.usdc,
         tokenNetworkAddress: evm.tokenNetwork,
-        channelAddress: evm.rollingSwapChannel,
+        // Two fills' worth: fill 3 must trigger a top-up.
+        channelDeposit: 2n * USDC,
+        settlementTimeoutSeconds: 3600,
       },
       {
         chainType: 'solana',
@@ -241,6 +202,9 @@ beforeAll(async () => {
         rpcUrl: validator.rpcUrl,
         programId: validator.programId,
         tokenMint: sol.mint,
+        // Two fills' worth: fill 3 must trigger a top-up.
+        channelDeposit: 2n * USDC,
+        challengeDurationSeconds: 0,
       },
     ],
     statePath: makerStatePath,
@@ -266,13 +230,13 @@ beforeAll(async () => {
       rpcUrl: anvil.rpcUrl,
       registryAddress: evm.registry,
       tokenAddress: evm.usdc,
-      settlementKeyHex: connectorEvmKey,
+      settlementKeyHex: makerEvmKey,
     },
     solana: {
       rpcUrl: validator.rpcUrl,
       programId: validator.programId,
       tokenMint: sol.mint,
-      settlementSeedHex: seedToHex(connectorSolanaSeed),
+      settlementSeedHex: seedToHex(makerSolanaSeed),
     },
     routes: [
       { prefix: maker.rfqDestination, handlerUrl: `${MAKER_APP_URL}/swap/rfq`, price: 0 },
@@ -430,8 +394,17 @@ describe('EVM → Solana: pay leg A on anvil, redeem leg B on the validator', ()
       expect(a.targetAmount).toBe(FILL.toString());
       expect(a.cumulativeAmount).toBe((BigInt(seq) * FILL).toString());
       expect(a.nonce).toBe(String(seq));
-      expect(a.channelId).toBe(solLegBChannel.channelAccount.toBase58());
-      expect(a.recipient).toBe(takerSolPubkey.toBase58());
+      // ONE KEY: the leg-B channel IS the channel the taker opened to pay
+      // leg A on Solana — the maker just deposits its own side of it.
+      expect(a.channelId).toBe(takerSolChannel.channelAccount.toBase58());
+      const onChain = await readSolanaChannel(validator.rpcUrl, takerSolChannel.channelAccount);
+      expect(onChain).not.toBeNull();
+      const makerIsA = onChain?.participantA.equals(makerSolanaPubkey) ?? false;
+      const makerDeposit = makerIsA ? onChain?.depositA : onChain?.depositB;
+      expect(makerDeposit, 'the maker deposited its side on demand').toBeGreaterThanOrEqual(
+        BigInt(a.cumulativeAmount)
+      );
+      log(`  maker's deposit in ${a.channelId}: ${makerDeposit}`);
       // Verify before trusting (R5): the maker's key over the program's bytes.
       const msg = solanaBalanceProofMessage(
         validator.programId,
@@ -451,9 +424,11 @@ describe('EVM → Solana: pay leg A on anvil, redeem leg B on the validator', ()
     );
   });
 
-  it('the taker redeems the last claim on chain and its USDC ATA grows by the swapped amount', async () => {
-    const takerAta = associatedTokenAddress(takerSolPubkey, new PublicKey(sol.mint));
-    const before = await splBalance(validator.rpcUrl, takerAta);
+  it('the taker records the last claim on chain: the program credits the full cumulative on the maker slot', async () => {
+    // A Solana channel pays at settlement (close → challenge → settle), and
+    // this one channel is also where the taker pays leg A for the reverse
+    // swap below — so here the claim is recorded and the payout is asserted
+    // at the end of the file, netted against everything else on the channel.
     await claimFromSolanaChannel({
       rpcUrl: validator.rpcUrl,
       programId: validator.programId,
@@ -464,21 +439,13 @@ describe('EVM → Solana: pay leg A on anvil, redeem leg B on the validator', ()
       transferredAmount: BigInt(last.cumulativeAmount),
       signature: Buffer.from(last.claim, 'base64'),
     });
-    await closeSolanaChannel({
-      rpcUrl: validator.rpcUrl,
-      programId: validator.programId,
-      channelAccount: last.channelId,
-      closerSeed: takerSol.seed,
-    });
-    const sig = await settleSolanaChannel({
-      rpcUrl: validator.rpcUrl,
-      programId: validator.programId,
-      channelAccount: last.channelId,
-      callerSeed: takerSol.seed,
-    });
-    const after = await splBalance(validator.rpcUrl, takerAta);
-    expect(after - before).toBe(BigInt(FILLS) * FILL);
-    log(`leg B settled ${sig}: taker USDC +${after - before}`);
+    const state = await readSolanaChannel(validator.rpcUrl, takerSolChannel.channelAccount);
+    const makerIsA = state?.participantA.equals(makerSolanaPubkey) ?? false;
+    expect(makerIsA ? state?.transferredAmountA : state?.transferredAmountB).toBe(
+      BigInt(FILLS) * FILL
+    );
+    expect(makerIsA ? state?.nonceA : state?.nonceB).toBe(BigInt(FILLS));
+    log(`leg B recorded on chain: maker slot transferred=${BigInt(FILLS) * FILL}, nonce=${FILLS}`);
   });
 });
 
@@ -487,15 +454,15 @@ describe('Solana → EVM: pay leg A on the validator, redeem leg B on anvil', ()
   let quote: SwapQuote;
   let last: SwapAdvance;
 
-  it('RFQ: the quote names the EVM leg-B terms (RollingSwapChannel, signer)', async () => {
+  it('RFQ: the quote names the EVM leg-B terms (the TokenNetwork, the maker signer)', async () => {
     ({ streamNonce, quote } = await rfq({ from: SOL_CHAIN, to: EVM_CHAIN }, takerEvmAddress));
     expect(quote.fill.chain).toBe(SOL_CHAIN);
-    expect(quote.legB.verifyingContract?.toLowerCase()).toBe(evm.rollingSwapChannel.toLowerCase());
+    expect(quote.legB.verifyingContract?.toLowerCase()).toBe(evm.tokenNetwork.toLowerCase());
     expect(quote.legB.swapSignerAddress.toLowerCase()).toBe(makerEvmAddress.toLowerCase());
     expect(quote.legB.token?.toLowerCase()).toBe(evm.usdc.toLowerCase());
   });
 
-  it(`${FILLS} paid fills with Solana claims, each answered with a recoverable v2 EIP-712 claim`, async () => {
+  it(`${FILLS} paid fills with Solana claims, each answered with a recoverable TokenNetwork balance proof`, async () => {
     for (let seq = 1; seq <= FILLS; seq++) {
       const claim = signSolanaClientClaim({
         seed: takerSol.seed,
@@ -507,24 +474,30 @@ describe('Solana → EVM: pay leg A on the validator, redeem leg B on anvil', ()
       const { status, body } = await fill(streamNonce, seq, claim);
       expect(status, JSON.stringify(body)).toBe(200);
       const a = body as SwapAdvance;
-      expect(a.channelId).toBe(EVM_LEG_B_CHANNEL);
-      expect(a.cumulativeAmount).toBe((BigInt(seq) * FILL).toString());
-      expect(a.recipient.toLowerCase()).toBe(takerEvmAddress.toLowerCase());
-      const recovered = recoverEvmClaimSigner(
+      // ONE KEY: the leg-B channel IS the taker's leg-A TokenNetwork channel.
+      expect(a.channelId.toLowerCase()).toBe(takerEvmChannel.channelId.toLowerCase());
+      const recovered = await recoverEvmClientClaimSigner(
         {
-          channelId: a.channelId,
-          cumulativeAmount: a.cumulativeAmount,
-          nonce: a.nonce,
-          recipient: a.recipient,
-          chainId: BigInt(ANVIL_CHAIN_ID),
-          verifyingContract: evm.rollingSwapChannel,
+          chainId: ANVIL_CHAIN_ID,
+          tokenNetwork: evm.tokenNetwork,
+          channelId: a.channelId as Hex,
+          nonce: BigInt(a.nonce),
+          transferredAmount: BigInt(a.cumulativeAmount),
         },
-        Uint8Array.from(Buffer.from(a.claim, 'base64'))
+        `0x${Buffer.from(a.claim, 'base64').toString('hex')}` as Hex
       );
       expect(recovered.toLowerCase()).toBe(makerEvmAddress.toLowerCase());
       last = a;
       log(`fill ${seq}: leg-B nonce=${a.nonce} cumulative=${a.cumulativeAmount} on ${a.channelId}`);
     }
+    const slot = await readTokenNetworkParticipant({
+      rpcUrl: anvil.rpcUrl,
+      tokenNetwork: evm.tokenNetwork,
+      channelId: takerEvmChannel.channelId,
+      participant: makerEvmAddress,
+    });
+    expect(slot.deposit, 'the maker deposited its side on demand, topping up for fill 3').toBe(4n * USDC);
+    log(`  maker's deposit in ${takerEvmChannel.channelId}: ${slot.deposit}`);
   });
 
   it('a replayed leg-A claim is refused at the edge before the maker is asked', async () => {
@@ -554,21 +527,21 @@ describe('Solana → EVM: pay leg A on the validator, redeem leg B on anvil', ()
     expect(sessions.find((s) => s.streamNonce === streamNonce)?.lastSeq).toBe(FILLS);
   });
 
-  it('the taker redeems the last claim on the RollingSwapChannel and its USDC grows', async () => {
+  it('the taker redeems the last claim with claimFromChannel and its USDC grows by the swapped amount', async () => {
     const before = await erc20Balance(anvil.rpcUrl, evm.usdc, takerEvmAddress);
-    const settled = await settleRollingSwapChannel({
+    const claimed = await claimFromTokenNetworkChannel({
       rpcUrl: anvil.rpcUrl,
-      rollingSwapChannel: evm.rollingSwapChannel,
-      submitterPrivateKey: takerEvmKey,
+      tokenNetwork: evm.tokenNetwork,
+      claimantPrivateKey: takerEvmKey,
       channelId: last.channelId as Hex,
-      cumulativeAmount: BigInt(last.cumulativeAmount),
       nonce: BigInt(last.nonce),
-      recipient: takerEvmAddress,
-      signature: Uint8Array.from(Buffer.from(last.claim, 'base64')),
+      transferredAmount: BigInt(last.cumulativeAmount),
+      signature: Buffer.from(last.claim, 'base64'),
     });
     const after = await erc20Balance(anvil.rpcUrl, evm.usdc, takerEvmAddress);
     expect(after - before).toBe(BigInt(FILLS) * FILL);
-    log(`leg B settled ${settled.txHash}: taker USDC +${after - before}`);
+    expect(claimed.totalClaimed).toBe(BigInt(FILLS) * FILL);
+    log(`leg B redeemed ${claimed.txHash}: taker USDC +${after - before}; the channel stays open`);
   });
 
   it('the maker observes the redemption from chain truth and recycles the capacity', async () => {

@@ -107,6 +107,18 @@ export interface MakerEngineConfig {
    * `undefined` means "no preference" (EVM pools bind first-unbound).
    */
   preferredChannelFor?: (chain: string, recipient: string) => string | undefined;
+  /**
+   * Make the preferred channel exist and hold enough to cover this fill —
+   * a Solana leg-B channel is opened and funded by the maker on demand (see
+   * `solana-leg-b-channel.ts`). Runs after the taker has paid, before the
+   * claim is issued; returns the channel id to serve from, or throws with a
+   * reason the taker is told (`no_channel_available`).
+   */
+  ensureChannel?: (
+    pair: SwapPair,
+    recipient: string,
+    targetAmount: bigint
+  ) => Promise<string | undefined>;
   /** Validates a `chainRecipient` for a chain family; the default checks EVM hex / Solana base58. */
   validateRecipient?: (chain: string, recipient: string) => string | null;
   quoteTtlMs?: number;
@@ -192,6 +204,7 @@ export class MakerEngine {
   readonly #rateProvider?: SwapRateProvider;
   readonly #guard?: RateFreshnessGuard;
   readonly #preferredChannelFor?: (chain: string, recipient: string) => string | undefined;
+  readonly #ensureChannel?: MakerEngineConfig['ensureChannel'];
   readonly #validateRecipient: (chain: string, recipient: string) => string | null;
   readonly #quoteTtlMs: number;
   readonly #sessionTtlMs: number;
@@ -214,6 +227,7 @@ export class MakerEngine {
     if (config.preferredChannelFor) {
       this.#preferredChannelFor = config.preferredChannelFor;
     }
+    if (config.ensureChannel) this.#ensureChannel = config.ensureChannel;
     this.#validateRecipient =
       config.validateRecipient ?? defaultValidateRecipient;
     this.#quoteTtlMs = config.quoteTtlMs ?? DEFAULT_QUOTE_TTL_MS;
@@ -508,10 +522,32 @@ export class MakerEngine {
       );
     }
 
-    const preferredChannelId = this.#preferredChannelFor?.(
+    let preferredChannelId = this.#preferredChannelFor?.(
       session.pair.to.chain,
       session.chainRecipient
     );
+    if (this.#ensureChannel) {
+      try {
+        const ensured = await this.#ensureChannel(
+          session.pair,
+          session.chainRecipient,
+          targetAmount
+        );
+        if (ensured !== undefined) preferredChannelId = ensured;
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        this.#logger.error?.('swap.fill.channel_provision_failed', {
+          ...ctx,
+          recipient: session.chainRecipient,
+          err: message,
+        });
+        return creditAndRefuse(
+          SWAP_REFUSAL_REASONS.NO_CHANNEL_AVAILABLE,
+          `could not provision the leg-B channel for ${session.chainRecipient}: ${message}`,
+          { recipient: session.chainRecipient }
+        );
+      }
+    }
     let issued: RollingIssueClaimResult;
     try {
       issued = await this.#claimIssuer.issueRollingClaim({

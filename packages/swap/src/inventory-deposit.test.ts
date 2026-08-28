@@ -710,14 +710,12 @@ describe('the route against the REAL reader behind the REAL dispatcher', () => {
       });
       req.on('end', () => {
         const { id } = JSON.parse(body) as { id: number };
+        // TokenNetwork.participants(): (deposit, nonce, transferredAmount) —
+        // `deposit` is the TOTAL ever placed, so funded = cumulativePaid + remaining.
         const words = [
-          w('11'.repeat(20)),
-          w('22'.repeat(20)),
+          w((position.cumulativePaid + position.deposit).toString(16)),
           w('3'),
           w(position.cumulativePaid.toString(16)),
-          w(position.deposit.toString(16)),
-          w('0'),
-          w('1'),
         ];
         res.writeHead(200, { 'content-type': 'application/json' });
         res.end(
@@ -751,7 +749,12 @@ describe('the route against the REAL reader behind the REAL dispatcher', () => {
     });
     const composed = composeChannelOnChainReaders({
       evm: createEvmChannelOnChainReader([
-        { chainId: chain, rpcUrl, channelAddress: '0x' + '33'.repeat(20) },
+        {
+          chainId: chain,
+          rpcUrl,
+          tokenNetworkAddress: '0x' + '33'.repeat(20),
+          makerAddress: '0x' + '55'.repeat(20),
+        },
       ]),
     });
     expect(typeof composed?.getFundingPosition).toBe('function');

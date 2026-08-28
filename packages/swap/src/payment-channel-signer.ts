@@ -7,6 +7,7 @@
  */
 
 import { secp256k1 } from '@noble/curves/secp256k1.js';
+import { hashTypedData, type Hex } from 'viem';
 import { ed25519 } from '@noble/curves/ed25519.js';
 import { sha256 } from '@noble/hashes/sha2.js';
 
@@ -184,6 +185,134 @@ export class EvmPaymentChannelSigner implements PaymentChannelSigner {
 // ---------------------------------------------------------------------------
 // MinaPaymentChannelSigner
 // ---------------------------------------------------------------------------
+
+/**
+ * The fleet's ordinary `TokenNetwork` balance proof (EIP-712 domain
+ * `TokenNetwork` / `1`, struct `BalanceProof(channelId, nonce,
+ * transferredAmount, lockedAmount, locksRoot)` with the last two always
+ * zero) — the same message a taker signs to pay leg A, now signed by the
+ * maker for leg B. The counterparty is the channel's other participant, so
+ * `recipient` is not in the message; it is checked against the channel
+ * off chain and enforced on chain by `claimFromChannel` (only a participant
+ * can claim, and only what its counterparty signed).
+ */
+export interface TokenNetworkBalanceProofSignerConfig {
+  chain: string;
+  privateKey: Uint8Array;
+  chainId: bigint;
+  /** The deployed `TokenNetwork` — the EIP-712 `verifyingContract`. */
+  tokenNetworkAddress: string;
+}
+
+export const TOKEN_NETWORK_BALANCE_PROOF_TYPES = {
+  BalanceProof: [
+    { name: 'channelId', type: 'bytes32' },
+    { name: 'nonce', type: 'uint256' },
+    { name: 'transferredAmount', type: 'uint256' },
+    { name: 'lockedAmount', type: 'uint256' },
+    { name: 'locksRoot', type: 'bytes32' },
+  ],
+} as const;
+
+export function tokenNetworkBalanceProofDigest(p: {
+  chainId: bigint;
+  tokenNetworkAddress: string;
+  channelId: string;
+  nonce: bigint;
+  transferredAmount: bigint;
+}): Uint8Array {
+  const digest = hashTypedData({
+    domain: {
+      name: 'TokenNetwork',
+      version: '1',
+      chainId: p.chainId,
+      verifyingContract: p.tokenNetworkAddress as Hex,
+    },
+    types: TOKEN_NETWORK_BALANCE_PROOF_TYPES,
+    primaryType: 'BalanceProof',
+    message: {
+      channelId: p.channelId as Hex,
+      nonce: p.nonce,
+      transferredAmount: p.transferredAmount,
+      lockedAmount: 0n,
+      locksRoot: `0x${'00'.repeat(32)}` as Hex,
+    },
+  });
+  return hexToBytes(digest);
+}
+
+export class TokenNetworkBalanceProofSigner implements PaymentChannelSigner {
+  public readonly chain: string;
+  public readonly chainKind: SwapNodeChainKind = 'evm';
+  public readonly tokenNetworkAddress: string;
+  private readonly privateKey: Uint8Array;
+  private readonly chainId: bigint;
+
+  constructor(cfg: TokenNetworkBalanceProofSignerConfig) {
+    if (!(cfg.privateKey instanceof Uint8Array) || cfg.privateKey.length !== 32) {
+      throw new SwapWalletError(
+        'SIGNING_FAILED',
+        'TokenNetwork signer requires a 32-byte secp256k1 private key'
+      );
+    }
+    if (typeof cfg.chainId !== 'bigint' || cfg.chainId <= 0n) {
+      throw new SwapWalletError(
+        'SIGNING_FAILED',
+        `TokenNetwork signer requires a positive bigint chainId (got ${String(cfg.chainId)})`
+      );
+    }
+    if (hexToBytes(cfg.tokenNetworkAddress).length !== 20) {
+      throw new SwapWalletError(
+        'SIGNING_FAILED',
+        'TokenNetwork signer requires a 20-byte tokenNetworkAddress'
+      );
+    }
+    this.chain = cfg.chain;
+    this.privateKey = cfg.privateKey;
+    this.chainId = cfg.chainId;
+    this.tokenNetworkAddress = cfg.tokenNetworkAddress;
+  }
+
+  async signBalanceProof(params: PaymentChannelSignParams): Promise<Uint8Array> {
+    try {
+      if (hexToBytes(params.channelId).length !== 32) {
+        throw new Error('TokenNetwork channelId must be 32 bytes');
+      }
+      const digest = tokenNetworkBalanceProofDigest({
+        chainId: this.chainId,
+        tokenNetworkAddress: this.tokenNetworkAddress,
+        channelId: params.channelId,
+        nonce: params.nonce,
+        transferredAmount: params.cumulativeAmount,
+      });
+      return signRecoverable(digest, this.privateKey);
+    } catch (err) {
+      throw new SwapWalletError(
+        'SIGNING_FAILED',
+        'TokenNetwork balance-proof signing failed',
+        { cause: err }
+      );
+    }
+  }
+}
+
+/** 65-byte `r || s || v` (v = 27/28) over a prehashed 32-byte digest. */
+function signRecoverable(digest: Uint8Array, privateKey: Uint8Array): Uint8Array {
+  const recoveredBytes = secp256k1.sign(digest, privateKey, {
+    prehash: false,
+    format: 'recovered',
+  });
+  const sigObj = secp256k1.Signature.fromBytes(recoveredBytes, 'recovered');
+  const compact = sigObj.toBytes('compact');
+  const recovery = sigObj.recovery;
+  if (compact.length !== 64 || (recovery !== 0 && recovery !== 1)) {
+    throw new Error('unexpected signature shape');
+  }
+  const out = new Uint8Array(65);
+  out.set(compact, 0);
+  out[64] = 27 + recovery;
+  return out;
+}
 
 export interface MinaPaymentChannelSignerConfig {
   chain: string;

@@ -27,6 +27,8 @@ price       = 1000000                          # δ, in the settlement asset's b
 
 [settlement.evm]    # … the chain(s) the maker accepts leg A on
 [settlement.solana] # … both may be live at once
+#   ONE KEY: these settlement keys are the maker's own index-2 keys, so the
+#   channel a taker pays leg A into is the channel the maker pays leg B from.
 ```
 
 - **Leg A** is an ordinary paid packet to the fill route. The taker's claim
@@ -115,18 +117,50 @@ session to the connector-stated leg-A channel key (`X-TOON-Payer`); a
 different payer on the same session is refused `payer_mismatch` and not
 credited. Fills are strictly sequential per session (`seq_gap` otherwise).
 
-### Leg-B channels
+### Leg-B channels: the normal ones, one per taker, opened on demand
 
-- **EVM**: the operator pre-opens channels on the `RollingSwapChannel`
-  (`openChannel(channelId, signer, deposit)`); the maker binds one per payer
-  ("first unbound" policy, chain-truth rebind when fully redeemed).
-- **Solana**: the channel between the maker and a recipient is the ONE PDA
-  `find_program_address(["channel", min, max, mint], program)` (ADR 0059).
-  The maker derives it from the RFQ's `chainRecipient` and serves that channel
-  or refuses `no_channel_available` naming the PDA to open and fund.
-- Claims sign the **96-byte** `TOON-BALPROOF-V2` message binding the program
-  id (ADR 0053). Every 48-byte claim swap 2.x issued is unredeemable on the
-  current program — this alone makes 3.0.0 a major on Solana.
+Leg B rides the **same kind of channel leg A does** — the fleet's `TokenNetwork`
+on EVM, the `payment_channel` program on Solana — never a swap-specific
+contract. A channel there has two declared participants, a deposit per
+participant, and a nonce/cumulative watermark **per participant**:
+
+- a later claim from the maker can only pay the taker *more*; the maker cannot
+  retroactively void a claim it signed;
+- the taker's collateral is its own and readable on chain
+  (`participants(channelId, maker).deposit`, the maker's slot of the PDA), and
+  `claimFromChannel` / `ClaimFromChannel` refuse a claim the deposit cannot cover;
+- redemption is incremental (`claimFromChannel` pays the delta and leaves the
+  channel open; Solana records the claim and pays at settlement).
+
+**One key.** The maker's connector settles with the maker's own index-2 keys.
+On each chain there is therefore exactly one channel between a taker and the
+maker — derived from the pair (`keccak256(min, max, epoch)` on EVM, the
+`["channel", min, max, mint]` PDA on Solana, ADR 0059). The taker opens it to
+pay leg A; at the taker's first *paid* fill the maker deposits its own side
+(`chainProviders[].channelDeposit`, from its index-2 key's balance) and tops it
+up whenever a claim would exceed what it holds (`evm-leg-b-channel.ts`,
+`solana-leg-b-channel.ts`). Nothing is pre-opened for leg B, and an RFQ cannot
+make the maker lock capital: provisioning happens after payment. A channel the
+maker has already been redeemed on seeds the maker's watermark from chain, so a
+restart with lost state cannot sign a claim below the on-chain nonce.
+
+**Why not `RollingSwapChannel`.** The 2.x leg-B contract kept one
+nonce/cumulative watermark **per channel** and let the signer name any
+`recipient` per claim. That let a maker sign nonce 4 to another address (or
+itself) and redeem it, voiding a taker's nonce-3 claim — a claim the taker could
+not have known was at risk, since other recipients' claims are off chain. The
+"exposure is one fill" property therefore held only against a maker that kept
+its own binding discipline. The normal channel's per-participant watermark
+gives the property by construction, so the maker no longer signs on
+`RollingSwapChannel` at all (`chainProviders[].channelAddress` is accepted and
+ignored). The capital-efficiency argument for a pooled contract is real but
+belongs to a future program with per-recipient tabs *and* reserved collateral;
+see toon-protocol/connector#1247's thread.
+
+Claims sign the chain's standard message: the EIP-712 `TokenNetwork`/`1`
+`BalanceProof` on EVM (`TokenNetworkBalanceProofSigner`) and the 96-byte
+`TOON-BALPROOF-V2` message binding the program id on Solana (ADR 0053). A taker
+verifies leg B with the very code it uses to *pay* leg A.
 
 ## What changed in this package
 
@@ -135,31 +169,35 @@ credited. Fills are strictly sequential per session (`seq_gap` otherwise).
 | dependency | `@toon-protocol/connector ^3.30.0` (embedded `ConnectorNode`) | none |
 | intake | kind:1059 gift wrap on a BTP listener; RFQ kind:20033 | `POST /swap/rfq`, `POST /swap/fill` (JSON) |
 | leg B | maker-originated coupled PREPARE (`rolling/1`) | claim in the paid response (`rolling/2`) |
+| leg-B contract | `RollingSwapChannel` (recipient per claim, one watermark per channel) | the normal `TokenNetwork` / Solana program channel between maker and taker, opened and funded by the maker on demand |
 | discovery | kind:10032 announce (retired upstream, ADR 0046) | the connector's self-description + the quote |
-| config | `btpServerPort`, `btpEndpoint`, `relayUrls`, `connectorUrl`, `peerInfo*`, `rolling.*`, `settlementPrivateKey` | **accepted and ignored with a warning** — a 2.x config boots; new: `ilpAddress` (existing), `fillAmount`, `quote.*`, `appPort` (alias `blsPort`); Solana `chainProviders` need `programId` + `tokenMint` |
+| config | `btpServerPort`, `btpEndpoint`, `relayUrls`, `connectorUrl`, `peerInfo*`, `rolling.*`, `settlementPrivateKey`, `chainProviders[].channelAddress` | **accepted and ignored with a warning** — a 2.x config boots; new: `ilpAddress` (existing), `fillAmount`, `quote.*`, `appPort` (alias `blsPort`), `chainProviders[].channelDeposit` (+ `settlementTimeoutSeconds` / `challengeDurationSeconds`); EVM entries need `tokenNetworkAddress`, Solana entries `programId` + `tokenMint`; `channels` may be empty when `channelDeposit` is set |
 | Solana proof | 48 bytes | 96 bytes, program-bound |
 | inventory | persisted snapshot always won over config (swap#130) | a configured `total` *above* the snapshot raises the pool (new capital); below is left alone |
 | `/health` | — | `+ ilpAddress, rfqDestination, fillDestination, legB, sessions` |
 
 ## Operating it
 
-1. Run a Rust connector with `[settlement.*]` for every chain the maker accepts
-   leg A on, and the two `[[routes]]` above. The route price is the fill size;
-   set the maker's `fillAmount` to the same figure so quotes can say it (the
-   maker uses `X-TOON-Amount` as the truth either way).
-2. Point the maker's `chainProviders` at the chains it pays leg B on:
-   EVM `channelAddress` (the `RollingSwapChannel`), Solana `programId` + `tokenMint`.
-3. Open and fund leg-B channels: EVM from the maker's index-2 key; Solana one
-   PDA per recipient (the maker's index-2 Solana key is the depositor).
-4. Fund the connector's settlement keys with gas.
-5. `GET /health` names the two ILP destinations to hand takers; the connector's
+1. Run a Rust connector whose `[settlement.evm.key]` / `[settlement.solana.key]`
+   are the maker's **index-2 keys** (`toon-swap` prints them at boot), with
+   `[settlement.*]` for every chain the maker trades on, and the two `[[routes]]`
+   above. The route price is the fill size; set the maker's `fillAmount` to the
+   same figure (the maker uses `X-TOON-Amount` as the truth either way).
+2. Point the maker's `chainProviders` at the same chains: EVM
+   `tokenNetworkAddress` (the fleet's `TokenNetwork`) + `channelDeposit`, Solana
+   `programId` + `tokenMint` + `channelDeposit`.
+3. Fund the index-2 keys: gas on each chain, and the token the maker pays leg B
+   in (an SPL ATA on Solana). Every taker's first fill draws `channelDeposit`
+   from that balance; top-ups draw more. `inventory` is the ceiling the maker is
+   willing to issue against — keep it at or below what the keys hold.
+4. `GET /health` names the two ILP destinations to hand takers; the connector's
    `GET /ilp` names the sealing key and the settlement facts takers open leg-A
-   channels against.
+   channels against — which are now also the leg-B facts.
 
 The deployed devnet maker (`connector/infra/linode-relay/`) still runs the 2.x
 sidecar with its own dead connector. Moving it means a maker-side Rust
-connector on the relay box (compose + toml + nginx) — tracked in
-toon-protocol/connector, see the PR that landed this document.
+connector on the relay box settling with the maker's keys —
+toon-protocol/connector#1247.
 
 ## What is still open
 
@@ -167,9 +205,16 @@ toon-protocol/connector, see the PR that landed this document.
   never accepts another fill on that session the credit is stranded. The RFQ
   states `maxAmount` so a taker can avoid the common case (over-running
   liquidity), and a rate-staleness refusal is the only other benign path.
-- **Solana leg-B channels are pre-provisioned**, one PDA per recipient. Opening
-  them on demand needs the maker to submit `InitializeChannel` + `Deposit`
-  itself (or ask its connector's operator surface to); not built.
+- **Capital is per taker.** Each taker's channel holds `channelDeposit` (plus
+  top-ups) of the maker's capital until that channel settles; the maker's
+  wallet is the pool. A pooled contract with per-recipient tabs *and* reserved
+  collateral would recover the efficiency without reintroducing the
+  `RollingSwapChannel` weakness — a future program, on both chains.
+- **The connector must redeem leg A before a channel it shares settles.** With
+  one channel per pair, a taker closing the Solana channel to cash out leg B
+  also starts the challenge window on the leg-A claims the maker's connector
+  holds; redeeming those within the window is the connector's job
+  (`POST /channels/:id/redeem-latest`).
 - **Discovery.** ADR 0046 removed the announce and named no replacement. A taker
   is handed the maker's connector URL out of band today.
 - **toon-client** still speaks `rolling/1`; `packages/swap/tests/e2e/helpers`

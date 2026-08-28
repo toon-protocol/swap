@@ -7,7 +7,7 @@
 
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { ed25519 } from '@noble/curves/ed25519.js';
-import { recoverEvmClaimSigner } from '@toon-protocol/settlement-digest';
+import { recoverTypedDataAddress, type Hex } from 'viem';
 import { base58Encode } from '@toon-protocol/sdk';
 
 import { startSwapNode } from './swap-node.js';
@@ -16,6 +16,7 @@ import { deriveSolanaChannelPda } from './solana-pda.js';
 import { deriveSwapNodeKeys } from './wallet.js';
 import { solanaBalanceProofMessage } from './payment-channel-signer.js';
 import { SWAP_WIRE_PROTOCOL } from './wire.js';
+import { TOKEN_NETWORK_BALANCE_PROOF_TYPES } from './payment-channel-signer.js';
 import type { SwapAdvance, SwapQuote, SwapRefusal } from './wire.js';
 
 const MNEMONIC =
@@ -24,7 +25,7 @@ const EVM_TARGET = 'evm:31337';
 const SOL_TARGET = 'solana:localnet';
 const PROGRAM_ID = 'HY4AYFNe5Vg5BkEwAURNsGY3uFAvGMNpAQPRtgoasJiR';
 const MINT = 'H8HSreUF2s8r8hem4qMttE3bWYCpFuh71jbuos5bA77H';
-const ROLLING_CHANNEL = '0x' + 'd3'.repeat(20);
+const TOKEN_NETWORK = '0x' + 'd3'.repeat(20);
 const EVM_CHANNEL_ID = '0x' + '01'.repeat(32);
 const EVM_RECIPIENT = '0x' + 'ab'.repeat(20);
 const SOL_RECIPIENT = base58Encode(new Uint8Array(32).fill(5));
@@ -110,7 +111,7 @@ beforeAll(async () => {
         rpcUrl: 'http://127.0.0.1:1',
         registryAddress: '0x' + '11'.repeat(20),
         tokenAddress: '0x' + '22'.repeat(20),
-        channelAddress: ROLLING_CHANNEL,
+        tokenNetworkAddress: TOKEN_NETWORK,
       },
       {
         chainType: 'solana',
@@ -143,7 +144,7 @@ describe('health', () => {
     expect(h.status).toBe('ok');
     expect(h.rfqDestination).toBe('g.test.maker.rfq');
     expect(h.fillDestination).toBe('g.test.maker');
-    expect(h.legB[EVM_TARGET]?.verifyingContract).toBe(ROLLING_CHANNEL);
+    expect(h.legB[EVM_TARGET]?.verifyingContract).toBe(TOKEN_NETWORK);
     expect(h.legB[SOL_TARGET]?.programId).toBe(PROGRAM_ID);
     expect(instance.ilpAddress).toBe('g.test.maker');
   });
@@ -170,7 +171,7 @@ describe('RFQ', () => {
       amount: '1000000',
       chain: 'solana:localnet',
     });
-    expect(q.legB.verifyingContract).toBe(ROLLING_CHANNEL);
+    expect(q.legB.verifyingContract).toBe(TOKEN_NETWORK);
     expect(q.legB.swapSignerAddress).toMatch(/^0x[0-9a-f]{40}$/);
     expect(q.maxAmount).toBe('10000000');
     expect(q.expiresAt).toBeGreaterThan(Date.now());
@@ -270,17 +271,27 @@ describe('fill → EVM leg B', () => {
     expect(a.nonce).toBe('1');
     expect(a.cumulativeAmount).toBe('4000000');
     expect(a.recipient).toBe(EVM_RECIPIENT);
-    const recovered = recoverEvmClaimSigner(
-      {
-        channelId: a.channelId,
-        cumulativeAmount: a.cumulativeAmount,
-        nonce: a.nonce,
-        recipient: a.recipient,
+    // The claim is the fleet's ordinary TokenNetwork balance proof — the
+    // same message a taker signs to pay leg A — recoverable under the
+    // TokenNetwork/1 domain of the advertised verifyingContract.
+    const recovered = await recoverTypedDataAddress({
+      domain: {
+        name: 'TokenNetwork',
+        version: '1',
         chainId: 31337n,
-        verifyingContract: ROLLING_CHANNEL,
+        verifyingContract: a.legB.verifyingContract as Hex,
       },
-      Uint8Array.from(Buffer.from(a.claim, 'base64'))
-    );
+      types: TOKEN_NETWORK_BALANCE_PROOF_TYPES,
+      primaryType: 'BalanceProof',
+      message: {
+        channelId: a.channelId as Hex,
+        nonce: BigInt(a.nonce),
+        transferredAmount: BigInt(a.cumulativeAmount),
+        lockedAmount: 0n,
+        locksRoot: `0x${'00'.repeat(32)}` as Hex,
+      },
+      signature: `0x${Buffer.from(a.claim, 'base64').toString('hex')}` as Hex,
+    });
     expect(recovered.toLowerCase()).toBe(a.swapSignerAddress.toLowerCase());
     expect(a.receipt).toBeDefined();
   });

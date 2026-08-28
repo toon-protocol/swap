@@ -76,15 +76,8 @@ function evmChannelsResult(cumulativePaid: bigint): string {
   const word = (hex: string) => hex.toLowerCase().padStart(64, '0');
   return (
     '0x' +
-    [
-      word('11'.repeat(20)),
-      word('22'.repeat(20)),
-      word('3'),
-      word(cumulativePaid.toString(16)),
-      word('0'),
-      word('0'),
-      word('1'),
-    ].join('')
+    // TokenNetwork.participants(channelId, maker): (deposit, nonce, transferredAmount)
+    [word('0'), word('3'), word(cumulativePaid.toString(16))].join('')
   );
 }
 
@@ -130,7 +123,8 @@ describe('createChannelOnChainReader (issue #141)', () => {
           {
             chainId: EVM_CHAIN,
             rpcUrl: evmRpc,
-            channelAddress: CHANNEL_ADDRESS,
+            tokenNetworkAddress: CHANNEL_ADDRESS,
+            makerAddress: '0x' + '55'.repeat(20),
           },
         ],
         solana: [
@@ -169,7 +163,8 @@ describe('createChannelOnChainReader (issue #141)', () => {
           {
             chainId: EVM_CHAIN,
             rpcUrl: evmRpc,
-            channelAddress: CHANNEL_ADDRESS,
+            tokenNetworkAddress: CHANNEL_ADDRESS,
+            makerAddress: '0x' + '55'.repeat(20),
           },
         ],
       }),

@@ -56,11 +56,15 @@ export type {
   EvmPaymentChannelSignerConfig,
   MinaPaymentChannelSignerConfig,
   SolanaPaymentChannelSignerConfig,
+  TokenNetworkBalanceProofSignerConfig,
 } from './payment-channel-signer.js';
 export {
   EvmPaymentChannelSigner,
   MinaPaymentChannelSigner,
   SolanaPaymentChannelSigner,
+  TokenNetworkBalanceProofSigner,
+  TOKEN_NETWORK_BALANCE_PROOF_TYPES,
+  tokenNetworkBalanceProofDigest,
   solanaBalanceProofMessage,
   SOLANA_BALANCE_PROOF_DOMAIN_TAG,
   SOLANA_BALANCE_PROOF_MESSAGE_SIZE,
@@ -243,6 +247,29 @@ export {
 } from './maker-app.js';
 export type { MakerAppDeps, MakerAppLogger } from './maker-app.js';
 export { deriveSolanaChannelPda, findProgramAddress } from './solana-pda.js';
+export {
+  createSolanaLegBChannelProvisioner,
+  decodeSolanaChannelAccount,
+  DEFAULT_SOLANA_CHALLENGE_DURATION_SECONDS,
+} from './solana-leg-b-channel.js';
+export type {
+  SolanaLegBChannelProvisioner,
+  SolanaLegBChannelProvisionerConfig,
+  SolanaChannelAccount,
+  EnsuredSolanaChannel,
+} from './solana-leg-b-channel.js';
+export {
+  createEvmLegBChannelProvisioner,
+  deriveEvmChannelId,
+  sortEvmParticipants,
+  DEFAULT_EVM_SETTLEMENT_TIMEOUT_SECONDS,
+} from './evm-leg-b-channel.js';
+export type {
+  EvmLegBChannelProvisioner,
+  EvmLegBChannelProvisionerConfig,
+  EvmChannelSlot,
+  EnsuredEvmChannel,
+} from './evm-leg-b-channel.js';
 export {
   createHttpRateProvider,
   DEFAULT_RATE_FETCH_TIMEOUT_MS,

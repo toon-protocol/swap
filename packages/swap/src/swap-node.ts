@@ -42,9 +42,9 @@ import {
 import type { ReconcileResult } from './inventory-reconciler.js';
 import { registerAdminRoutes } from './admin-surface.js';
 import {
-  EvmPaymentChannelSigner,
   MinaPaymentChannelSigner,
   SolanaPaymentChannelSigner,
+  TokenNetworkBalanceProofSigner,
 } from './payment-channel-signer.js';
 import type { PaymentChannelSigner } from './payment-channel-signer.js';
 import { MultiChainClaimIssuer } from './claim-issuer.js';
@@ -59,6 +59,10 @@ import type { MaxRateAgeConfig, SwapRateProvider } from './rate-staleness.js';
 import { MakerEngine } from './maker-engine.js';
 import { registerMakerRoutes } from './maker-app.js';
 import { deriveSolanaChannelPda } from './solana-pda.js';
+import { createSolanaLegBChannelProvisioner } from './solana-leg-b-channel.js';
+import type { SolanaLegBChannelProvisioner } from './solana-leg-b-channel.js';
+import { createEvmLegBChannelProvisioner } from './evm-leg-b-channel.js';
+import type { EvmLegBChannelProvisioner } from './evm-leg-b-channel.js';
 import type { SwapLegBTerms } from './wire.js';
 
 // ---------------------------------------------------------------------------
@@ -77,18 +81,31 @@ export interface SwapNodeEvmChainProvider {
   /** Exact-match chain id string the pairs use, e.g. `evm:84532`. */
   chainId: string;
   rpcUrl: string;
-  /** TokenNetworkRegistry — used by the chain-truth reconciler. */
+  /** TokenNetworkRegistry — informational; the fleet's one deployment. */
   registryAddress: string;
   /** The ERC-20 leg-B claims pay out in (advertised in every quote). */
   tokenAddress: string;
   /**
-   * Leg A's `TokenNetwork`. Accepted for config compatibility and echoed in
-   * `/health`; the maker itself no longer verifies leg A — its connector
-   * does, from the connector's own `[settlement.evm]`.
+   * The deployed `TokenNetwork` — where leg-B channels live and the EIP-712
+   * `verifyingContract` every leg-B claim is signed under. The same contract
+   * the taker pays leg A on.
    */
-  tokenNetworkAddress?: string;
-  /** Leg B: the deployed `RollingSwapChannel`, the EIP-712 v2 `verifyingContract`. */
-  channelAddress: string;
+  tokenNetworkAddress: string;
+  /**
+   * @deprecated 2.x: the `RollingSwapChannel`. Leg B no longer uses it;
+   * accepted and ignored so a committed 2.x config boots.
+   */
+  channelAddress?: string;
+  /**
+   * Enables on-demand leg-B channels: at a taker's first paid fill the maker
+   * opens the (maker, taker) `TokenNetwork` channel itself (if the taker has
+   * not already, paying leg A) and deposits this much (base units) from its
+   * index-2 key, topping up whenever a claim would exceed what it holds.
+   * Without it, channels must be pre-opened and listed under `channels`.
+   */
+  channelDeposit?: bigint | string | number;
+  /** `settlementTimeout` written into channels the maker opens (default 1 day; contract floor 1 h). */
+  settlementTimeoutSeconds?: number;
 }
 
 export interface SwapNodeSolanaChainProvider {
@@ -101,6 +118,16 @@ export interface SwapNodeSolanaChainProvider {
   /** The SPL mint leg-B channels are opened for — needed to derive channel PDAs. */
   tokenMint: string;
   cluster?: string;
+  /**
+   * Enables on-demand leg-B channels: at a taker's first paid fill the maker
+   * opens the (maker, taker, mint) channel itself and deposits this much
+   * (base units) from its index-2 key's token account, topping up whenever
+   * a claim would exceed what the channel holds. Without it, channels must
+   * be pre-opened by the operator and listed under `channels`.
+   */
+  channelDeposit?: bigint | string | number;
+  /** Challenge window written into channels the maker opens (default 1 day). */
+  challengeDurationSeconds?: number;
 }
 
 export interface SwapNodeMinaChainProvider {
@@ -309,7 +336,7 @@ function requireEvmChainProvider(
   if (!provider) {
     throw new SwapNodeStartError(
       'INVALID_CONFIG',
-      `SwapNodeConfig.chainProviders is missing an entry for pair.to.chain="${chain}" — a "channelAddress" (deployed RollingSwapChannel address) is required to sign v2 balance proofs on this chain`
+      `SwapNodeConfig.chainProviders is missing an entry for pair.to.chain="${chain}" — a "tokenNetworkAddress" (the deployed TokenNetwork leg-B channels live on) is required to sign balance proofs on this chain`
     );
   }
   return provider;
@@ -333,7 +360,7 @@ const SWAP_REQUIRED_PROVIDER_FIELDS: Record<
   SwapNodeChainProvider['chainType'],
   readonly string[]
 > = {
-  evm: ['chainId', 'rpcUrl', 'registryAddress', 'tokenAddress', 'channelAddress'],
+  evm: ['chainId', 'rpcUrl', 'registryAddress', 'tokenAddress', 'tokenNetworkAddress'],
   solana: ['chainId', 'rpcUrl', 'programId', 'tokenMint'],
   mina: ['chainId', 'graphqlUrl', 'zkAppAddress'],
 };
@@ -352,6 +379,19 @@ function validateChainProviderEntry(p: unknown, i: number): void {
       'INVALID_CONFIG',
       `SwapNodeConfig.chainProviders[${i}].chainType MUST be one of 'evm' | 'solana' | 'mina' (got ${JSON.stringify(chainType)})`
     );
+  }
+  if ((chainType === 'solana' || chainType === 'evm') && rec['channelDeposit'] !== undefined) {
+    const v = rec['channelDeposit'];
+    const ok =
+      (typeof v === 'bigint' && v > 0n) ||
+      (typeof v === 'number' && Number.isInteger(v) && v > 0) ||
+      (typeof v === 'string' && /^[1-9][0-9]*$/.test(v));
+    if (!ok) {
+      throw new SwapNodeStartError(
+        'INVALID_CONFIG',
+        `SwapNodeConfig.chainProviders[${i}].channelDeposit MUST be a positive integer (base units)`
+      );
+    }
   }
   for (const k of SWAP_REQUIRED_PROVIDER_FIELDS[chainType]) {
     const v = rec[k];
@@ -471,10 +511,17 @@ export function validateConfig(config: SwapNodeConfig): void {
       );
     }
     const chanList = config.channels[chain];
-    if (!Array.isArray(chanList) || chanList.length === 0) {
+    const onDemand =
+      (fam === 'evm' &&
+        findChainProvider(config.chainProviders, 'evm', chain)?.channelDeposit !==
+          undefined) ||
+      (fam === 'solana' &&
+        findChainProvider(config.chainProviders, 'solana', chain)?.channelDeposit !==
+          undefined);
+    if (!Array.isArray(chanList) || (chanList.length === 0 && !onDemand)) {
       throw new SwapNodeStartError(
         'INVALID_CONFIG',
-        `SwapNodeConfig.channels["${chain}"] MUST be a non-empty array`
+        `SwapNodeConfig.channels["${chain}"] MUST be a non-empty array, or chainProviders[].channelDeposit must be set so the maker opens leg-B channels on demand`
       );
     }
     const inv = config.inventory[chain];
@@ -599,6 +646,8 @@ export async function startSwapNode(
   const signers: Record<string, PaymentChannelSigner> = {};
   const legBTerms: Record<string, SwapLegBTerms> = {};
   const solanaLegB: Record<string, { programId: string; mint: string }> = {};
+  const solanaProvisioners: Record<string, SolanaLegBChannelProvisioner> = {};
+  const evmProvisioners: Record<string, EvmLegBChannelProvisioner> = {};
   const distinctTargetChains = Array.from(
     new Set(config.swapPairs.map((p) => p.to.chain))
   );
@@ -608,19 +657,38 @@ export async function startSwapNode(
     const swapSignerAddress = signerAddresses[chain] as string;
     if (chain.startsWith('evm:')) {
       const provider = requireEvmChainProvider(config.chainProviders, chain);
-      signers[chain] = new EvmPaymentChannelSigner({
+      const evmKeys = swapNodeKeys.evm as NonNullable<SwapNodeKeys['evm']>;
+      signers[chain] = new TokenNetworkBalanceProofSigner({
         chain,
-        privateKey: (swapNodeKeys.evm as NonNullable<SwapNodeKeys['evm']>)
-          .privateKey,
+        privateKey: evmKeys.privateKey,
         chainId: parseEvmChainId(chain),
-        verifyingContract: provider.channelAddress,
+        tokenNetworkAddress: provider.tokenNetworkAddress,
       });
       legBTerms[chain] = {
         chain,
         swapSignerAddress,
-        verifyingContract: provider.channelAddress,
+        verifyingContract: provider.tokenNetworkAddress,
         token: provider.tokenAddress,
       };
+      if (provider.channelAddress !== undefined) {
+        logger.warn?.('swap.config.retired_key_ignored', {
+          key: `chainProviders[${chain}].channelAddress`,
+          why: 'leg B rides the TokenNetwork (tokenNetworkAddress), not the RollingSwapChannel',
+        });
+      }
+      if (provider.channelDeposit !== undefined) {
+        evmProvisioners[chain] = createEvmLegBChannelProvisioner({
+          rpcUrl: provider.rpcUrl,
+          tokenNetworkAddress: provider.tokenNetworkAddress,
+          tokenAddress: provider.tokenAddress,
+          makerPrivateKey: evmKeys.privateKey,
+          channelDeposit: BigInt(provider.channelDeposit),
+          ...(provider.settlementTimeoutSeconds !== undefined && {
+            settlementTimeoutSeconds: BigInt(provider.settlementTimeoutSeconds),
+          }),
+          logger: { info: logger.info, warn: logger.warn },
+        });
+      }
     } else if (chain.startsWith('solana:')) {
       const provider = requireSolanaChainProvider(config.chainProviders, chain);
       signers[chain] = new SolanaPaymentChannelSigner({
@@ -640,6 +708,21 @@ export async function startSwapNode(
         programId: provider.programId,
         mint: provider.tokenMint,
       };
+      if (provider.channelDeposit !== undefined) {
+        solanaProvisioners[chain] = createSolanaLegBChannelProvisioner({
+          rpcUrl: provider.rpcUrl,
+          programId: provider.programId,
+          tokenMint: provider.tokenMint,
+          makerSeed: (
+            swapNodeKeys.solana as NonNullable<SwapNodeKeys['solana']>
+          ).privateKey,
+          channelDeposit: BigInt(provider.channelDeposit),
+          ...(provider.challengeDurationSeconds !== undefined && {
+            challengeDurationSeconds: provider.challengeDurationSeconds,
+          }),
+          logger: { info: logger.info, warn: logger.warn },
+        });
+      }
     } else if (chain.startsWith('mina:')) {
       const keys = swapNodeKeys.mina as NonNullable<SwapNodeKeys['mina']>;
       sharedMinaSigner ??= new MinaPaymentChannelSigner({
@@ -785,9 +868,16 @@ export async function startSwapNode(
       };
     }
   }
-  const evmChannelReaderProviders = (config.chainProviders ?? []).filter(
-    (p): p is SwapNodeEvmChainProvider => p.chainType === 'evm'
-  );
+  const evmChannelReaderProviders = swapNodeKeys.evm
+    ? (config.chainProviders ?? [])
+        .filter((p): p is SwapNodeEvmChainProvider => p.chainType === 'evm')
+        .map((p) => ({
+          chainId: p.chainId,
+          rpcUrl: p.rpcUrl,
+          tokenNetworkAddress: p.tokenNetworkAddress,
+          makerAddress: (swapNodeKeys.evm as NonNullable<SwapNodeKeys['evm']>).address,
+        }))
+    : [];
   const solanaChannelReaderProviders: SolanaChannelReaderProvider[] = [];
   if (swapNodeKeys.solana) {
     const payerPubkey = base58Encode(swapNodeKeys.solana.publicKey);
@@ -899,6 +989,61 @@ export async function startSwapNode(
         return undefined;
       }
     },
+    ...((Object.keys(solanaProvisioners).length > 0 ||
+      Object.keys(evmProvisioners).length > 0) && {
+      ensureChannel: async (pair, recipient, targetAmount) => {
+        const chain = pair.to.chain;
+        const asset = pair.to.assetCode;
+        const outstanding = (channelId: string): bigint =>
+          channelState.snapshot().channels[`${asset}:${chain}:${channelId}`]
+            ?.cumulativeAmount ?? 0n;
+        const provisionKnown = (
+          channelId: string,
+          seed: { nonce: bigint; cumulativeAmount: bigint }
+        ): void => {
+          if (channelState.snapshot().channels[`${asset}:${chain}:${channelId}`]) return;
+          // A channel this maker has already been redeemed on (state lost, or
+          // opened by the taker when it paid leg A) starts from its on-chain
+          // watermark, never from zero: a claim below it is `InvalidNonce`.
+          channelState.provisionChannel({
+            assetCode: asset,
+            chain,
+            channelId,
+            nonce: seed.nonce,
+            cumulativeAmount: seed.cumulativeAmount,
+          });
+          if (persister) persister.persist();
+        };
+
+        const sol = solanaProvisioners[chain];
+        if (sol) {
+          const channelId = sol.channelFor(recipient);
+          const ensured = await sol.ensure(recipient, outstanding(channelId) + targetAmount);
+          const acct = await sol.read(recipient);
+          const makerIsA = acct?.participantA === sol.makerPubkey;
+          provisionKnown(ensured.channelId, {
+            nonce: acct ? (makerIsA ? acct.nonceA : acct.nonceB) : 0n,
+            cumulativeAmount: acct
+              ? makerIsA
+                ? acct.transferredAmountA
+                : acct.transferredAmountB
+              : 0n,
+          });
+          return ensured.channelId;
+        }
+        const evm = evmProvisioners[chain];
+        if (evm) {
+          const channelId = await evm.channelFor(recipient);
+          const ensured = await evm.ensure(recipient, outstanding(channelId) + targetAmount);
+          provisionKnown(ensured.channelId, {
+            nonce: ensured.nonce,
+            cumulativeAmount: ensured.transferredAmount,
+          });
+          return ensured.channelId;
+        }
+        return undefined;
+      },
+    }),
     ...(config.quote?.ttlMs !== undefined && { quoteTtlMs: config.quote.ttlMs }),
     ...(config.quote?.sessionTtlMs !== undefined && {
       sessionTtlMs: config.quote.sessionTtlMs,
