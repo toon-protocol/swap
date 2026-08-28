@@ -21,7 +21,6 @@ import { base58Encode } from '@toon-protocol/sdk';
 
 import { startSwapNode } from './swap-node.js';
 import type {
-  SwapNodeConfig,
   SwapNodeMinaChainProvider,
   SwapNodeInstance,
 } from './swap-node.js';
@@ -46,20 +45,6 @@ function must<T>(value: T | null | undefined, what: string): T {
   return value;
 }
 
-function stubConnector(): SwapNodeConfig['connector'] {
-  return {
-    sendPacket: async () => ({
-      type: 'reject' as const,
-      code: 'F02',
-      message: 'no route (fixture)',
-    }),
-    registerPeer: async () => undefined,
-    removePeer: async () => undefined,
-    setPacketHandler: () => undefined,
-    close: async () => undefined,
-  } as unknown as SwapNodeConfig['connector'];
-}
-
 async function bootMinaMaker(): Promise<{
   instance: SwapNodeInstance;
   issuer: MultiChainClaimIssuer;
@@ -73,16 +58,13 @@ async function bootMinaMaker(): Promise<{
   };
   const instance = await startSwapNode({
     mnemonic: VALID_MNEMONIC,
-    connector: stubConnector(),
-    relayUrls: ['ws://localhost:0'],
     blsPort: 0,
-    publisher: { publish: async () => undefined },
-    chains: ['mina'],
+    chains: ['evm', 'mina'],
     adminToken: 'operator-secret',
     reconcileIntervalMs: 0,
     swapPairs: [
       {
-        from: { assetCode: ASSET, assetScale: 6, chain: MINA_CHAIN },
+        from: { assetCode: ASSET, assetScale: 6, chain: 'evm:8453' },
         to: { assetCode: ASSET, assetScale: 6, chain: MINA_CHAIN },
         rate: '1.0',
       },
@@ -98,7 +80,18 @@ async function bootMinaMaker(): Promise<{
       ],
     },
     inventory: { [MINA_CHAIN]: START_INVENTORY },
-    chainProviders: [minaProvider],
+    chainProviders: [
+      minaProvider,
+      // Leg A is paid on evm:8453, so the maker needs its EVM facts there.
+      {
+        chainType: 'evm',
+        chainId: 'evm:8453',
+        rpcUrl: 'http://127.0.0.1:1',
+        registryAddress: '0x' + '11'.repeat(20),
+        tokenAddress: '0x' + '22'.repeat(20),
+        tokenNetworkAddress: '0x' + '33'.repeat(20),
+      },
+    ],
     __testHooks: {
       onClaimIssuerBuilt: (ci) => {
         issuer = ci;
@@ -120,11 +113,16 @@ async function readAdminReport(
 }
 
 describe('issue #141 — a Mina maker stays unrecycled, visibly and on purpose', () => {
-  it('[P0] configuring a Mina chainProvider does NOT enable the reconciler', async () => {
+  it('[P0] the reconciler runs (the maker reads EVM for leg A) but the Mina pool is never recycled', async () => {
     const { instance } = await bootMinaMaker();
     try {
       const report = await readAdminReport(instance);
-      expect(report.reconciler.enabled).toBe(false);
+      // Leg A is paid on EVM, so an EVM reader exists and the reconciler is
+      // armed — but it can read nothing about the Mina channel.
+      expect(report.reconciler.enabled).toBe(true);
+      const result = await instance.reconcileInventory();
+      expect(result.channels.every((c) => c.redeemed === null)).toBe(true);
+      expect(result.errors.join('\n')).toMatch(/mina/i);
     } finally {
       await instance.stop();
     }
@@ -134,7 +132,7 @@ describe('issue #141 — a Mina maker stays unrecycled, visibly and on purpose',
     const { instance, issuer } = await bootMinaMaker();
     try {
       const pair = {
-        from: { assetCode: ASSET, assetScale: 6, chain: MINA_CHAIN },
+        from: { assetCode: ASSET, assetScale: 6, chain: 'evm:8453' },
         to: { assetCode: ASSET, assetScale: 6, chain: MINA_CHAIN },
         rate: '1.0',
       };
@@ -153,11 +151,10 @@ describe('issue #141 — a Mina maker stays unrecycled, visibly and on purpose',
       });
 
       const result = await instance.reconcileInventory();
-      expect(result.pools).toEqual([]);
-      expect(result.channels).toEqual([]);
-      expect(must(result.errors[0], 'an explanation')).toMatch(
-        /no on-chain reader configured/
-      );
+      // The Mina channel is observed but unreadable: nothing is credited.
+      expect(result.channels).toHaveLength(1);
+      expect(must(result.channels[0], 'the mina channel').redeemed).toBeNull();
+      expect(must(result.errors[0], 'an explanation')).toMatch(/mina/i);
 
       // The liability stays booked — under-recycling is the safe failure.
       const pool = must((await readAdminReport(instance)).pools[0], 'pool');

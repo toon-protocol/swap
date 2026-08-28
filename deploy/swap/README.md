@@ -1,94 +1,102 @@
-# swap runtime image (issue #124)
+# swap runtime image
 
-Runtime container for the TS rolling-swap **maker** node. Built from
-`deploy/swap/Dockerfile` (repo-root build context); entrypoint is the
-`toon-swap` CLI (`packages/swap/src/cli.ts`).
+Runtime container for the rolling-swap **maker**. Built from `deploy/swap/Dockerfile`
+(repo-root build context); entrypoint is the `toon-swap` CLI (`packages/swap/src/cli.ts`).
+
+The maker is a **relay-mediated swap client** — it embeds no connector, sits behind none, opens
+no listener a taker could reach, and publishes no kind:10032. It publishes an **order** on the
+relay and answers gift-wrapped fills from its inbox, paying the relay's connector for every write.
+Read [`docs/relay-swap.md`](../../docs/relay-swap.md) first; this file is the config-surface
+reference.
 
 ```
 docker build -f deploy/swap/Dockerfile -t swap .
-docker run --rm -p 3400:3400 \
+docker run --rm -p 127.0.0.1:8080:8080 \
   -v "$(pwd)/swap.config.json:/app/config/swap.config.json:ro" \
-  -e SWAP_MNEMONIC="$(cat mnemonic.txt)" \
+  -e SWAP_AUTOGEN_IDENTITY=1 \
   swap
 ```
 
-This does **not** deploy anything to a box — it only produces a pullable
-image. On-box provisioning (identity generation, DNS/TLS, gas funding, the
-connector-side compose service) is a separate, human-gated ticket
-(toon-meta#402).
+## The relay it trades on
+
+Two URLs: the relay's free NIP-01 read endpoint and the relay connector's client edge, where
+writes are paid (`g.toon.relay`, 1 µUSDC on the devnet). The maker opens (or adopts) its own
+channel with that connector on `relay.payChain` from its index-2 key — so that key needs native
+gas and the settlement token there.
+
+```json
+"relay": {
+  "readUrl": "wss://relay-ws.devnet.toonprotocol.dev",
+  "connectorUrl": "https://proxy.relay.devnet.toonprotocol.dev/ilp",
+  "payChain": "evm",
+  "deposit": "1000000"
+}
+```
+
+Without `relay.connectorUrl` the maker boots **offline** — `/health` and `/admin` answer, no
+order is published, no fill is answered — and logs `swap.config.relay_offline`. A committed
+fleet config that predates this key therefore still boots (CLAUDE.md › "Config first, code
+second"); add the key to make it trade. `GET /health` reports `relay: { connected, eose, cursor }`,
+the published orders and the inbound watermarks.
 
 ## Config file (`/app/config/swap.config.json` by default)
 
-Mounted read-only at the path the `CMD` passes to `--config` (override with
-a different `--config <path>` in the container's command). JSON, same shape
-`startSwapNode()` consumes. Fields relevant to the proven standalone-maker
-wiring (`scratchpad/t6/maker.mjs` — a driving-session scratch file, not
-checked into this repo):
+Mounted read-only at the path the `CMD` passes to `--config`. JSON, the shape `startSwapNode()`
+consumes:
 
 | Field | Required | Notes |
 | --- | --- | --- |
-| `swapPairs` | yes | Non-empty array of `{ from, to, rate }` (`{ assetCode, assetScale, chain }` legs). |
-| `chains` | yes | e.g. `["evm"]`. |
-| `channels` | yes | Per-chain seed `ChannelEntry[]` (`channelId`, `cumulativeAmount`, `nonce`, `updatedAt`). |
-| `inventory` | yes | Per-chain starting inventory (string/number, coerced to `bigint`). |
-| `relayUrls` | yes | Nostr relay WS URLs (legacy fallback publish path — see `peerInfoIlpDestination` below). |
-| `windowBudget` | no | Issue #49 per-chain in-flight window ceiling. |
-| `blsPort` | no | `/health` HTTP port. |
-| `btpServerPort` | no | **Required for the proven standalone-maker wiring** — no `connectorUrl`/`connector` set + this present = auto-created embedded `ConnectorNode` with no parent, self-routed. |
-| `statePath` | no | Durable state snapshot path (issue #46) — mount a volume here to persist inventory/watermarks/bindings across restarts. The image pre-creates `/app/state`, owned by the runtime `swap` user (uid `10001`), as the intended mount point — see "Runtime user & filesystem" below. |
-| `chainProviders` | yes for EVM settlement | Array of `{ chainType: "evm", chainId, rpcUrl, registryAddress, tokenAddress, tokenNetworkAddress, channelAddress, keyId? }` (or the `solana`/`mina` variants — see `SwapNodeChainProvider` in `swap-node.ts`). **Two different contracts, both required** for any EVM chain a `swapPair` targets — boot refuses otherwise: `tokenNetworkAddress` is **leg A**, the deployed `TokenNetwork` a *client* calls `openChannel(address,uint256)` on to open the channel it pays this maker over (this is what the kind:10032 `tokenNetworks` entry advertises, and it must be the same fleet-wide `TokenNetwork` deployment the relay/store/apex announce for this chain+token); `channelAddress` is **leg B**, the deployed `RollingSwapChannel` this maker signs v2 EIP-712 balance-proof claims against (advertised separately as `swapVerifyingContracts`). Never set them to the same address — see issue #133. `keyId` defaults to `settlementPrivateKey` (or the identity secret key) when omitted. |
-| `settlementPrivateKey` | no | Hex EVM private key for the claim signer / `chainProviders[].keyId` default. In the proven wiring this is the **same BIP-44 account-index-2 key** used as the connector `keyId`. **Issue #126:** when the identity is a mnemonic and this is unset (or a `0xdead…`-style placeholder), the CLI auto-derives it via `deriveSwapNodeKeys` (index-2) — a committed skeleton can ship a placeholder here and rely on the CLI to fill in the real key, whether or not `identityAutogen` is used. |
-| `identityAutogen` | no | **Issue #126.** When `true` (or `SWAP_AUTOGEN_IDENTITY=1`) and no identity is otherwise provided, self-generates a BIP-39 mnemonic and persists it to an identity file (mode 600, default beside `statePath`) so restarts reuse the same identity. No-op if `mnemonic`/`secretKey` is set. |
-| `ilpAddress` | no | Advertised ILP address + self-route prefix. Default `g.toon.swap.<pubkey16>`. |
-| `btpEndpoint` | no | **Public** `wss://host:port` BTP endpoint advertised in kind:10032 — the "direct-dial" reachability path a client uses to reach a deployed maker with no parent connector (toon-meta#402). |
-| `advertisedAsset` | no | `{ assetCode, assetScale }` for kind:10032. Default `{ USD, 6 }`. |
-| `peerInfoIlpDestination` | no | **Issue #124.** ILP address of a relay that stores events, e.g. the apex `g.townhouse` — routes the paid kind:10032 announce over ILP through the connector instead of the (pay-to-write-rejected) unpaid Nostr WS publish. Requires a connector (`btpServerPort` standalone mode, or `connectorUrl`). |
-| `peerInfoPricePerByte` | no | Price-per-byte (string/number → `bigint`) for the `peerInfoIlpDestination` ILP PREPARE `amount`. Default `0`. |
-| `passphrase` | no | BIP-39 passphrase. |
-| `knownPeers`, `transport`, `connectorUrl`, `parentPeerId`, `parentAuthToken`, `nodeId`, `parentEvmAddress`, `maxRateAge` | no | See `packages/swap/src/cli.ts` header + `SwapNodeConfig` — not part of the proven standalone wiring, only needed for the embedded-with-parent / rate-feed / privacy-overlay variants. |
+| `swapPairs` | yes | Non-empty array of `{ from, to, rate }` (`{ assetCode, assetScale, chain }` legs). `from.chain` must be `evm:*` or `solana:*`. |
+| `chains` | yes | Families the maker derives keys for: `["evm", "solana", "mina"]` subset, covering every `from.chain` **and** every `to.chain` (the maker is paid on `from.chain` and needs its address there). |
+| `channels` | no, when `channelDeposit` is set | Per `to.chain`: pre-opened leg-B channels `[{ channelId, cumulativeAmount, nonce, updatedAt }]` — the (maker, taker) `TokenNetwork` channel id on EVM, the (maker, taker, mint) PDA on Solana. Leave empty and set `chainProviders[].channelDeposit` to let the maker open and fund them on demand. |
+| `inventory` | yes | Per `to.chain`: leg-B capital in base units. A value **above** the persisted snapshot raises the pool on boot (new capital); below is left alone. |
+| `windowBudget` | no | Per `to.chain`: in-flight ceiling. |
+| `chainProviders` | yes | One entry per chain any pair touches. EVM: `{ chainType:"evm", chainId, rpcUrl, registryAddress, tokenAddress, tokenNetworkAddress, channelDeposit?, settlementTimeoutSeconds? }` — `tokenNetworkAddress` is the fleet's `TokenNetwork`, where channels live and the EIP-712 `verifyingContract` (`channelAddress`, the 2.x `RollingSwapChannel`, is accepted and ignored). Solana: `{ chainType:"solana", chainId, rpcUrl, programId, tokenMint, channelDeposit?, challengeDurationSeconds? }` — `programId` and `tokenMint` required. `channelDeposit` (base units) enables on-demand leg-B channels: at a taker's first verified fill the maker deposits this much into the (maker, taker) channel from its index-2 key and tops it up whenever a claim would exceed what it holds. The `rpcUrl` is also what the maker verifies a taker's leg-A claim against. Mina: `{ chainType:"mina", chainId, graphqlUrl, zkAppAddress }` (leg B only). |
+| `relay` | for trading | `{ readUrl, connectorUrl, destination? ("g.toon.relay"), payChain? ("evm"\|"solana"), rpcUrl?, deposit?, channelStorePath?, transport? }`. Aliases from 2.x: `relayUrls[0]` → `readUrl`, top-level `connectorUrl` → `connectorUrl`. |
+| `order` | no | `{ fill: { min, max }, ttlMs (10 min), refreshMs (8 min) }` — the per-fill delta bounds a taker may pick (source base units; default 1–100 USDC). Alias: `fillAmount` → `fill.min`. |
+| `maxChainReadsPerMin` | no | Chain reads one taker may cause per minute while its claims are verified (default 30). |
+| `gasStation` | no | `{ destination? ("g.toon.relay.gas"), connectorUrl? }` — for `toon-swap redeem --via gas-station`; `connectorUrl` is the station's own connector, whose key the job is sealed to (the relay route is forwarded). |
+| `quote` | no | `{ ttlMs (60s), sessionTtlMs (1h), maxSessions (1024) }`. |
+| `appPort` | no | Port for `/health` and `/admin/*` (default 8080; `blsPort` is an alias). |
+| `statePath` | no | Snapshot file (inventory, channel watermarks, bindings, sessions, inbound watermarks, relay cursor, orders) — write-ahead of every claim. The taker subcommands keep theirs at `<statePath>.taker.json`. |
+| `maxRateAge` | no | Staleness bound on the rate feed; needs `SWAP_RATE_URL`. |
+| `adminToken`, `reconcileIntervalMs`, `identityAutogen` | no | See below. |
+| `mnemonic` / `secretKey` | one | Identity — or `identityAutogen` / `SWAP_AUTOGEN_IDENTITY`. The BIP-44 index-2 keys derived from the mnemonic are the maker's addresses on both chains (they receive leg A, sign and fund leg B, and pay the relay's connector); the Nostr key at the same index signs orders and seals wraps. A mnemonic is required. |
 
-Exactly one identity is required: `mnemonic` (BIP-39) or `secretKey` (64-char
-hex, 32 bytes) in the config file, or their env equivalents `SWAP_MNEMONIC` /
-`SWAP_SECRET_KEY_HEX` (below) — env always wins and is the preferred way to
-inject the secret from a mount rather than baking it into the config file.
+**Retired (2.x) keys are accepted and ignored with a `swap.config.retired_key_ignored` warning:**
+`ilpAddress`, `btpServerPort`, `btpEndpoint`, `knownPeers`, `transport`,
+`parentPeerId`, `parentAuthToken`, `parentEvmAddress`, `nodeId`, `advertisedAsset`,
+`peerInfoIlpDestination`, `peerInfoPricePerByte`, `peerInfoTtlSeconds`,
+`peerInfoRefreshIntervalMs`, `rolling`, `rollingLegBSender`, `settlementPrivateKey`,
+`chainProviders[].channelAddress`. A committed 2.x config boots.
 
 ## Environment variables (override the config file)
 
-| Var | Purpose |
+| Var | Meaning |
 | --- | --- |
-| `SWAP_MNEMONIC` | BIP-39 mnemonic — identity + (unless `settlementPrivateKey`/`chainProviders[].keyId` override it) the claim signer. |
-| `SWAP_SECRET_KEY_HEX` | 64-char hex secret key, alternative to a mnemonic. |
-| `SWAP_BLS_PORT` | Overrides `blsPort`. |
-| `SWAP_RELAYS` | Comma-separated relay WS URLs, overrides `relayUrls`. |
+| `SWAP_MNEMONIC` | BIP-39 mnemonic (wins over the file). |
+| `SWAP_SECRET_KEY_HEX` | 64-char hex secret key, alternative to a mnemonic (the maker still needs a mnemonic to derive leg-B keys). |
+| `SWAP_APP_PORT` (alias `SWAP_BLS_PORT`) | Overrides `appPort`. |
+| `SWAP_RELAY_READ_URL`, `SWAP_RELAY_CONNECTOR_URL` | Override `relay.readUrl` / `relay.connectorUrl`. |
+| `SWAP_RELAY_DESTINATION`, `SWAP_RELAY_PAY_CHAIN` | Override `relay.destination` / `relay.payChain`. |
+| `SWAP_FILL_MIN` (alias `SWAP_FILL_AMOUNT`), `SWAP_FILL_MAX` | Override `order.fill`. |
 | `SWAP_STATE_PATH` | Overrides `statePath`. |
-| `TOON_CONNECTOR_URL` | Parent BTP URL — activates embedded-with-parent mode instead of standalone. |
-| `TOON_PARENT_PEER_ID` | Parent peer id (default `apex`). |
-| `TOON_PARENT_AUTH_TOKEN` | BTP auth token for the parent peer. |
-| `TOON_ILP_ADDRESS` | Overrides `ilpAddress`. |
-| `TOON_NODE_ID` | Overrides the embedded connector `nodeId`. |
-| `SWAP_MAX_RATE_AGE_MS`, `SWAP_MAX_RATE_AGE` | Maker staleness bound(s) (issue #48) — require `SWAP_RATE_URL`. |
-| `SWAP_RATE_URL`, `SWAP_RATE_TIMEOUT_MS` | HTTP JSON rate feed (issue #47 AC-3). |
-| `SWAP_AUTOGEN_IDENTITY` | `1`/`true` (issue #126) — overlay for `identityAutogen`. |
-| `SWAP_IDENTITY_FILE` | Overrides the self-generated identity file path (default: beside `statePath`, or the cwd when `statePath` is unset). |
-| `SWAP_LOG_LEVEL` | swap#136 — verbosity of the JSON-line logger the CLI installs: `debug`\|`info`\|`warn`\|`error`\|`silent` (default `info`). Optional; an unrecognised value degrades to the default. |
-| `SWAP_ADMIN_TOKEN` | **Issue #138.** Operator token for the `/admin/inventory/*` **write** routes. Optional — unset means the writes are refused with 503, never left open. |
-| `SWAP_RECONCILE_INTERVAL_MS` | **Issue #138.** Cadence of the chain-truth inventory reconcile (default `60000`; `0` disables the periodic pass — the boot pass and the admin routes still work). |
+| `SWAP_MAX_RATE_AGE_MS`, `SWAP_MAX_RATE_AGE` | Maker staleness bound(s) — require `SWAP_RATE_URL`. |
+| `SWAP_RATE_URL`, `SWAP_RATE_TIMEOUT_MS` | HTTP JSON rate feed. |
+| `SWAP_AUTOGEN_IDENTITY` | `1`/`true` — generate + persist a mnemonic on first boot (`identity.json` beside `statePath`, mode 600); prints the index-0 pubkey and the index-2 EVM/Solana leg-B signers to fund. |
+| `SWAP_IDENTITY_FILE` | Overrides the identity file path. |
+| `SWAP_LOG_LEVEL` | `debug`\|`info`\|`warn`\|`error`\|`silent` (default `info`). |
+| `SWAP_ADMIN_TOKEN` | Operator token for the `/admin/inventory/*` **write** routes. Unset = writes refused (503). |
+| `SWAP_RECONCILE_INTERVAL_MS` | Cadence of the chain-truth reconcile (default `60000`; `0` disables the periodic pass). |
 
-Refusals show up in `docker logs` as one JSON object per line — grep
-`swap.claim.refused` for a swap the maker turned away, and `reason` for why
-(e.g. `channel_unredeemed`). Before swap#136 the container logged nothing at
-all for a refused swap.
-
-`peerInfoIlpDestination` / `peerInfoPricePerByte` are config-file-only (no
-env override), matching `btpEndpoint`. (`ilpAddress` is the exception among
-the kind:10032 fields — it *does* have an override, `TOON_ILP_ADDRESS`.)
+Refusals show up in `docker logs` as one JSON object per line — `swap.fill.refused_paid` /
+`swap.fill.claim_refused` with a `reason` (`insufficient_liquidity`, `channel_unredeemed`,
+`no_channel_available` naming the Solana PDA to open, …), `swap.fill.accepted` for every fill.
 
 ## Ports
 
-- `btpServerPort` (config field, no default in standalone mode — the
-  maker.mjs wiring uses `3400`): BTP WebSocket server. The image declares no
-  `EXPOSE`; publish it with `-p` to make the maker directly dialable.
-- `blsPort`: `/health` + `/admin/inventory*` HTTP.
+- `appPort` (default `8080`): `/health`, `/admin/inventory*`. Loopback / private network only —
+  nothing a taker needs is here; takers talk to the relay.
 
 ## Inventory recycling & the operator surface (issue #138)
 
@@ -132,7 +140,7 @@ Procedure — **fund the channel on chain first**, then tell the node:
 ```sh
 # 1. Deposit into a channel this maker has provisioned (chain side).
 # 2. See what the node will credit, without changing anything:
-curl -sX POST http://127.0.0.1:<blsPort>/admin/inventory/deposit \
+curl -sX POST http://127.0.0.1:<appPort>/admin/inventory/deposit \
   -H "authorization: Bearer $SWAP_ADMIN_TOKEN" -H 'content-type: application/json' \
   -d '{"assetCode":"USDC","chain":"evm:base:8453","dryRun":true}'
 # 3. Same call without dryRun applies it (add "amount" to assert an exact figure).
@@ -165,7 +173,7 @@ it becomes corroborable.
 1. The routes live under `/admin`, which the fleet's box nginx already
    answers with 404 from the internet (`^~ /admin`), the same rule that
    covers the connector's admin surface. Reach them from the box itself
-   (`curl http://127.0.0.1:<blsPort>/admin/inventory`) or over the private
+   (`curl http://127.0.0.1:<appPort>/admin/inventory`) or over the private
    network.
 2. Writes require `SWAP_ADMIN_TOKEN` in `Authorization: Bearer <token>` or
    `X-Swap-Admin-Token`, compared in constant time. **No token configured =

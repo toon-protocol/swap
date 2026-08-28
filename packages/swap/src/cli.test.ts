@@ -159,23 +159,6 @@ describe('AC-9 swap node CLI — env-overlay gap-fill', () => {
     });
   });
 
-  it('[P2] SWAP_RELAYS env var overrides config.relayUrls (comma-separated)', async () => {
-    // applyEnvOverlay splits on commas, trims each, filters blanks. We assert
-    // the overlay mechanism itself by verifying boot still succeeds when env
-    // provides the non-empty relayUrls (and config fixture is unchanged).
-    const mod = (await import('./cli.js')) as {
-      main: (argv: string[]) => Promise<{ stop: () => Promise<void> }>;
-    };
-    const instance = await withEnv(
-      { SWAP_RELAYS: 'ws://a.example:1 , ws://b.example:2 , ' },
-      () => mod.main(['--config', fixturePath])
-    );
-    try {
-      expect(instance).toBeDefined();
-    } finally {
-      await instance.stop();
-    }
-  });
 
   it('[P2] invalid SWAP_SECRET_KEY_HEX (non-hex) throws before boot', async () => {
     const mod = (await import('./cli.js')) as {
@@ -265,7 +248,6 @@ describe('Pass-3 CLI security: prototype-pollution guards', () => {
     // regular own property, which is the exact vector we guard against.
     const rawJson = JSON.stringify({
       mnemonic: 'x',
-      relayUrls: ['wss://relay.example'],
     }).replace(
       '}',
       `,"channels":{"__proto__":[{"channelId":"c","cumulativeAmount":"0","nonce":"0"}]}}`
@@ -286,7 +268,6 @@ describe('Pass-3 CLI security: prototype-pollution guards', () => {
       mnemonic: 'x',
       channels: {},
       inventory: { constructor: '1' },
-      relayUrls: ['wss://relay.example'],
     });
     const cfgPath = writeTempRawJson(rawJson);
     await expect(mod.main(['--config', cfgPath])).rejects.toThrow(
@@ -307,7 +288,6 @@ describe('Pass-3 CLI security: strict hex validation on config.secretKey', () =>
       chains: [],
       channels: {},
       inventory: {},
-      relayUrls: ['wss://relay.example'],
     };
     const cfgPath = writeTempConfig(cfg);
     await expect(mod.main(['--config', cfgPath])).rejects.toThrow(
@@ -325,7 +305,6 @@ describe('Pass-3 CLI security: strict hex validation on config.secretKey', () =>
       chains: [],
       channels: {},
       inventory: {},
-      relayUrls: ['wss://relay.example'],
     };
     const cfgPath = writeTempConfig(cfg);
     await expect(mod.main(['--config', cfgPath])).rejects.toThrow(
@@ -483,7 +462,6 @@ describe('issue #49 — CLI windowBudget config key', () => {
       channels: {},
       inventory: {},
       windowBudget: { 'evm:8453': 'lots' },
-      relayUrls: ['wss://relay.example'],
     };
     const cfgPath = writeTempConfig(cfg);
     await expect(mod.main(['--config', cfgPath])).rejects.toThrow();
@@ -495,210 +473,6 @@ describe('issue #49 — CLI windowBudget config key', () => {
 // (config surface needed for the paid kind:10032 announce in the runtime
 // container).
 // ---------------------------------------------------------------------------
-
-describe('issue #124 — CLI peerInfoIlpDestination / peerInfoPricePerByte', () => {
-  const BTP_PORT = 22000 + Math.floor(Math.random() * 8000);
-
-  function standaloneCfg(
-    overrides: Record<string, unknown> = {}
-  ): Record<string, unknown> {
-    return {
-      mnemonic:
-        'abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about',
-      swapPairs: [
-        {
-          from: { assetCode: 'USDC', assetScale: 6, chain: 'evm:8453' },
-          to: { assetCode: 'USDC', assetScale: 6, chain: 'evm:8453' },
-          rate: '1.0',
-        },
-      ],
-      chains: ['evm'],
-      channels: {
-        'evm:8453': [
-          {
-            channelId:
-              '0xabc0000000000000000000000000000000000000000000000000000000000001',
-            cumulativeAmount: '0',
-            nonce: '0',
-            updatedAt: 0,
-          },
-        ],
-      },
-      inventory: { 'evm:8453': '1000000' },
-      chainProviders: [
-        {
-          chainType: 'evm',
-          chainId: 'evm:8453',
-          rpcUrl: 'http://127.0.0.1:1',
-          registryAddress: '0x1111111111111111111111111111111111111111',
-          tokenAddress: '0x2222222222222222222222222222222222222222',
-          tokenNetworkAddress: '0x4444444444444444444444444444444444444444',
-          channelAddress: '0x3333333333333333333333333333333333333333',
-        },
-      ],
-      relayUrls: ['ws://localhost:0'],
-      blsPort: 0,
-      btpServerPort: BTP_PORT,
-      ...overrides,
-    };
-  }
-
-  it('[P1] peerInfoIlpDestination + peerInfoPricePerByte forward through to boot without throwing (standalone connector present)', async () => {
-    const mod = (await import('./cli.js')) as {
-      main: (argv: string[]) => Promise<{ stop: () => Promise<void> }>;
-    };
-    const cfgPath = writeTempConfig(
-      standaloneCfg({
-        peerInfoIlpDestination: 'g.toon.relay',
-        peerInfoPricePerByte: '1',
-      })
-    );
-    const instance = await mod.main(['--config', cfgPath]);
-    try {
-      expect(instance).toBeDefined();
-    } finally {
-      await instance.stop();
-    }
-  });
-
-  it('[P2] non-numeric peerInfoPricePerByte throws a clear error before boot', async () => {
-    const mod = (await import('./cli.js')) as {
-      main: (argv: string[]) => Promise<unknown>;
-    };
-    const cfgPath = writeTempConfig(
-      standaloneCfg({
-        peerInfoIlpDestination: 'g.toon.relay',
-        peerInfoPricePerByte: 'lots',
-      })
-    );
-    await expect(mod.main(['--config', cfgPath])).rejects.toThrow();
-  });
-});
-
-// ---------------------------------------------------------------------------
-// Issue #126 — self-generate + persist maker identity on boot, auto-derive
-// the index-2 settlement key.
-// ---------------------------------------------------------------------------
-
-describe('issue #126 — settlement-key placeholder detection', () => {
-  it('[P1] needsSettlementKeyDerivation is true when unset', async () => {
-    const { needsSettlementKeyDerivation } = await import('./cli.js');
-    expect(needsSettlementKeyDerivation(undefined)).toBe(true);
-  });
-
-  it('[P1] needsSettlementKeyDerivation is true for a 0xdead…-style placeholder (case-insensitive)', async () => {
-    const { needsSettlementKeyDerivation } = await import('./cli.js');
-    expect(needsSettlementKeyDerivation(`0x${'dead'.repeat(16)}`)).toBe(true);
-    expect(needsSettlementKeyDerivation(`0x${'DEAD'.repeat(16)}`)).toBe(true);
-    expect(needsSettlementKeyDerivation(`0x${'DeAd'.repeat(16)}`)).toBe(true);
-  });
-
-  it('[P1] needsSettlementKeyDerivation is false for a real-looking key', async () => {
-    const { needsSettlementKeyDerivation } = await import('./cli.js');
-    expect(needsSettlementKeyDerivation(`0x${'11'.repeat(32)}`)).toBe(false);
-  });
-});
-
-describe('issue #126 — resolveIdentityConfig: index-2 settlementPrivateKey derivation', () => {
-  // Universally known zero-entropy BIP-39 vector (same golden vector wallet.test.ts pins).
-  const ZERO_MNEMONIC =
-    'abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about';
-
-  it('[P1] derives settlementPrivateKey from the mnemonic when unset, recovering the deriveSwapNodeKeys index-2 address and matching settlementAddresses', async () => {
-    const { resolveIdentityConfig } = await import('./cli.js');
-    const { deriveSwapNodeKeys } = await import('./wallet.js');
-    const { buildSignerAddresses } = await import('./swap-node.js');
-
-    const resolved = await resolveIdentityConfig(
-      {
-        mnemonic: ZERO_MNEMONIC,
-        swapPairs: [],
-        chains: ['evm'],
-        channels: {},
-        inventory: {},
-        relayUrls: [],
-      },
-      {}
-    );
-
-    expect(resolved.settlementPrivateKey).toMatch(/^0x[0-9a-fA-F]{64}$/);
-
-    const keys = await deriveSwapNodeKeys({
-      mnemonic: ZERO_MNEMONIC,
-      chains: ['evm'],
-    });
-    if (!keys.evm) throw new Error('expected an EVM key to be derived');
-    const expectedHex = `0x${Buffer.from(keys.evm.privateKey).toString('hex')}`;
-    expect(resolved.settlementPrivateKey).toBe(expectedHex);
-
-    const settlementAddresses = buildSignerAddresses(
-      [
-        {
-          from: { assetCode: 'USDC', assetScale: 6, chain: 'evm:8453' },
-          to: { assetCode: 'USDC', assetScale: 6, chain: 'evm:8453' },
-          rate: '1.0',
-        },
-      ],
-      keys
-    );
-    expect(settlementAddresses['evm:8453']).toBe(
-      keys.evm.address.toLowerCase()
-    );
-  });
-
-  it('[P1] replaces a 0xdead…-style placeholder settlementPrivateKey with the derived index-2 key', async () => {
-    const { resolveIdentityConfig } = await import('./cli.js');
-    const placeholder = `0x${'dead'.repeat(16)}`;
-    const resolved = await resolveIdentityConfig(
-      {
-        mnemonic: ZERO_MNEMONIC,
-        settlementPrivateKey: placeholder,
-        swapPairs: [],
-        chains: ['evm'],
-        channels: {},
-        inventory: {},
-        relayUrls: [],
-      },
-      {}
-    );
-    expect(resolved.settlementPrivateKey).not.toBe(placeholder);
-    expect(resolved.settlementPrivateKey).toMatch(/^0x[0-9a-fA-F]{64}$/);
-  });
-
-  it('[P1] leaves an operator-supplied non-placeholder settlementPrivateKey untouched', async () => {
-    const { resolveIdentityConfig } = await import('./cli.js');
-    const operatorKey = `0x${'11'.repeat(32)}`;
-    const resolved = await resolveIdentityConfig(
-      {
-        mnemonic: ZERO_MNEMONIC,
-        settlementPrivateKey: operatorKey,
-        swapPairs: [],
-        chains: ['evm'],
-        channels: {},
-        inventory: {},
-        relayUrls: [],
-      },
-      {}
-    );
-    expect(resolved.settlementPrivateKey).toBe(operatorKey);
-  });
-
-  it('[P2] a secretKey-only config (no mnemonic) is left untouched — no derivation attempted', async () => {
-    const { resolveIdentityConfig } = await import('./cli.js');
-    const resolved = await resolveIdentityConfig(
-      {
-        secretKey: new Uint8Array(32).fill(7),
-        swapPairs: [],
-        chains: ['evm'],
-        channels: {},
-        inventory: {},
-        relayUrls: [],
-      },
-      {}
-    );
-    expect(resolved.settlementPrivateKey).toBeUndefined();
-  });
-});
 
 describe('issue #126 — SWAP_AUTOGEN_IDENTITY self-generated + persisted identity', () => {
   async function withEnv<T>(
@@ -738,7 +512,6 @@ describe('issue #126 — SWAP_AUTOGEN_IDENTITY self-generated + persisted identi
             chains: ['evm'],
             channels: {},
             inventory: {},
-            relayUrls: [],
           },
           { identityAutogen: true }
         )
@@ -748,7 +521,6 @@ describe('issue #126 — SWAP_AUTOGEN_IDENTITY self-generated + persisted identi
         throw new Error('expected a mnemonic to be resolved');
       }
       expect(resolved.mnemonic.split(' ').length).toBeGreaterThanOrEqual(12);
-      expect(resolved.settlementPrivateKey).toMatch(/^0x[0-9a-fA-F]{64}$/);
       const mode = statSync(identityFile).mode & 0o777;
       expect(mode).toBe(0o600);
     } finally {
@@ -769,7 +541,6 @@ describe('issue #126 — SWAP_AUTOGEN_IDENTITY self-generated + persisted identi
             chains: ['evm'],
             channels: {},
             inventory: {},
-            relayUrls: [],
           },
           { identityAutogen: true }
         )
@@ -781,13 +552,11 @@ describe('issue #126 — SWAP_AUTOGEN_IDENTITY self-generated + persisted identi
             chains: ['evm'],
             channels: {},
             inventory: {},
-            relayUrls: [],
           },
           { identityAutogen: true }
         )
       );
       expect(second.mnemonic).toBe(first.mnemonic);
-      expect(second.settlementPrivateKey).toBe(first.settlementPrivateKey);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -807,7 +576,6 @@ describe('issue #126 — SWAP_AUTOGEN_IDENTITY self-generated + persisted identi
             chains: ['evm'],
             channels: {},
             inventory: {},
-            relayUrls: [],
             statePath,
           },
           { identityAutogen: true }
@@ -834,7 +602,6 @@ describe('issue #126 — SWAP_AUTOGEN_IDENTITY self-generated + persisted identi
             chains: ['evm'],
             channels: {},
             inventory: {},
-            relayUrls: [],
             statePath,
           },
           { identityAutogen: true }
@@ -865,7 +632,6 @@ describe('issue #126 — SWAP_AUTOGEN_IDENTITY self-generated + persisted identi
               chains: ['evm'],
               channels: {},
               inventory: {},
-              relayUrls: [],
             },
             { identityAutogen: true }
           )
@@ -887,9 +653,6 @@ describe('issue #126 — SWAP_AUTOGEN_IDENTITY self-generated + persisted identi
       expect(output).not.toContain(
         resolved.mnemonic.split(' ').slice(0, 2).join(' ')
       );
-      const settlementKey = String(resolved.settlementPrivateKey);
-      expect(output).not.toContain(settlementKey);
-      expect(output).not.toContain(settlementKey.slice(2)); // un-prefixed
     } finally {
       console.log = realLog;
       rmSync(dir, { recursive: true, force: true });

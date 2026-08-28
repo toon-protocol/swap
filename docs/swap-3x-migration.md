@@ -1,13 +1,43 @@
 # `@toon-protocol/swap` 2.1.0 → 3.0.0 migration
 
-**Status:** written ahead of the 3.0.0 cut, from the five `major` changesets queued on `main`
-(`issue-101`, `issue-133`, `issue-136`, `issue-164`, `issue-155`). **Read this before upgrading a
-running maker, and before pointing a released client at a 3.0.0 maker.**
+**Status:** written ahead of the 3.0.0 cut, from the `major` changesets queued on `main`
+(`issue-101`, `issue-133`, `issue-136`, `issue-164`, `issue-155`, `rust-connector-maker`). **Read this before
+upgrading a running maker, and before pointing a released client at a 3.0.0 maker.**
 
-This is a genuine major on five independent axes. A config that boots today stops booting; claims
+> **§0 supersedes much of what follows.** The maker no longer embeds a connector, and is not
+> behind one either: it is a **relay-mediated swap client** speaking the `rolling/3` wire. See
+> [`relay-swap.md`](./relay-swap.md) for the decision and the wire. The sections below still
+> describe real 2.x → 3.0.0 breaks on the chain side (§1, §3) and the announce (§2) — but there
+> is no announce any more (the order on the relay is the discovery), and a released
+> `toon-client` speaks neither `rolling/2` nor `rolling/3`; this package's own `SwapTaker` /
+> `toon-swap take` is the taker.
+
+## 0. The swap is a relay-mediated client
+
+- `@toon-protocol/connector` is no longer a dependency; `ConnectorNode`, the BTP listener, the
+  kind:1059/kind:20033 intake and the kind:10032 publish are gone. `@toon-protocol/client` 2.1.0
+  is a runtime dependency — for paid relay writes only.
+- The maker publishes a public order (kind `30032`) and answers gift-wrapped accepts/fills
+  (kind `20036` rumors) from its inbox. **It verifies the taker's leg-A claim itself**
+  (`verifyInboundClaim`) — no connector states `X-TOON-*` to it any more. Leg B rides in the
+  wrapped advance. Refusals are messages, not HTTP statuses.
+- Config: `relay.{readUrl, connectorUrl}` (aliases: `relayUrls[0]`, `connectorUrl`),
+  `order.fill.{min,max}` (alias: `fillAmount` → min), `maxChainReadsPerMin`;
+  `chainProviders[]` must cover every `from.chain` too. `ilpAddress` and the other embedded
+  connector / announce keys (`btpServerPort`, `btpEndpoint`, `parent*`, `nodeId`, `peerInfo*`,
+  `rolling.*`, `settlementPrivateKey`, `knownPeers`, `transport`, `advertisedAsset`) are
+  **accepted and ignored with a boot warning**. A config with `relayUrls` but no connector URL
+  boots **offline**. `quote.{ttlMs,sessionTtlMs,maxSessions}` and `appPort` (alias `blsPort`)
+  stay; Solana `chainProviders[]` require `programId` **and** `tokenMint`.
+- The Solana balance proof is the 96-byte `TOON-BALPROOF-V2` message (connector ADR 0053), not
+  the 48 bytes §3 below describes — §3's Solana paragraph is itself superseded.
+- A configured inventory `total` above the persisted snapshot now raises the pool (swap#130).
+
+
+This is a genuine major on several independent axes. A config that boots today stops booting; claims
 are signed over different bytes on both chain families; an announce field keeps its name and
 changes its meaning; refusals move to different ILP error classes; and the legacy public API is
-gone. Nothing here is a rename.
+gone (§6). Nothing here is a rename.
 
 ## Who is affected
 
@@ -138,35 +168,6 @@ until they send, and by then they will already have hit §2 or §4. **This note 
 mitigation** — see ADR 0003 (`toon-meta/docs/adr/0003-the-rolling-swap-is-the-only-swap.md`),
 which states the same gap honestly for the legacy-path removal.
 
-## 6. The legacy public API is gone — no throwing shim
-
-The maker itself stopped serving the legacy claim-in-FULFILL protocol in swap#154; 3.0.0 removes
-the now-dead exports so a published version no longer promises them:
-
-| Withdrawn | Was |
-|---|---|
-| `createSwapHandler` / `CreateSwapHandlerConfig` | The `@toon-protocol/sdk` re-export `startSwapNode()` no longer wires in |
-| `withMaxRateAge` / `WithMaxRateAgeOptions` | The legacy handler's staleness-gate decorator |
-| `MultiChainClaimIssuer.issueClaim` | The legacy gift-wrap issuance entrypoint |
-| `SwapInventory.debit` / `.refundDebit` | The permanent-debit accounting the legacy path used (swap#138/#141: a honeypot sized to notional, with no refill loop) |
-| `SwapInventory.credit` | Now `private` — reachable only through `creditCorroboratedFunding()`, so `total` cannot rise without chain corroboration |
-
-**No throwing compatibility shim replaces any of these.** A caller gets a build-time failure, not
-a runtime surprise deep in a request path: a removed *export* is a TypeScript error or a Node
-`SyntaxError: The requested module does not provide an export`, and a removed (or now-`private`)
-*method* is a TypeScript error on the call site.
-
-**What did not change:** `MultiChainClaimIssuer` remains the leg-B claim signer
-(`issueRollingClaim` / `commitRollingClaim` / `rollbackRollingClaim`) and `SwapInventory` remains
-the rolling window's capital (`reserve` / `commitReservation` / `releaseReservation` /
-`recordChainRedemption` / `creditCorroboratedFunding`). Neither class nor its rolling-path methods
-changed shape.
-
-**Action:** `createSwapHandler` had exactly one job — issue a claim from pre-funded inventory on
-receipt of a legacy gift-wrap — and there is no rolling equivalent to point a caller at, because
-rolling is not a handler you install onto a connector; it is a maker you run. Run one with
-`startSwapNode()`.
-
 ## Upgrade order
 
 1. **Place the config first** — add `tokenNetworkAddress` and `channelAddress` for every EVM chain
@@ -177,6 +178,23 @@ rolling is not a handler you install onto a connector; it is a maker you run. Ru
 4. **Verify a live swap end to end** and settle the claim on chain — this is what proves §3 on the
    chain family you actually run. Leaving a claim unredeemed jams the maker (§4's `T04`).
 5. **Then** update counterparties' verifiers and any code branching on refusal codes (§3, §4).
-6. **Before any of the above**, if you import this package directly (rather than only running
-   `toon-swap`), build against 3.0.0 first — everything §6 removed fails at compile/import time,
-   which is the cheapest place to catch it.
+
+## 6. The legacy public API is gone — no throwing shim
+
+The maker itself stopped serving the legacy claim-in-FULFILL protocol in swap#154; 3.0.0 removes
+the now-dead exports so a published version no longer promises them (swap#155 / #177):
+
+| Withdrawn | Was |
+|---|---|
+| `createSwapHandler` / `CreateSwapHandlerConfig` | The `@toon-protocol/sdk` re-export `startSwapNode()` no longer wires in |
+| `withMaxRateAge` / `WithMaxRateAgeOptions` | The legacy handler's staleness-gate decorator |
+| `MultiChainClaimIssuer.issueClaim` | The legacy gift-wrap issuance entrypoint |
+| `SwapInventory.debit` / `.refundDebit` | The permanent-debit accounting the legacy path used |
+| `SwapInventory.credit` | Now `private` — reachable only through `creditCorroboratedFunding()` |
+
+**No throwing compatibility shim replaces any of these.** A removed *export* is a TypeScript error
+or a Node `SyntaxError: The requested module does not provide an export`; a removed method is a
+TypeScript error on the call site. `MultiChainClaimIssuer` (`issueRollingClaim` /
+`commitRollingClaim` / `rollbackRollingClaim`) and `SwapInventory` (`reserve` /
+`commitReservation` / `releaseReservation` / `recordChainRedemption` / `creditCorroboratedFunding`)
+remain, as the leg-B signer and the rolling window's capital.

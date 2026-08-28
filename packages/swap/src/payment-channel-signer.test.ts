@@ -257,6 +257,7 @@ describe('SolanaPaymentChannelSigner — round-trip (Story 12.4 AC-5)', () => {
     });
     const signer = new SolanaPaymentChannelSigner({
       chain: 'solana:mainnet',
+      programId: 'HY4AYFNe5Vg5BkEwAURNsGY3uFAvGMNpAQPRtgoasJiR',
       privateKey: keys.solana!.privateKey,
     });
 
@@ -284,6 +285,7 @@ describe('SolanaPaymentChannelSigner — round-trip (Story 12.4 AC-5)', () => {
     if (!solana) throw new Error('deriveSwapNodeKeys returned no Solana key');
     const signer = new SolanaPaymentChannelSigner({
       chain: 'solana:mainnet',
+      programId: 'HY4AYFNe5Vg5BkEwAURNsGY3uFAvGMNpAQPRtgoasJiR',
       privateKey: solana.privateKey,
     });
 
@@ -299,7 +301,7 @@ describe('SolanaPaymentChannelSigner — round-trip (Story 12.4 AC-5)', () => {
     // the assertion that matters, and it is deliberately hand-rolled from
     // connector `packages/solana-program/src/processor.rs:900-910` rather than
     // from the helper under test, so a drift in either fails here:
-    //   channel_pda(32) || nonce(8 LE) || transferred_amount(8 LE)
+    //   tag(16) || program_id(32) || channel_pda(32) || nonce(8 LE) || amount(8 LE)
     // (Before swap#164 this recomposed `sha256(utf8(channelId) || ... )`, a
     // digest no deployed program verifies — the signer and this test agreed
     // with each other and with nothing else.)
@@ -312,10 +314,17 @@ describe('SolanaPaymentChannelSigner — round-trip (Story 12.4 AC-5)', () => {
       }
       return out;
     };
-    const message = new Uint8Array(48);
-    message.set(base58Decode(params.channelId), 0);
-    message.set(u64LE(params.nonce), 32);
-    message.set(u64LE(params.cumulativeAmount), 40);
+    // connector ADR 0053: a 96-byte, domain-tagged message that binds the
+    // program id (`processor.rs` `expected_message`).
+    const message = new Uint8Array(96);
+    message.set(new TextEncoder().encode('TOON-BALPROOF-V2'), 0);
+    message.set(
+      base58Decode('HY4AYFNe5Vg5BkEwAURNsGY3uFAvGMNpAQPRtgoasJiR'),
+      16
+    );
+    message.set(base58Decode(params.channelId), 48);
+    message.set(u64LE(params.nonce), 80);
+    message.set(u64LE(params.cumulativeAmount), 88);
 
     // Primary assertion: the signature must verify against the derived public
     // key over the program's message. If this breaks, the signer's encoding
@@ -332,7 +341,7 @@ describe('SolanaPaymentChannelSigner — round-trip (Story 12.4 AC-5)', () => {
     // A bumped nonce MUST NOT verify either: the program reads nonce and
     // transferred_amount out of the same 48 bytes it re-derives.
     const bumpedNonce = new Uint8Array(message);
-    bumpedNonce.set(u64LE(params.nonce + 1n), 32);
+    bumpedNonce.set(u64LE(params.nonce + 1n), 80);
     expect(ed25519.verify(sig, bumpedNonce, solana.publicKey)).toBe(false);
 
     // Sanity: a random other public key MUST NOT verify the real message.
@@ -351,6 +360,7 @@ describe('SolanaPaymentChannelSigner — round-trip (Story 12.4 AC-5)', () => {
     if (!solana) throw new Error('deriveSwapNodeKeys returned no Solana key');
     const signer = new SolanaPaymentChannelSigner({
       chain: 'solana:mainnet',
+      programId: 'HY4AYFNe5Vg5BkEwAURNsGY3uFAvGMNpAQPRtgoasJiR',
       privateKey: solana.privateKey,
     });
     const params = {
@@ -375,6 +385,7 @@ describe('SolanaPaymentChannelSigner — round-trip (Story 12.4 AC-5)', () => {
     });
     const signer = new SolanaPaymentChannelSigner({
       chain: 'solana:devnet',
+      programId: 'HY4AYFNe5Vg5BkEwAURNsGY3uFAvGMNpAQPRtgoasJiR',
       privateKey: keys.solana!.privateKey,
     });
     expect(signer.chain).toBe('solana:devnet');
@@ -433,12 +444,14 @@ describe('Signer construction — defensive key-length checks (code-review harde
       () =>
         new SolanaPaymentChannelSigner({
           chain: 'solana:mainnet',
+      programId: 'HY4AYFNe5Vg5BkEwAURNsGY3uFAvGMNpAQPRtgoasJiR',
           privateKey: new Uint8Array(64), // Ed25519 expanded form, not accepted here
         })
     ).toThrow(SwapWalletError);
     try {
       new SolanaPaymentChannelSigner({
         chain: 'solana:mainnet',
+      programId: 'HY4AYFNe5Vg5BkEwAURNsGY3uFAvGMNpAQPRtgoasJiR',
         privateKey: new Uint8Array(16),
       });
       throw new Error('expected throw');

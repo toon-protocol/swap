@@ -1,24 +1,11 @@
 /**
- * EVM implementation of {@link ChannelOnChainReader} (issue #113).
- *
- * Reads the LIVE `cumulativePaid` watermark for a `RollingSwapChannel`
- * channel directly from the chain via a raw `eth_call` to the
- * `channels(bytes32)` public-mapping getter Solidity auto-generates for the
- * `Channel` struct (see `tests/integration/fixtures/RollingSwapChannel.sol`).
- * Every call hits the RPC endpoint afresh — the reader caches nothing,
- * matching the "never stale" requirement in `channel-state.ts`'s
- * `ChannelOnChainReader` docs: a rebind decision made on a cached answer
- * could approve stealing a channel that has since accrued an unredeemed
- * claim.
- *
- * Hand-rolled (selector + fixed-offset word decode) rather than pulling in
- * an ABI/RPC client library: every `Channel` field is a static (non-dynamic)
- * type, so the whole struct is 7 fixed 32-byte words and `cumulativePaid`
- * (word index 3) can be read directly with no general ABI decoder. Mirrors
- * `payment-channel-signer.ts`'s "this package does NOT take a hard dep on
- * [a chain SDK]" stance, and reuses the same `keccak_256` /
- * `hexToBytes` primitives `@toon-protocol/settlement-digest` and this
- * package's own signer already depend on.
+ * The maker's EVM chain-truth reader: the LIVE `transferredAmount` and
+ * `deposit` of the maker's own participant slot on a `TokenNetwork` channel,
+ * via a raw `eth_call` to the `participants(bytes32,address)` public-mapping
+ * getter. `transferredAmount` is what the counterparty has already claimed on
+ * chain — the redeemed leg-B watermark the rebind and recycle rules compare
+ * against. Hand-rolled (selector + fixed-offset word decode) so this reader
+ * carries no ABI machinery.
  */
 
 import { keccak_256 } from '@noble/hashes/sha3.js';
@@ -31,37 +18,37 @@ import type {
 } from './channel-state.js';
 
 /** `channels(bytes32)` 4-byte selector — keccak256("channels(bytes32)")[0:4]. */
-const CHANNELS_SELECTOR = keccak_256(
-  new TextEncoder().encode('channels(bytes32)')
+/** `participants(bytes32,address)` 4-byte selector — keccak256(...)[0:4]. */
+const PARTICIPANTS_SELECTOR = keccak_256(
+  new TextEncoder().encode('participants(bytes32,address)')
 ).slice(0, 4);
 
 /**
- * Word indices in the `Channel` struct's ABI-encoded return.
- * `struct Channel { address signer; address funder; uint256 nonce;
- *   uint256 cumulativePaid; uint256 deposit; uint64 closingAt;
- *   ChannelState state; }` — all static types, so a flat run of 32-byte words.
+ * `TokenNetwork.participants(channelId, maker)` returns the maker's own
+ * `ParticipantState`: `(deposit, nonce, transferredAmount)`. `transferredAmount`
+ * is the cumulative the counterparty has already claimed on chain — the
+ * maker's redeemed leg-B watermark — and `deposit` is the TOTAL the maker has
+ * ever placed (it does not fall on a claim; `claimedAmounts` does the netting
+ * at settlement).
  */
-const CUMULATIVE_PAID_WORD_INDEX = 3;
-/** swap#142 — `deposit`, the REMAINING un-paid-out deposit (word 4). */
-const DEPOSIT_WORD_INDEX = 4;
-const WORD_HEX_LEN = 64; // 32 bytes, 2 hex chars/byte
+const DEPOSIT_WORD_INDEX = 0;
+const TRANSFERRED_WORD_INDEX = 2;
+const WORD_HEX_LEN = 64;
 
-/** `channels(bytes32)` calldata: 4-byte selector followed by the 32-byte channelId. */
-function encodeChannelsCall(channelId: string): string {
+function encodeParticipantsCall(channelId: string, participant: string): string {
   const channelIdBytes = hexToBytes(channelId);
   if (channelIdBytes.length !== 32) {
     throw new Error(
       `channelId must be a 32-byte hex value (got ${channelIdBytes.length} bytes)`
     );
   }
-  return `0x${bytesToHex(CHANNELS_SELECTOR)}${bytesToHex(channelIdBytes)}`;
+  const participantBytes = hexToBytes(participant);
+  if (participantBytes.length !== 20) {
+    throw new Error(`participant must be a 20-byte hex address`);
+  }
+  return `0x${bytesToHex(PARTICIPANTS_SELECTOR)}${bytesToHex(channelIdBytes)}${'00'.repeat(12)}${bytesToHex(participantBytes)}`;
 }
 
-/**
- * Pull one uint256 word out of a `channels()` return value. Every `Channel`
- * field is a static type, so the struct is a flat run of 32-byte words and
- * the field sits at a fixed offset — no general ABI decoder needed.
- */
 function decodeWord(
   resultHex: string,
   chain: string,
@@ -73,68 +60,66 @@ function decodeWord(
   const word = hex.slice(wordStart, wordStart + WORD_HEX_LEN);
   if (word.length !== WORD_HEX_LEN) {
     throw new Error(
-      `channels() response for chain '${chain}' is too short to contain ${fieldName} (got ${hex.length} hex chars)`
+      `participants() response for chain '${chain}' is too short to contain ${fieldName} (got ${hex.length} hex chars)`
     );
   }
   return BigInt(`0x${word}`);
 }
 
 function decodeCumulativePaid(resultHex: string, chain: string): bigint {
-  return decodeWord(
-    resultHex,
-    chain,
-    CUMULATIVE_PAID_WORD_INDEX,
-    'cumulativePaid'
-  );
+  return decodeWord(resultHex, chain, TRANSFERRED_WORD_INDEX, 'transferredAmount');
 }
 
 /**
- * swap#142 — both capital words from ONE response, so they are necessarily
- * from the same block. Reading them with two `eth_call`s could straddle a
- * redemption and overstate `cumulativePaid + deposit`; see
- * `ChannelFundingPosition`.
+ * `funded = cumulativePaid + deposit` must equal the capital the maker has
+ * placed (see `ChannelFundingPosition`). On `TokenNetwork` the placed total
+ * is `deposit` itself, so the *remaining* deposit reported here is
+ * `deposit − transferredAmount`.
  */
 function decodeFundingPosition(
   resultHex: string,
   chain: string
 ): ChannelFundingPosition {
-  return {
-    cumulativePaid: decodeCumulativePaid(resultHex, chain),
-    deposit: decodeWord(resultHex, chain, DEPOSIT_WORD_INDEX, 'deposit'),
-  };
+  const total = decodeWord(resultHex, chain, DEPOSIT_WORD_INDEX, 'deposit');
+  const paid = decodeCumulativePaid(resultHex, chain);
+  return { cumulativePaid: paid, deposit: total > paid ? total - paid : 0n };
 }
 
-/** Minimal per-EVM-chain slice this reader needs — see `SwapNodeEvmChainProvider`. */
 export interface EvmChannelReaderProvider {
   /** Namespaced chain id as used in `SwapPair.to.chain` / channel-state keys (e.g. `evm:base:8453`). */
   chainId: string;
   /** JSON-RPC endpoint URL. */
   rpcUrl: string;
-  /** Deployed `RollingSwapChannel` address on this chain. */
-  channelAddress: string;
+  /** Deployed `TokenNetwork` address on this chain — where leg-B channels live. */
+  tokenNetworkAddress: string;
+  /** The maker's own EVM address: the participant slot to read. */
+  makerAddress: string;
 }
 
-/**
- * Build a {@link ChannelOnChainReader} that issues a raw `eth_call` per
- * configured EVM chain. A `getCumulativePaid` call for a chain with no
- * matching provider (or a malformed response) throws — the caller
- * (`SwapChannelState`'s reclaim path) treats any throw as "unsafe to
- * rebind", i.e. fails closed.
- */
 export function createEvmChannelOnChainReader(
   providers: readonly EvmChannelReaderProvider[]
 ): ChannelOnChainReader {
-  const byChain = new Map<string, { rpcUrl: string; address: string }>();
+  const byChain = new Map<
+    string,
+    { rpcUrl: string; address: string; maker: string }
+  >();
   for (const p of providers) {
-    const addressBytes = hexToBytes(p.channelAddress);
+    const addressBytes = hexToBytes(p.tokenNetworkAddress);
     if (addressBytes.length !== 20) {
       throw new Error(
-        `chainProviders[chainId=${p.chainId}].channelAddress must be a 20-byte hex address (got ${addressBytes.length} bytes)`
+        `chainProviders[chainId=${p.chainId}].tokenNetworkAddress must be a 20-byte hex address (got ${addressBytes.length} bytes)`
+      );
+    }
+    const makerBytes = hexToBytes(p.makerAddress);
+    if (makerBytes.length !== 20) {
+      throw new Error(
+        `chainProviders[chainId=${p.chainId}] maker address must be a 20-byte hex address`
       );
     }
     byChain.set(p.chainId, {
       rpcUrl: p.rpcUrl,
       address: `0x${bytesToHex(addressBytes)}`,
+      maker: `0x${bytesToHex(makerBytes)}`,
     });
   }
 
@@ -147,7 +132,7 @@ export function createEvmChannelOnChainReader(
     if (!entry) {
       throw new Error(`No EVM chain provider configured for chain '${chain}'`);
     }
-    const calldata = encodeChannelsCall(channelId);
+    const calldata = encodeParticipantsCall(channelId, entry.maker);
     const response = await fetch(entry.rpcUrl, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
@@ -164,14 +149,14 @@ export function createEvmChannelOnChainReader(
     };
     if (json.error) {
       throw new Error(
-        `eth_call to channels(${channelId}) on chain '${chain}' failed: ${
+        `eth_call to participants(${channelId}) on chain '${chain}' failed: ${
           json.error.message ?? JSON.stringify(json.error)
         }`
       );
     }
     if (typeof json.result !== 'string') {
       throw new Error(
-        `eth_call to channels(${channelId}) on chain '${chain}' returned no result`
+        `eth_call to participants(${channelId}) on chain '${chain}' returned no result`
       );
     }
     return json.result;

@@ -63,7 +63,27 @@
 
 import { createHash, timingSafeEqual } from 'node:crypto';
 
-import type { Context, Hono } from 'hono';
+/**
+ * The transport-neutral request/response pair the admin routes speak. The
+ * swap node's `node:http` listener adapts an `IncomingMessage` to this; a
+ * test can call {@link handleAdminRequest} with a literal.
+ */
+export interface AdminRequest {
+  method: string;
+  /** Path only, no query string. */
+  path: string;
+  header(name: string): string | undefined;
+  json(): Promise<unknown>;
+}
+
+export interface AdminResponse {
+  status: number;
+  body: unknown;
+}
+
+function json(body: unknown, status = 200): AdminResponse {
+  return { status, body };
+}
 
 import type { SwapInventory } from './inventory.js';
 import { SwapInventoryError } from './errors.js';
@@ -146,13 +166,13 @@ function constantTimeEquals(a: string, b: string): boolean {
 }
 
 /** Extract the presented token from either accepted header form. */
-function presentedToken(c: Context): string | null {
-  const header = c.req.header('authorization');
+function presentedToken(req: AdminRequest): string | null {
+  const header = req.header('authorization');
   if (header) {
     const match = /^Bearer\s+(.+)$/i.exec(header.trim());
     if (match?.[1]) return match[1];
   }
-  const direct = c.req.header('x-swap-admin-token');
+  const direct = req.header('x-swap-admin-token');
   return direct && direct.length > 0 ? direct : null;
 }
 
@@ -392,18 +412,37 @@ function parsePoolBody(
 }
 
 /** Register `/admin/*` on the BLS Hono app. */
-export function registerAdminRoutes(app: Hono, deps: AdminSurfaceDeps): void {
+export const ADMIN_PATHS = {
+  inventory: '/admin/inventory',
+  reconcile: '/admin/inventory/reconcile',
+  credit: '/admin/inventory/credit',
+  deposit: '/admin/inventory/deposit',
+} as const;
+
+/** Whether `path` is one this surface answers. */
+export function isAdminPath(path: string): boolean {
+  return (Object.values(ADMIN_PATHS) as string[]).includes(path);
+}
+
+/**
+ * Answer one admin request, or `null` when the method/path is not an admin
+ * route (the listener answers 404/405 itself).
+ */
+export async function handleAdminRequest(
+  req: AdminRequest,
+  deps: AdminSurfaceDeps
+): Promise<AdminResponse | null> {
   /** Returns a Response to send when the caller is not authorized, else null. */
-  const denyWrite = (c: Context): Response | null => {
+  const denyWrite = (): AdminResponse | null => {
     if (!deps.adminToken) {
-      return c.json(
+      return json(
         { error: 'admin_writes_disabled', reason: WRITES_DISABLED_REASON },
         503
       );
     }
-    const presented = presentedToken(c);
+    const presented = presentedToken(req);
     if (!presented || !constantTimeEquals(presented, deps.adminToken)) {
-      return c.json(
+      return json(
         { error: 'unauthorized', reason: WRITES_ENABLED_REASON },
         401
       );
@@ -411,26 +450,26 @@ export function registerAdminRoutes(app: Hono, deps: AdminSurfaceDeps): void {
     return null;
   };
 
-  app.get('/admin/inventory', (c: Context) =>
-    c.json(buildInventoryReport(deps))
-  );
+  if (req.method === 'GET' && req.path === ADMIN_PATHS.inventory) {
+    return json(buildInventoryReport(deps));
+  }
 
-  app.post('/admin/inventory/reconcile', async (c: Context) => {
-    const denied = denyWrite(c);
+  if (req.method === 'POST' && req.path === ADMIN_PATHS.reconcile) {
+    const denied = denyWrite();
     if (denied) return denied;
     const result = await deps.reconciler.reconcile();
-    return c.json(serializeReconcile(result));
-  });
+    return json(serializeReconcile(result));
+  }
 
-  app.post('/admin/inventory/credit', async (c: Context) => {
-    const denied = denyWrite(c);
+  if (req.method === 'POST' && req.path === ADMIN_PATHS.credit) {
+    const denied = denyWrite();
     if (denied) return denied;
 
     let body: CreditBody = {};
     try {
-      body = (await c.req.json()) as CreditBody;
+      body = (await req.json()) as CreditBody;
     } catch {
-      return c.json(
+      return json(
         {
           error: 'invalid_body',
           reason: 'expected a JSON object { assetCode, chain, amount? }',
@@ -440,23 +479,20 @@ export function registerAdminRoutes(app: Hono, deps: AdminSurfaceDeps): void {
     }
     const { assetCode, chain } = body;
     if (typeof assetCode !== 'string' || assetCode.length === 0) {
-      return c.json(
+      return json(
         { error: 'invalid_body', reason: 'assetCode is required' },
         400
       );
     }
     if (typeof chain !== 'string' || chain.length === 0) {
-      return c.json(
-        { error: 'invalid_body', reason: 'chain is required' },
-        400
-      );
+      return json({ error: 'invalid_body', reason: 'chain is required' }, 400);
     }
     let requested: bigint | undefined;
     if (body.amount !== undefined) {
       try {
         requested = BigInt(body.amount as string | number | bigint);
       } catch {
-        return c.json(
+        return json(
           {
             error: 'invalid_body',
             reason: 'amount must be a decimal integer (string or number)',
@@ -465,7 +501,7 @@ export function registerAdminRoutes(app: Hono, deps: AdminSurfaceDeps): void {
         );
       }
       if (requested <= 0n) {
-        return c.json(
+        return json(
           { error: 'invalid_body', reason: 'amount must be positive' },
           400
         );
@@ -481,7 +517,7 @@ export function registerAdminRoutes(app: Hono, deps: AdminSurfaceDeps): void {
       chain,
     });
     if (preview.channels.length === 0) {
-      return c.json(
+      return json(
         {
           error: 'unknown_pool',
           reason: `no channel state for ${assetCode}:${chain}${
@@ -495,7 +531,7 @@ export function registerAdminRoutes(app: Hono, deps: AdminSurfaceDeps): void {
       );
     }
     if (preview.channels.every((ch) => ch.redeemed === null)) {
-      return c.json(
+      return json(
         {
           error: 'chain_unreadable',
           reason:
@@ -507,7 +543,7 @@ export function registerAdminRoutes(app: Hono, deps: AdminSurfaceDeps): void {
     }
     const corroborated = sumRestored(preview);
     if (corroborated === 0n) {
-      return c.json(
+      return json(
         {
           error: 'uncorroborated',
           reason:
@@ -520,7 +556,7 @@ export function registerAdminRoutes(app: Hono, deps: AdminSurfaceDeps): void {
       );
     }
     if (requested !== undefined && requested > corroborated) {
-      return c.json(
+      return json(
         {
           error: 'exceeds_corroborated',
           reason: `the chain corroborates only ${corroborated} of the requested ${requested}; nothing was credited`,
@@ -537,13 +573,13 @@ export function registerAdminRoutes(app: Hono, deps: AdminSurfaceDeps): void {
       assetCode,
       chain,
     });
-    return c.json({
+    return json({
       requested: requested?.toString() ?? null,
       corroborated: corroborated.toString(),
       credited: sumRestored(applied).toString(),
       result: serializeReconcile(applied),
     });
-  });
+  }
 
   /**
    * swap#142 — book genuinely NEW capital.
@@ -559,15 +595,15 @@ export function registerAdminRoutes(app: Hono, deps: AdminSurfaceDeps): void {
    * code, and mutates nothing — so an operator can see exactly what the real
    * call will do before making it.
    */
-  app.post('/admin/inventory/deposit', async (c: Context) => {
-    const denied = denyWrite(c);
+  if (req.method === 'POST' && req.path === ADMIN_PATHS.deposit) {
+    const denied = denyWrite();
     if (denied) return denied;
 
     let raw: DepositBody = {};
     try {
-      raw = (await c.req.json()) as DepositBody;
+      raw = (await req.json()) as DepositBody;
     } catch {
-      return c.json(
+      return json(
         {
           error: 'invalid_body',
           reason:
@@ -578,10 +614,10 @@ export function registerAdminRoutes(app: Hono, deps: AdminSurfaceDeps): void {
     }
     const parsed = parsePoolBody(raw);
     if (!parsed.ok) {
-      return c.json({ error: 'invalid_body', reason: parsed.reason }, 400);
+      return json({ error: 'invalid_body', reason: parsed.reason }, 400);
     }
     if (raw.dryRun !== undefined && typeof raw.dryRun !== 'boolean') {
-      return c.json(
+      return json(
         { error: 'invalid_body', reason: 'dryRun must be a boolean' },
         400
       );
@@ -591,7 +627,7 @@ export function registerAdminRoutes(app: Hono, deps: AdminSurfaceDeps): void {
 
     const reading = await deps.reconciler.readPoolFunding({ assetCode, chain });
     if (!reading.supported) {
-      return c.json(
+      return json(
         {
           error: 'funding_unreadable',
           reason: `cannot read on-chain channel funding for ${assetCode}:${chain} — refusing to credit capital the chain has not corroborated`,
@@ -601,7 +637,7 @@ export function registerAdminRoutes(app: Hono, deps: AdminSurfaceDeps): void {
       );
     }
     if (reading.channels.length === 0) {
-      return c.json(
+      return json(
         {
           error: 'unknown_pool',
           reason: `no channel state for ${assetCode}:${chain} — capital only counts once the chain shows it in a channel this node has provisioned`,
@@ -615,7 +651,7 @@ export function registerAdminRoutes(app: Hono, deps: AdminSurfaceDeps): void {
       // excluded), so proceeding would under-credit rather than over-credit —
       // safe, but an operator asking "did my top-up land?" must not be handed
       // a silently partial answer. Refuse and let them retry.
-      return c.json(
+      return json(
         {
           error: 'chain_unreadable',
           reason: `${reading.errors.length} of ${reading.channels.length} channel reads failed — the corroborated total would be incomplete, so nothing was credited`,
@@ -645,7 +681,7 @@ export function registerAdminRoutes(app: Hono, deps: AdminSurfaceDeps): void {
         err instanceof SwapInventoryError &&
         err.code === 'INVENTORY_NOT_INITIALIZED'
       ) {
-        return c.json(
+        return json(
           {
             error: 'unknown_pool',
             reason: `no inventory pool ${assetCode}:${chain} is configured on this node`,
@@ -668,7 +704,7 @@ export function registerAdminRoutes(app: Hono, deps: AdminSurfaceDeps): void {
     };
 
     if (outcome.refused === 'uncorroborated') {
-      return c.json(
+      return json(
         {
           ...body,
           error: 'uncorroborated',
@@ -678,7 +714,7 @@ export function registerAdminRoutes(app: Hono, deps: AdminSurfaceDeps): void {
       );
     }
     if (outcome.refused === 'exceeds_corroborated') {
-      return c.json(
+      return json(
         {
           ...body,
           error: 'exceeds_corroborated',
@@ -691,6 +727,8 @@ export function registerAdminRoutes(app: Hono, deps: AdminSurfaceDeps): void {
     const persisted = dryRun
       ? { persisted: false }
       : deps.reconciler.persistState();
-    return c.json({ ...body, ...persisted });
-  });
+    return json({ ...body, ...persisted });
+  }
+
+  return null;
 }

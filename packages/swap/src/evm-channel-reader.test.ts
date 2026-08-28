@@ -1,307 +1,156 @@
 /**
- * `createEvmChannelOnChainReader` — issue #113.
+ * The maker's EVM chain-truth reader against `TokenNetwork.participants`.
  *
- * Exercises the real request/decode path against a minimal in-process
- * JSON-RPC server (no anvil/forge needed — this reader only ever issues a
- * read-only `eth_call`, so a canned response is enough to pin the contract).
+ * `participants(bytes32 channelId, address participant)` returns the maker's
+ * own `(deposit, nonce, transferredAmount)`. `transferredAmount` is what the
+ * counterparty has claimed on chain — the redeemed leg-B watermark — and
+ * `deposit` is the total ever placed, so the funding position reports the
+ * remaining deposit as `deposit − transferredAmount`.
  */
+
 import { describe, it, expect, afterEach } from 'vitest';
 import { createServer, type Server } from 'node:http';
+import { keccak_256 } from '@noble/hashes/sha3.js';
+import { bytesToHex } from '@noble/hashes/utils.js';
 
 import { createEvmChannelOnChainReader } from './evm-channel-reader.js';
-import { channelFundedTotal } from './channel-state.js';
 
-/** Non-null narrowing without `!` (the repo's eslint gate forbids it). */
-function must<T>(value: T | null | undefined, what: string): T {
-  if (value === null || value === undefined) {
-    throw new Error(`expected ${what} to be present`);
-  }
-  return value;
-}
-
-const CHANNEL_ADDRESS = '0x' + '33'.repeat(20);
-const CHAIN = 'evm:31337';
-const CHANNEL_ID = '0x' + '01'.repeat(32);
-/** keccak256("channels(bytes32)")[0:4] — independently verified against the well-known ERC20 `transfer(address,uint256)` selector `0xa9059cbb` using the same helper. */
-const CHANNELS_SELECTOR = '0x7a7ebd7b';
+const PARTICIPANTS_SELECTOR =
+  '0x' +
+  bytesToHex(
+    keccak_256(new TextEncoder().encode('participants(bytes32,address)')).slice(0, 4)
+  );
+const TOKEN_NETWORK = '0x' + '33'.repeat(20);
+const MAKER = '0x' + '55'.repeat(20);
+const CHANNEL_ID = '0x' + 'ab'.repeat(32);
+const CHAIN = 'evm:8453';
 
 const servers: Server[] = [];
-
 afterEach(async () => {
   await Promise.all(
-    servers
-      .splice(0)
-      .map((s) => new Promise<void>((resolve) => s.close(() => resolve())))
+    servers.splice(0).map((s) => new Promise<void>((r) => s.close(() => r())))
   );
 });
 
-interface JsonRpcRequest {
-  id: number;
-  method: string;
-  params: [{ to: string; data: string }, string];
-}
+const word = (v: bigint): string => v.toString(16).padStart(64, '0');
+const participantsResult = (p: {
+  deposit: bigint;
+  nonce: bigint;
+  transferred: bigint;
+}): string => '0x' + [word(p.deposit), word(p.nonce), word(p.transferred)].join('');
 
-/** Boots a JSON-RPC server whose `eth_call` responses come from `handler`. */
-async function startRpcServer(
-  handler: (req: JsonRpcRequest) => unknown
-): Promise<string> {
+async function startRpc(
+  answer: (req: { method: string; params: unknown[] }) => unknown
+): Promise<{ url: string; calls: { method: string; params: unknown[] }[] }> {
+  const calls: { method: string; params: unknown[] }[] = [];
   const server = createServer((req, res) => {
     let body = '';
-    req.on('data', (chunk: Buffer) => {
-      body += chunk.toString();
-    });
+    req.on('data', (c: Buffer) => (body += c.toString()));
     req.on('end', () => {
-      const json = JSON.parse(body) as JsonRpcRequest;
-      try {
-        const result = handler(json);
-        res.writeHead(200, { 'content-type': 'application/json' });
-        res.end(JSON.stringify({ jsonrpc: '2.0', id: json.id, result }));
-      } catch (err) {
-        res.writeHead(200, { 'content-type': 'application/json' });
-        res.end(
-          JSON.stringify({
-            jsonrpc: '2.0',
-            id: json.id,
-            error: {
-              code: -32000,
-              message: err instanceof Error ? err.message : String(err),
-            },
-          })
-        );
-      }
+      const json = JSON.parse(body) as { id: number; method: string; params: unknown[] };
+      calls.push({ method: json.method, params: json.params });
+      const result = answer(json);
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(
+        JSON.stringify(
+          result instanceof Error
+            ? { jsonrpc: '2.0', id: json.id, error: { message: result.message } }
+            : { jsonrpc: '2.0', id: json.id, result }
+        )
+      );
     });
   });
   servers.push(server);
-  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
   const address = server.address();
-  if (address === null || typeof address === 'string') {
-    throw new Error('expected a bound TCP address');
-  }
-  return `http://127.0.0.1:${address.port}`;
+  if (address === null || typeof address === 'string') throw new Error('no port');
+  return { url: `http://127.0.0.1:${address.port}`, calls };
 }
 
-/** Right-pads a hex value (sans `0x`) out to one 32-byte ABI word. */
-function word(hex: string): string {
-  return hex.toLowerCase().padStart(64, '0');
-}
+const reader = (rpcUrl: string, chain = CHAIN) =>
+  createEvmChannelOnChainReader([
+    { chainId: chain, rpcUrl, tokenNetworkAddress: TOKEN_NETWORK, makerAddress: MAKER },
+  ]);
 
-/** Hand-encodes a `Channel` struct return value — no ABI library involved. */
-function encodeChannelStruct(fields: {
-  signer?: string;
-  funder?: string;
-  nonce?: bigint;
-  cumulativePaid: bigint;
-  deposit?: bigint;
-  closingAt?: bigint;
-  state?: number;
-}): string {
-  const words = [
-    word((fields.signer ?? '0x' + '11'.repeat(20)).replace(/^0x/, '')),
-    word((fields.funder ?? '0x' + '22'.repeat(20)).replace(/^0x/, '')),
-    word((fields.nonce ?? 3n).toString(16)),
-    word(fields.cumulativePaid.toString(16)),
-    word((fields.deposit ?? 1_000n).toString(16)),
-    word((fields.closingAt ?? 0n).toString(16)),
-    word((fields.state ?? 1).toString(16)),
-  ];
-  return '0x' + words.join('');
-}
-
-describe('createEvmChannelOnChainReader (issue #113)', () => {
-  it('[P0] decodes cumulativePaid (word index 3) from the channels() getter response', async () => {
-    const rpcUrl = await startRpcServer((req) => {
-      expect(req.method).toBe('eth_call');
-      return encodeChannelStruct({ cumulativePaid: 12_345n });
-    });
-    const reader = createEvmChannelOnChainReader([
-      { chainId: CHAIN, rpcUrl, channelAddress: CHANNEL_ADDRESS },
-    ]);
-
-    const cumulativePaid = await reader.getCumulativePaid({
-      assetCode: 'ETH',
-      chain: CHAIN,
-      channelId: CHANNEL_ID,
-    });
-
-    expect(cumulativePaid).toBe(12_345n);
-  });
-
-  it('[P0] a channel with zero cumulativePaid (never redeemed) decodes to 0n, not a decode error', async () => {
-    const rpcUrl = await startRpcServer(() =>
-      encodeChannelStruct({ cumulativePaid: 0n })
+describe('createEvmChannelOnChainReader (TokenNetwork participants)', () => {
+  it('[P0] decodes transferredAmount (word 2) as cumulativePaid', async () => {
+    const rpc = await startRpc(() =>
+      participantsResult({ deposit: 5_000_000n, nonce: 3n, transferred: 1_234n })
     );
-    const reader = createEvmChannelOnChainReader([
-      { chainId: CHAIN, rpcUrl, channelAddress: CHANNEL_ADDRESS },
-    ]);
-
-    const cumulativePaid = await reader.getCumulativePaid({
-      assetCode: 'ETH',
-      chain: CHAIN,
-      channelId: CHANNEL_ID,
-    });
-
-    expect(cumulativePaid).toBe(0n);
+    await expect(
+      reader(rpc.url).getCumulativePaid({ assetCode: 'USDC', chain: CHAIN, channelId: CHANNEL_ID })
+    ).resolves.toBe(1_234n);
   });
 
-  it('[P0] the eth_call request carries the channels(bytes32) selector and the channelId as calldata', async () => {
-    let captured: { to: string; data: string } | undefined;
-    const rpcUrl = await startRpcServer((req) => {
-      captured = req.params[0];
-      return encodeChannelStruct({ cumulativePaid: 1n });
-    });
-    const reader = createEvmChannelOnChainReader([
-      { chainId: CHAIN, rpcUrl, channelAddress: CHANNEL_ADDRESS },
-    ]);
+  it('[P0] a never-redeemed channel decodes to 0n, not a decode error', async () => {
+    const rpc = await startRpc(() =>
+      participantsResult({ deposit: 5_000_000n, nonce: 0n, transferred: 0n })
+    );
+    await expect(
+      reader(rpc.url).getCumulativePaid({ assetCode: 'USDC', chain: CHAIN, channelId: CHANNEL_ID })
+    ).resolves.toBe(0n);
+  });
 
-    await reader.getCumulativePaid({
-      assetCode: 'ETH',
-      chain: CHAIN,
-      channelId: CHANNEL_ID,
-    });
-
-    expect(captured?.to).toBe(CHANNEL_ADDRESS.toLowerCase());
-    expect(captured?.data).toBe(
-      CHANNELS_SELECTOR + CHANNEL_ID.replace(/^0x/, '')
+  it('[P0] the eth_call carries participants(bytes32,address) with the channelId and the MAKER address', async () => {
+    const rpc = await startRpc(() =>
+      participantsResult({ deposit: 0n, nonce: 0n, transferred: 0n })
+    );
+    await reader(rpc.url).getCumulativePaid({ assetCode: 'USDC', chain: CHAIN, channelId: CHANNEL_ID });
+    const call = rpc.calls[0];
+    expect(call?.method).toBe('eth_call');
+    const tx = (call?.params as [{ to: string; data: string }])[0];
+    expect(tx.to.toLowerCase()).toBe(TOKEN_NETWORK);
+    expect(tx.data).toBe(
+      PARTICIPANTS_SELECTOR + CHANNEL_ID.slice(2) + '00'.repeat(12) + MAKER.slice(2)
     );
   });
 
   it('[P1] rejects for a chain with no configured provider', async () => {
-    const reader = createEvmChannelOnChainReader([]);
+    const rpc = await startRpc(() => participantsResult({ deposit: 0n, nonce: 0n, transferred: 0n }));
     await expect(
-      reader.getCumulativePaid({
-        assetCode: 'ETH',
-        chain: 'evm:999',
-        channelId: CHANNEL_ID,
-      })
-    ).rejects.toThrow(/No EVM chain provider configured/);
+      reader(rpc.url).getCumulativePaid({ assetCode: 'USDC', chain: 'evm:1', channelId: CHANNEL_ID })
+    ).rejects.toThrow(/No EVM chain provider/);
   });
 
   it('[P1] rejects when the RPC endpoint returns a JSON-RPC error', async () => {
-    const rpcUrl = await startRpcServer(() => {
-      throw new Error('execution reverted');
-    });
-    const reader = createEvmChannelOnChainReader([
-      { chainId: CHAIN, rpcUrl, channelAddress: CHANNEL_ADDRESS },
-    ]);
-
+    const rpc = await startRpc(() => new Error('execution reverted'));
     await expect(
-      reader.getCumulativePaid({
-        assetCode: 'ETH',
-        chain: CHAIN,
-        channelId: CHANNEL_ID,
-      })
-    ).rejects.toThrow();
+      reader(rpc.url).getCumulativePaid({ assetCode: 'USDC', chain: CHAIN, channelId: CHANNEL_ID })
+    ).rejects.toThrow(/execution reverted/);
   });
 
-  it('[P1] rejects a malformed (too-short) channels() response instead of decoding garbage', async () => {
-    // Only 2 of the expected 7 words — short of word index 3 (cumulativePaid).
-    const rpcUrl = await startRpcServer(() => '0x' + 'ab'.repeat(64));
-    const reader = createEvmChannelOnChainReader([
-      { chainId: CHAIN, rpcUrl, channelAddress: CHANNEL_ADDRESS },
-    ]);
-
+  it('[P1] rejects a too-short response instead of decoding garbage', async () => {
+    const rpc = await startRpc(() => '0x' + word(1n));
     await expect(
-      reader.getCumulativePaid({
-        assetCode: 'ETH',
-        chain: CHAIN,
-        channelId: CHANNEL_ID,
-      })
+      reader(rpc.url).getCumulativePaid({ assetCode: 'USDC', chain: CHAIN, channelId: CHANNEL_ID })
     ).rejects.toThrow(/too short/);
   });
 
-  it('[P1] rejects a malformed channelAddress at construction time', () => {
+  it('[P1] rejects a malformed tokenNetworkAddress or maker address at construction', () => {
     expect(() =>
       createEvmChannelOnChainReader([
-        {
-          chainId: CHAIN,
-          rpcUrl: 'http://127.0.0.1:1',
-          channelAddress: '0xnot-an-address',
-        },
+        { chainId: CHAIN, rpcUrl: 'http://127.0.0.1:1', tokenNetworkAddress: '0x1234', makerAddress: MAKER },
       ])
-    ).toThrow();
-  });
-
-  it('[P2] two chains resolve against their own configured RPC endpoint independently', async () => {
-    const rpcUrlA = await startRpcServer(() =>
-      encodeChannelStruct({ cumulativePaid: 1n })
-    );
-    // A second server on a second port for the second chain.
-    const rpcUrlB = await startRpcServer(() =>
-      encodeChannelStruct({ cumulativePaid: 2n })
-    );
-
-    const reader = createEvmChannelOnChainReader([
-      { chainId: 'evm:1', rpcUrl: rpcUrlA, channelAddress: CHANNEL_ADDRESS },
-      { chainId: 'evm:2', rpcUrl: rpcUrlB, channelAddress: CHANNEL_ADDRESS },
-    ]);
-
-    const [a, b] = await Promise.all([
-      reader.getCumulativePaid({
-        assetCode: 'ETH',
-        chain: 'evm:1',
-        channelId: CHANNEL_ID,
-      }),
-      reader.getCumulativePaid({
-        assetCode: 'ETH',
-        chain: 'evm:2',
-        channelId: CHANNEL_ID,
-      }),
-    ]);
-    expect(a).toBe(1n);
-    expect(b).toBe(2n);
+    ).toThrow(/tokenNetworkAddress/);
+    expect(() =>
+      createEvmChannelOnChainReader([
+        { chainId: CHAIN, rpcUrl: 'http://127.0.0.1:1', tokenNetworkAddress: TOKEN_NETWORK, makerAddress: '0x12' },
+      ])
+    ).toThrow(/maker address/);
   });
 });
 
-describe('createEvmChannelOnChainReader.getFundingPosition (swap#142)', () => {
-  it('[P0] returns both capital words from ONE eth_call, so they share a block', async () => {
-    let calls = 0;
-    const rpcUrl = await startRpcServer((req) => {
-      calls += 1;
-      expect(req.method).toBe('eth_call');
-      return encodeChannelStruct({ cumulativePaid: 8_000n, deposit: 2_000n });
-    });
-    const reader = createEvmChannelOnChainReader([
-      { chainId: CHAIN, rpcUrl, channelAddress: CHANNEL_ADDRESS },
-    ]);
-
-    const position = await must(
-      reader.getFundingPosition,
-      'getFundingPosition capability'
-    ).call(reader, { assetCode: 'ETH', chain: CHAIN, channelId: CHANNEL_ID });
-
-    // Two eth_calls could straddle a redemption and overstate the sum.
-    expect(calls).toBe(1);
-    expect(position).toEqual({ cumulativePaid: 8_000n, deposit: 2_000n });
-    expect(channelFundedTotal(position)).toBe(10_000n);
-  });
-
-  it('[P0] decodes `deposit` from word index 4, distinct from cumulativePaid', async () => {
-    const rpcUrl = await startRpcServer(() =>
-      encodeChannelStruct({ cumulativePaid: 0n, deposit: 15_000_000n })
+describe('createEvmChannelOnChainReader.getFundingPosition', () => {
+  it('[P0] reports remaining deposit = deposit − transferred, so funded = total placed', async () => {
+    const rpc = await startRpc(() =>
+      participantsResult({ deposit: 15_000_000n, nonce: 7n, transferred: 1_000n })
     );
-    const reader = createEvmChannelOnChainReader([
-      { chainId: CHAIN, rpcUrl, channelAddress: CHANNEL_ADDRESS },
-    ]);
-
-    const position = await must(
-      reader.getFundingPosition,
-      'getFundingPosition capability'
-    ).call(reader, { assetCode: 'ETH', chain: CHAIN, channelId: CHANNEL_ID });
-    expect(position.deposit).toBe(15_000_000n);
-    expect(position.cumulativePaid).toBe(0n);
-  });
-
-  it('[P1] a truncated response throws rather than decoding a short word', async () => {
-    const rpcUrl = await startRpcServer(() => '0x' + '00'.repeat(32 * 4));
-    const reader = createEvmChannelOnChainReader([
-      { chainId: CHAIN, rpcUrl, channelAddress: CHANNEL_ADDRESS },
-    ]);
-
-    await expect(
-      must(reader.getFundingPosition, 'getFundingPosition capability').call(
-        reader,
-        { assetCode: 'ETH', chain: CHAIN, channelId: CHANNEL_ID }
-      )
-    ).rejects.toThrow(/deposit/);
+    const position = await reader(rpc.url).getFundingPosition?.({
+      assetCode: 'USDC',
+      chain: CHAIN,
+      channelId: CHANNEL_ID,
+    });
+    expect(position).toEqual({ cumulativePaid: 1_000n, deposit: 14_999_000n });
+    expect(rpc.calls.length).toBe(1);
   });
 });

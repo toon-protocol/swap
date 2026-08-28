@@ -9,7 +9,6 @@
  */
 
 import { describe, it, expect, vi } from 'vitest';
-import { Hono } from 'hono';
 
 import { SwapInventory } from './inventory.js';
 import { SwapChannelState } from './channel-state.js';
@@ -19,7 +18,8 @@ import {
 } from './inventory-reconciler.js';
 import type { ReconcileResult } from './inventory-reconciler.js';
 import type { ChannelOnChainReader } from './channel-state.js';
-import { registerAdminRoutes, buildInventoryReport } from './admin-surface.js';
+import { buildInventoryReport } from './admin-surface.js';
+import { adminTestApp } from './admin-surface.test-support.js';
 import type { AdminInventoryReport } from './admin-surface.js';
 
 const ASSET = 'USDC';
@@ -301,13 +301,11 @@ function makeAdminApp(p: {
   reconciler: SwapInventoryReconciler;
   adminToken?: string;
 }) {
-  const app = new Hono();
-  registerAdminRoutes(app, {
+  return adminTestApp({
     inventory: p.inventory,
     reconciler: p.reconciler,
     ...(p.adminToken !== undefined && { adminToken: p.adminToken }),
   });
-  return app;
 }
 
 describe('operator read surface — GET /admin/inventory', () => {

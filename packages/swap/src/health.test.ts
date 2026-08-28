@@ -17,13 +17,6 @@ import { describe, it, expect } from 'vitest';
 const VALID_MNEMONIC =
   'abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about';
 
-function fakeConnector() {
-  return {
-    close: async () => undefined,
-    send: async () => ({ ok: true }),
-  };
-}
-
 /** Issue #101: every EVM chain a pair targets needs a chainProviders entry. */
 function evmChainProvider(chainId: string) {
   return {
@@ -40,7 +33,6 @@ function evmChainProvider(chainId: string) {
 function validConfig() {
   return {
     mnemonic: VALID_MNEMONIC,
-    connector: fakeConnector(),
     swapPairs: [
       {
         from: { assetCode: 'USDC', assetScale: 6, chain: 'evm:8453' },
@@ -56,7 +48,6 @@ function validConfig() {
     },
     inventory: { 'evm:8453': 9_007_199_254_740_993n }, // > MAX_SAFE_INTEGER
     chainProviders: [evmChainProvider('evm:8453')],
-    relayUrls: ['ws://localhost:0'],
     blsPort: 0,
   };
 }
@@ -69,7 +60,6 @@ function validConfig() {
 function multiAssetConfig() {
   return {
     mnemonic: VALID_MNEMONIC,
-    connector: fakeConnector(),
     swapPairs: [
       {
         from: { assetCode: 'USDC', assetScale: 6, chain: 'evm:1' },
@@ -89,8 +79,8 @@ function multiAssetConfig() {
       ],
     },
     inventory: { 'evm:8453': 1_000_000n },
-    chainProviders: [evmChainProvider('evm:8453')],
-    relayUrls: ['ws://localhost:0'],
+    // Leg A is paid on evm:1, leg B on evm:8453 — the maker needs both.
+    chainProviders: [evmChainProvider('evm:8453'), evmChainProvider('evm:1')],
     blsPort: 0,
   };
 }

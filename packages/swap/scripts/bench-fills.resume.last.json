@@ -1,0 +1,288 @@
+{
+  "rows": [
+    {
+      "delta": "100000",
+      "fills": 10,
+      "notional": "1000000",
+      "wallMs": 3314,
+      "fillsPerSec": 3.018,
+      "latMeanMs": 331,
+      "latP50Ms": 313,
+      "latMaxMs": 460,
+      "takerPublishMeanMs": 88,
+      "makerPublishMeanMs": 78,
+      "makerVerifyMeanMs": null,
+      "writes": 23,
+      "carriageUSDCmicro": 23,
+      "carriagePctOfNotional": 0.002,
+      "refusals": [],
+      "ensureMs": 60717,
+      "status": "done"
+    }
+  ],
+  "makerEvents": [
+    {
+      "t": 1787939557306,
+      "event": "swap.order.published",
+      "data": {
+        "orderId": "USDC:evm:84532->USDC:solana:devnet",
+        "eventId": "425fdfdeea1946827addd4d46248697025a6e7bb0d18021cf2827dc9360c92e1",
+        "rate": "0.99",
+        "expiresAt": 1787941357072
+      }
+    },
+    {
+      "t": 1787939558618,
+      "event": "swap.answer.published",
+      "data": {
+        "to": "48be65fc728f25a8bd4274326048ea088a4777201ed28bb479cb245db54d1246",
+        "type": "quote",
+        "streamNonce": "f69a052d0ec03a99a564aa931a4d1c33",
+        "eventId": "52b6b392fee0a297cb2434cd8a26e4f5414d6b033cb0053c082b3d8505f06d89"
+      }
+    },
+    {
+      "t": 1787939619128,
+      "event": "swap.fill.retransmit",
+      "data": {
+        "streamNonce": "f69a052d0ec03a99a564aa931a4d1c33",
+        "seq": 1
+      }
+    },
+    {
+      "t": 1787939619208,
+      "event": "swap.answer.published",
+      "data": {
+        "to": "48be65fc728f25a8bd4274326048ea088a4777201ed28bb479cb245db54d1246",
+        "type": "advance",
+        "streamNonce": "f69a052d0ec03a99a564aa931a4d1c33",
+        "eventId": "e2d7349a6b946e060bef7f056326a25b8dcdc1173ddfb02a037bde8d9a6234e7"
+      }
+    },
+    {
+      "t": 1787939619692,
+      "event": "swap.fill.accepted",
+      "data": {
+        "streamNonce": "f69a052d0ec03a99a564aa931a4d1c33",
+        "seq": 2,
+        "payer": "evm:0xa2c106b79c0981eb12a32f823abc2ec762d9867d5b149844262f0a3d9ac10beb",
+        "sourceAmount": "100000",
+        "targetAmount": "99000",
+        "rate": "0.99",
+        "channelId": "HH6d31FB8K6DYcZcCwdAQ2cz3wtabFvfaYiqbV7fmnp",
+        "nonce": "55",
+        "cumulativeAmount": "604990"
+      }
+    },
+    {
+      "t": 1787939619771,
+      "event": "swap.answer.published",
+      "data": {
+        "to": "48be65fc728f25a8bd4274326048ea088a4777201ed28bb479cb245db54d1246",
+        "type": "advance",
+        "streamNonce": "f69a052d0ec03a99a564aa931a4d1c33",
+        "eventId": "feae0b854618266a9e24f2aecc19d6f01d02f76da83a60797aa2b117fffae5e9"
+      }
+    },
+    {
+      "t": 1787939620000,
+      "event": "swap.fill.accepted",
+      "data": {
+        "streamNonce": "f69a052d0ec03a99a564aa931a4d1c33",
+        "seq": 3,
+        "payer": "evm:0xa2c106b79c0981eb12a32f823abc2ec762d9867d5b149844262f0a3d9ac10beb",
+        "sourceAmount": "100000",
+        "targetAmount": "99000",
+        "rate": "0.99",
+        "channelId": "HH6d31FB8K6DYcZcCwdAQ2cz3wtabFvfaYiqbV7fmnp",
+        "nonce": "56",
+        "cumulativeAmount": "703990"
+      }
+    },
+    {
+      "t": 1787939620076,
+      "event": "swap.answer.published",
+      "data": {
+        "to": "48be65fc728f25a8bd4274326048ea088a4777201ed28bb479cb245db54d1246",
+        "type": "advance",
+        "streamNonce": "f69a052d0ec03a99a564aa931a4d1c33",
+        "eventId": "0f891a91261ed237649fb648fb62eb1b16983ab59a64f725d84fb0e9b63ae063"
+      }
+    },
+    {
+      "t": 1787939620305,
+      "event": "swap.fill.accepted",
+      "data": {
+        "streamNonce": "f69a052d0ec03a99a564aa931a4d1c33",
+        "seq": 4,
+        "payer": "evm:0xa2c106b79c0981eb12a32f823abc2ec762d9867d5b149844262f0a3d9ac10beb",
+        "sourceAmount": "100000",
+        "targetAmount": "99000",
+        "rate": "0.99",
+        "channelId": "HH6d31FB8K6DYcZcCwdAQ2cz3wtabFvfaYiqbV7fmnp",
+        "nonce": "57",
+        "cumulativeAmount": "802990"
+      }
+    },
+    {
+      "t": 1787939620382,
+      "event": "swap.answer.published",
+      "data": {
+        "to": "48be65fc728f25a8bd4274326048ea088a4777201ed28bb479cb245db54d1246",
+        "type": "advance",
+        "streamNonce": "f69a052d0ec03a99a564aa931a4d1c33",
+        "eventId": "3d5a711505e5d30276fe78a1a704cab913b30e2fe741a8b6e902f8b7e84df4c3"
+      }
+    },
+    {
+      "t": 1787939620618,
+      "event": "swap.fill.accepted",
+      "data": {
+        "streamNonce": "f69a052d0ec03a99a564aa931a4d1c33",
+        "seq": 5,
+        "payer": "evm:0xa2c106b79c0981eb12a32f823abc2ec762d9867d5b149844262f0a3d9ac10beb",
+        "sourceAmount": "100000",
+        "targetAmount": "99000",
+        "rate": "0.99",
+        "channelId": "HH6d31FB8K6DYcZcCwdAQ2cz3wtabFvfaYiqbV7fmnp",
+        "nonce": "58",
+        "cumulativeAmount": "901990"
+      }
+    },
+    {
+      "t": 1787939620703,
+      "event": "swap.answer.published",
+      "data": {
+        "to": "48be65fc728f25a8bd4274326048ea088a4777201ed28bb479cb245db54d1246",
+        "type": "advance",
+        "streamNonce": "f69a052d0ec03a99a564aa931a4d1c33",
+        "eventId": "09a2a6344de08e31f575d43c901bf63a02f24d957c6224c26603a41b9a35a892"
+      }
+    },
+    {
+      "t": 1787939620928,
+      "event": "swap.fill.accepted",
+      "data": {
+        "streamNonce": "f69a052d0ec03a99a564aa931a4d1c33",
+        "seq": 6,
+        "payer": "evm:0xa2c106b79c0981eb12a32f823abc2ec762d9867d5b149844262f0a3d9ac10beb",
+        "sourceAmount": "100000",
+        "targetAmount": "99000",
+        "rate": "0.99",
+        "channelId": "HH6d31FB8K6DYcZcCwdAQ2cz3wtabFvfaYiqbV7fmnp",
+        "nonce": "59",
+        "cumulativeAmount": "1000990"
+      }
+    },
+    {
+      "t": 1787939621004,
+      "event": "swap.answer.published",
+      "data": {
+        "to": "48be65fc728f25a8bd4274326048ea088a4777201ed28bb479cb245db54d1246",
+        "type": "advance",
+        "streamNonce": "f69a052d0ec03a99a564aa931a4d1c33",
+        "eventId": "151a95b06aa76a8d19ecbd409a9e9b0d0a2f05e2585e20e512b193cea4139f64"
+      }
+    },
+    {
+      "t": 1787939621229,
+      "event": "swap.fill.accepted",
+      "data": {
+        "streamNonce": "f69a052d0ec03a99a564aa931a4d1c33",
+        "seq": 7,
+        "payer": "evm:0xa2c106b79c0981eb12a32f823abc2ec762d9867d5b149844262f0a3d9ac10beb",
+        "sourceAmount": "100000",
+        "targetAmount": "99000",
+        "rate": "0.99",
+        "channelId": "HH6d31FB8K6DYcZcCwdAQ2cz3wtabFvfaYiqbV7fmnp",
+        "nonce": "60",
+        "cumulativeAmount": "1099990"
+      }
+    },
+    {
+      "t": 1787939621306,
+      "event": "swap.answer.published",
+      "data": {
+        "to": "48be65fc728f25a8bd4274326048ea088a4777201ed28bb479cb245db54d1246",
+        "type": "advance",
+        "streamNonce": "f69a052d0ec03a99a564aa931a4d1c33",
+        "eventId": "60b4bc39568452fc76bf3ef16781474cee6e842a6031bfea18210164073dbc1b"
+      }
+    },
+    {
+      "t": 1787939621523,
+      "event": "swap.fill.accepted",
+      "data": {
+        "streamNonce": "f69a052d0ec03a99a564aa931a4d1c33",
+        "seq": 8,
+        "payer": "evm:0xa2c106b79c0981eb12a32f823abc2ec762d9867d5b149844262f0a3d9ac10beb",
+        "sourceAmount": "100000",
+        "targetAmount": "99000",
+        "rate": "0.99",
+        "channelId": "HH6d31FB8K6DYcZcCwdAQ2cz3wtabFvfaYiqbV7fmnp",
+        "nonce": "61",
+        "cumulativeAmount": "1198990"
+      }
+    },
+    {
+      "t": 1787939621599,
+      "event": "swap.answer.published",
+      "data": {
+        "to": "48be65fc728f25a8bd4274326048ea088a4777201ed28bb479cb245db54d1246",
+        "type": "advance",
+        "streamNonce": "f69a052d0ec03a99a564aa931a4d1c33",
+        "eventId": "d826d7d1b1bd903af29f1e26fd518a3305873160f63c7389861034ff433a7225"
+      }
+    },
+    {
+      "t": 1787939621857,
+      "event": "swap.fill.accepted",
+      "data": {
+        "streamNonce": "f69a052d0ec03a99a564aa931a4d1c33",
+        "seq": 9,
+        "payer": "evm:0xa2c106b79c0981eb12a32f823abc2ec762d9867d5b149844262f0a3d9ac10beb",
+        "sourceAmount": "100000",
+        "targetAmount": "99000",
+        "rate": "0.99",
+        "channelId": "HH6d31FB8K6DYcZcCwdAQ2cz3wtabFvfaYiqbV7fmnp",
+        "nonce": "62",
+        "cumulativeAmount": "1297990"
+      }
+    },
+    {
+      "t": 1787939621933,
+      "event": "swap.answer.published",
+      "data": {
+        "to": "48be65fc728f25a8bd4274326048ea088a4777201ed28bb479cb245db54d1246",
+        "type": "advance",
+        "streamNonce": "f69a052d0ec03a99a564aa931a4d1c33",
+        "eventId": "c6deb5cdd0156a30724d49b72e20d2a324cc9e44b01fa4b3cc744f29f87a9ad9"
+      }
+    },
+    {
+      "t": 1787939622161,
+      "event": "swap.fill.accepted",
+      "data": {
+        "streamNonce": "f69a052d0ec03a99a564aa931a4d1c33",
+        "seq": 10,
+        "payer": "evm:0xa2c106b79c0981eb12a32f823abc2ec762d9867d5b149844262f0a3d9ac10beb",
+        "sourceAmount": "100000",
+        "targetAmount": "99000",
+        "rate": "0.99",
+        "channelId": "HH6d31FB8K6DYcZcCwdAQ2cz3wtabFvfaYiqbV7fmnp",
+        "nonce": "63",
+        "cumulativeAmount": "1396990"
+      }
+    },
+    {
+      "t": 1787939622238,
+      "event": "swap.answer.published",
+      "data": {
+        "to": "48be65fc728f25a8bd4274326048ea088a4777201ed28bb479cb245db54d1246",
+        "type": "advance",
+        "streamNonce": "f69a052d0ec03a99a564aa931a4d1c33",
+        "eventId": "4b6add50498fa5277912ac852be8889b80b91e95ab868ea828261211a31e77e4"
+      }
+    }
+  ]
+}

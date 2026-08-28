@@ -15,10 +15,10 @@ half of the same idea.
 |  |  |
 | --- | --- |
 | Source | [`toon-protocol/connector`](https://github.com/toon-protocol/connector) → `packages/solana-program/` (native Rust, **not** Anchor) |
-| Source commit | `e9bfadad717e66ad9f6b99a929afed1514adce57` (tree `f193bd899e195c623d0c942cfaaba0d1652a8a21`) |
+| Source commit | `d4b1511e75c8050e94167b151c5aa9a90dd4c95b` (tree of `packages/solana-program`; previously `e9bfadad717e66ad9f6b99a929afed1514adce57`) |
 | Built with | `cargo build-sbf --tools-version v1.52` — the pin connector's own CI and `Makefile` use, and the one its `solana-program-reproducibility` job asserts is byte-stable |
-| Size | 109,416 bytes |
-| sha256 | `b15e3c808bda581457110193dcdecd060d22c0697b40ce245b4f9188c7497600` |
+| Size | 109,400 bytes |
+| sha256 | `ae2e91488c5b7920ca58279359d99cf8a3726d6b3f3b80a398a014af759e7e87` |
 
 `tests/e2e/helpers/solana-validator.ts` asserts the size and hash at boot, so a
 truncated or silently-swapped blob fails loudly instead of producing a validator

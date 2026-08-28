@@ -182,22 +182,10 @@ jobs:
       - name: Smoke build
         run: devbox run -- bash -c "pnpm install --no-frozen-lockfile && pnpm build"
 
-      # Devbox pins foundry, so `anvil` is on PATH here — this is where the
-      # anvil-gated integration suite (incl. the swap#50 rolling-settlement
-      # e2e, which spawns its own two anvil chains) actually RUNS instead of
-      # runtime-skipping like it does on the plain build job.
-      - name: Integration tests (anvil-gated)
-        run: devbox run -- bash -c "pnpm --filter @toon-protocol/swap test:integration"
-
-      # swap#104: the Docker cross-chain E2E suites' EVM leg is
-      # self-contained (tests/e2e/global-setup.ts boots its own Anvil +
-      # relay + peer1 in-process, needing only `anvil` on PATH — devbox
-      # provides it here same as the integration step above). Solana/Mina
-      # stay skip-only everywhere (see tests/e2e/README.md); the EVM core
-      # failing to boot under CI is a real regression and fails this step
-      # instead of masking as a pass-via-skip.
-      - name: Docker cross-chain E2E (EVM leg, anvil-gated)
-        run: devbox run -- bash -c "pnpm --filter @toon-protocol/swap test:e2e:docker"
+      # The unit suite under the pinned toolchain. The cross-chain e2e (a real
+      # Rust connector + anvil + solana-test-validator) is the `solana-e2e` job.
+      - name: Unit tests
+        run: devbox run -- bash -c "pnpm --filter @toon-protocol/swap test"
 
   # ---------------------------------------------------------------------------
   # swap#160 — the Solana E2E suites, actually executing.
@@ -224,7 +212,7 @@ jobs:
   # defect swap#106 found (four suites collecting zero tests, reporting a pass)
   # and the reason these suites needed rescuing in the first place.
   solana-e2e:
-    name: Solana cross-chain E2E
+    name: Cross-chain E2E (relay-mediated, EVM↔Solana)
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
@@ -292,27 +280,27 @@ jobs:
       # below are asserted afterwards because a *passing* run that collected
       # fewer tests than it should is the failure mode this repo has been bitten
       # by twice — a green tick is not evidence that anything ran.
-      - name: Solana + EVM cross-chain E2E
+      # Both swap parties pay the relay's Rust connector for every write, so
+      # the e2e runs one (fronting a real `@toon-protocol/relay`): the
+      # published immutable build this repo pins (connector ADR 0068 — never
+      # `rust-main` / `rust-release`). Bump deliberately, with the connector's
+      # release notes in hand; tests/e2e/helpers/rust-connector.ts is what
+      # runs it (`docker run --rm --network host`).
+      - name: Pull the Rust connector image
+        run: docker pull ghcr.io/toon-protocol/connector:rust-sha-5c1b222
+      - name: Cross-chain E2E through a real relay (EVM↔Solana, both ways)
         env:
-          SWAP_E2E_REQUIRE_SOLANA: '1'
-          # Vitest colorizes when it thinks a terminal is watching, and on a
-          # runner it does. That wraps the summary lines in ANSI escapes —
-          # `✓<ESC>[39m tests/e2e/…` and `(<ESC>[2m2 tests<ESC>[22m)` — which
-          # defeats the count grep in the next step (it reported "did not
-          # appear in the vitest output at all" for suites that had visibly
-          # just passed). Turning colour off at the source keeps the log
-          # greppable AND readable; the next step strips ANSI anyway, belt and
-          # braces, in case a future vitest ignores these.
+          SWAP_E2E_CONNECTOR_IMAGE: ghcr.io/toon-protocol/connector:rust-sha-5c1b222
           NO_COLOR: '1'
           FORCE_COLOR: '0'
-        run: pnpm --filter @toon-protocol/swap test:e2e:docker 2>&1 | tee /tmp/solana-e2e.log
+        run: pnpm --filter @toon-protocol/swap test:e2e 2>&1 | tee /tmp/solana-e2e.log
 
       # Guard the count, not just the colour. `tests/e2e/README.md` documents
       # what this suite collects; it must collect its full complement with
       # NOTHING skipped. A suite that quietly loses a test, or skips one,
       # fails here. swap#154 (toon-meta#411 Stage 5) deleted the legacy
       # `docker-swap-flow-solana-e2e.test.ts` this used to check alongside it.
-      - name: Assert the Solana suite collected and ran everything
+      - name: Assert both e2e suites collected and ran everything
         run: |
           set -euo pipefail
           # Strip any ANSI escapes before matching. Vitest's own markers sit
@@ -339,9 +327,10 @@ jobs:
               fail=1
             fi
           }
-          check 'docker-rolling-swap-solana-e2e.test.ts' 4
+          check 'relay-swap.e2e.test.ts' 5
+          check 'taker-toolkit.selfcheck.test.ts' 12
           [ "$fail" -eq 0 ] || exit 1
-          echo "✓ the Solana suite collected and ran its full complement"
+          echo "✓ both e2e suites collected and ran their full complement"
 
   swap-image-build:
     name: swap runtime image build

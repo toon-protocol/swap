@@ -17,7 +17,6 @@
 
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { createServer, type Server } from 'node:http';
-import { Hono } from 'hono';
 
 import { SwapInventory } from './inventory.js';
 import { SwapChannelState, channelFundedTotal } from './channel-state.js';
@@ -26,7 +25,8 @@ import type {
   ChannelOnChainReader,
 } from './channel-state.js';
 import { SwapInventoryReconciler } from './inventory-reconciler.js';
-import { registerAdminRoutes } from './admin-surface.js';
+import { adminTestApp } from './admin-surface.test-support.js';
+import type { AdminTestApp } from './admin-surface.test-support.js';
 import { createEvmChannelOnChainReader } from './evm-channel-reader.js';
 import { composeChannelOnChainReaders } from './channel-reader.js';
 
@@ -131,13 +131,11 @@ function makeAdminApp(p: {
   reconciler: SwapInventoryReconciler;
   adminToken?: string;
 }) {
-  const app = new Hono();
-  registerAdminRoutes(app, {
+  return adminTestApp({
     inventory: p.inventory,
     reconciler: p.reconciler,
     ...(p.adminToken !== undefined && { adminToken: p.adminToken }),
   });
-  return app;
 }
 
 /** The live devnet maker's shape: one channel, 15 000 000 of configured capital. */
@@ -177,7 +175,7 @@ function setup(p: {
 }
 
 async function post(
-  app: Hono,
+  app: AdminTestApp,
   body: unknown,
   token: string | null = TOKEN
 ): Promise<Response> {
@@ -710,14 +708,12 @@ describe('the route against the REAL reader behind the REAL dispatcher', () => {
       });
       req.on('end', () => {
         const { id } = JSON.parse(body) as { id: number };
+        // TokenNetwork.participants(): (deposit, nonce, transferredAmount) —
+        // `deposit` is the TOTAL ever placed, so funded = cumulativePaid + remaining.
         const words = [
-          w('11'.repeat(20)),
-          w('22'.repeat(20)),
+          w((position.cumulativePaid + position.deposit).toString(16)),
           w('3'),
           w(position.cumulativePaid.toString(16)),
-          w(position.deposit.toString(16)),
-          w('0'),
-          w('1'),
         ];
         res.writeHead(200, { 'content-type': 'application/json' });
         res.end(
@@ -751,7 +747,12 @@ describe('the route against the REAL reader behind the REAL dispatcher', () => {
     });
     const composed = composeChannelOnChainReaders({
       evm: createEvmChannelOnChainReader([
-        { chainId: chain, rpcUrl, channelAddress: '0x' + '33'.repeat(20) },
+        {
+          chainId: chain,
+          rpcUrl,
+          tokenNetworkAddress: '0x' + '33'.repeat(20),
+          makerAddress: '0x' + '55'.repeat(20),
+        },
       ]),
     });
     expect(typeof composed?.getFundingPosition).toBe('function');

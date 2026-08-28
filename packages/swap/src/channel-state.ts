@@ -189,6 +189,14 @@ export interface ReserveParams {
   chain: string;
   senderPubkey: string;
   cumulativeDelta: bigint;
+  /**
+   * A channel this sender MUST be served from, if provisioned — a Solana
+   * leg-B channel is the one PDA the (maker, recipient, mint) triple derives,
+   * so "first unbound channel" would hand the taker a claim on a channel it
+   * is not a participant of. When set and not provisioned (or bound to a
+   * different sender), resolution fails rather than falling back.
+   */
+  preferredChannelId?: string;
 }
 
 export interface Reservation {
@@ -330,8 +338,29 @@ export class SwapChannelState {
     assetCode: string;
     chain: string;
     senderPubkey: string;
+    preferredChannelId?: string;
   }): ChannelEntry | null {
     const bk = bindingKey(p);
+    const prefix = poolPrefix(p);
+    if (p.preferredChannelId !== undefined) {
+      // The sender must be served from ONE specific channel (a Solana PDA is
+      // the channel between these two participants; no other channel in the
+      // pool is theirs). Unprovisioned → null, and the caller's reclaim path
+      // is told not to substitute another channel either.
+      const wantedKey = `${prefix}${p.preferredChannelId}`;
+      const entry = this.channels.get(wantedKey);
+      if (!entry) return null;
+      const existing = this.senderBinding.get(bk);
+      if (existing === wantedKey) return entry;
+      if (this.boundChannels.has(wantedKey)) return null; // someone else's
+      if (existing !== undefined) {
+        this.senderBinding.delete(existing);
+        this.boundChannels.delete(existing);
+      }
+      this.senderBinding.set(bk, wantedKey);
+      this.boundChannels.add(wantedKey);
+      return entry;
+    }
     const existing = this.senderBinding.get(bk);
     if (existing) {
       // Binding stores the stored-map key (robust to fixtures that key
@@ -340,7 +369,6 @@ export class SwapChannelState {
     }
     // First-use: find any provisioned channel for this (asset, chain) that
     // is not already bound to a different sender.
-    const prefix = poolPrefix(p);
     for (const [storedKey, entry] of this.channels) {
       if (!storedKey.startsWith(prefix)) continue;
       if (this.boundChannels.has(storedKey)) continue;
@@ -366,6 +394,68 @@ export class SwapChannelState {
    * The nonce/cumulativeAmount watermark is NOT reset on a successful
    * rebind — see the class docblock for why that is safe.
    */
+  /**
+   * The preferred-channel twin of {@link reclaimFullyRedeemedChannel}: the
+   * ONLY candidate is the named channel. Unprovisioned → a refusal that
+   * names it, so the operator knows which channel to open and fund.
+   */
+  private async reclaimPreferredChannel(p: {
+    assetCode: string;
+    chain: string;
+    senderPubkey: string;
+    preferredChannelId?: string;
+  }): Promise<ReclaimResult> {
+    const wantedKey = `${poolPrefix(p)}${p.preferredChannelId ?? ''}`;
+    const entry = this.channels.get(wantedKey);
+    if (!entry || p.preferredChannelId === undefined) {
+      return {
+        entry: null,
+        refusals: [
+          {
+            channelId: p.preferredChannelId ?? '',
+            reason: 'read_failed',
+            detail: `channel ${p.preferredChannelId ?? ''} is not provisioned on ${p.chain}; open and fund it for this recipient`,
+          },
+        ],
+      };
+    }
+    if (!this.onChainReader) return { entry: null, refusals: [] };
+    if (this.reclaiming.has(wantedKey)) return { entry: null, refusals: [] };
+    this.reclaiming.add(wantedKey);
+    try {
+      let onChainCumulativePaid: bigint;
+      try {
+        onChainCumulativePaid = await this.onChainReader.getCumulativePaid({
+          assetCode: p.assetCode,
+          chain: p.chain,
+          channelId: entry.channelId,
+        });
+      } catch (err) {
+        const detail = err instanceof Error ? err.message : String(err);
+        return {
+          entry: null,
+          refusals: [{ channelId: entry.channelId, reason: 'read_failed', detail }],
+        };
+      }
+      if (onChainCumulativePaid < entry.cumulativeAmount) {
+        return {
+          entry: null,
+          refusals: [
+            {
+              channelId: entry.channelId,
+              reason: 'unredeemed',
+              unredeemed: entry.cumulativeAmount - onChainCumulativePaid,
+            },
+          ],
+        };
+      }
+      this.rebind(bindingKey(p), wantedKey);
+      return { entry, refusals: [] };
+    } finally {
+      this.reclaiming.delete(wantedKey);
+    }
+  }
+
   private async reclaimFullyRedeemedChannel(p: {
     assetCode: string;
     chain: string;
@@ -447,7 +537,10 @@ export class SwapChannelState {
   async reserve(p: ReserveParams): Promise<Reservation> {
     let entry = this.resolveChannel(p);
     if (!entry) {
-      const reclaimed = await this.reclaimFullyRedeemedChannel(p);
+      const reclaimed =
+        p.preferredChannelId !== undefined
+          ? await this.reclaimPreferredChannel(p)
+          : await this.reclaimFullyRedeemedChannel(p);
       entry = reclaimed.entry;
       if (!entry) {
         const unredeemed = reclaimed.refusals.filter(

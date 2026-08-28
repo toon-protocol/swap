@@ -1,37 +1,20 @@
 # =============================================================================
-# swap — runtime container image for the TS rolling-swap MAKER node (issue #124)
+# swap — runtime container image for the rolling-swap MAKER
 #
-# Builds @toon-protocol/swap FROM SOURCE (this repo has never published to
-# npm — see CLAUDE.md "Publishing"). @toon-protocol/connector and
-# @toon-protocol/sdk are already regular npm `dependencies` of
-# @toon-protocol/swap (packages/swap/package.json), so `pnpm install` fetches
-# both from the registry like any other package — no special-casing needed.
-#
-# CLI config-surface check (per the issue): the proven standalone-maker
-# wiring (`scratchpad/t6/maker.mjs`, a driving-session scratch file — not
-# checked into this repo) — standalone `btpServerPort` mode (no
-# parent), `chainProviders` with a `channelAddress`, `settlementPrivateKey`
-# for the claim signer, and a paid kind:10032 announce — is fully expressible
-# through `toon-swap --config` (packages/swap/src/cli.ts): chainProviders/
-# settlementPrivateKey/btpServerPort were already forwarded; this issue added
-# the two fields that were missing (`peerInfoIlpDestination` +
-# `peerInfoPricePerByte`, cli.ts). No thin entrypoint shim was needed — see
-# deploy/swap/README.md for the full config-surface reference.
-#
-# Runtime dependency footprint (issue #124 note, not addressed here): the
-# built image is large — @toon-protocol/core's own `dependencies` pull in
-# @ardrive/turbo-sdk -> x402 -> wagmi/@solana-kit, none of which the swap
-# node's own code path touches. Slimming that is upstream (core), out of
-# scope for "produce a pullable image".
+# Builds @toon-protocol/swap FROM SOURCE. The maker is an HTTP app behind a
+# Rust connector's route termination (docs/rust-connector-migration.md): it
+# embeds no connector, so the only port is the app port (default 8080) the
+# connector's `handler_url`s and `/health` live on. Never publish it beyond
+# the box.
 #
 # Build (from the repository root, so the build context includes
 # pnpm-workspace.yaml + packages/swap):
 #   docker build -f deploy/swap/Dockerfile -t swap .
 #
-# Run (config + identity mounted/injected by the operator):
-#   docker run --rm -p 3400:3400 \
+# Run (config mounted, identity self-generated on the state volume):
+#   docker run --rm -p 127.0.0.1:8080:8080 \
 #     -v "$(pwd)/swap.config.json:/app/config/swap.config.json:ro" \
-#     -e SWAP_MNEMONIC="$(cat mnemonic.txt)" \
+#     -v swap_node_state:/app/state -e SWAP_AUTOGEN_IDENTITY=1 \
 #     swap
 # =============================================================================
 

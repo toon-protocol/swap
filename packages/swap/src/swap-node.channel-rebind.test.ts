@@ -14,14 +14,14 @@ import { describe, it, expect, afterEach } from 'vitest';
 import { createServer, type Server } from 'node:http';
 
 import { startSwapNode } from './swap-node.js';
-import type { SwapNodeConfig, SwapNodeEvmChainProvider } from './swap-node.js';
+import type {
+ SwapNodeEvmChainProvider } from './swap-node.js';
 import type { SwapChannelState } from './channel-state.js';
 import { SwapWalletError } from './errors.js';
 
 const VALID_MNEMONIC =
   'abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about';
 const EVM_CHAIN = 'evm:8453';
-const SOLANA_CHAIN = 'solana:devnet';
 const CHANNEL_ADDRESS = '0x' + 'aa'.repeat(20);
 const CHANNEL_ID = '0x' + '01'.repeat(32);
 const SENDER_1 = 'a'.repeat(64);
@@ -56,13 +56,10 @@ async function startFakeChainRpc(cumulativePaid: bigint): Promise<string> {
       const result =
         '0x' +
         [
-          word('11'.repeat(20)),
-          word('22'.repeat(20)),
+          // TokenNetwork.participants(): (deposit, nonce, transferredAmount)
+          word(((cumulativePaid + 1_000n).toString(16))),
           word(3n.toString(16)),
           word(cumulativePaid.toString(16)),
-          word(1_000n.toString(16)),
-          word(0n.toString(16)),
-          word((1).toString(16)),
         ].join('');
       res.writeHead(200, { 'content-type': 'application/json' });
       res.end(JSON.stringify({ jsonrpc: '2.0', id: json.id, result }));
@@ -75,20 +72,6 @@ async function startFakeChainRpc(cumulativePaid: bigint): Promise<string> {
     throw new Error('expected a bound TCP address');
   }
   return `http://127.0.0.1:${address.port}`;
-}
-
-function stubConnector(): SwapNodeConfig['connector'] {
-  return {
-    sendPacket: async () => ({
-      type: 'reject' as const,
-      code: 'F02',
-      message: 'no route (fixture)',
-    }),
-    registerPeer: async () => undefined,
-    removePeer: async () => undefined,
-    setPacketHandler: () => undefined,
-    close: async () => undefined,
-  } as unknown as SwapNodeConfig['connector'];
 }
 
 async function bootAndCaptureChannelState(
@@ -106,10 +89,7 @@ async function bootAndCaptureChannelState(
   };
   const instance = await startSwapNode({
     mnemonic: VALID_MNEMONIC,
-    connector: stubConnector(),
-    relayUrls: ['ws://localhost:0'],
     blsPort: 0,
-    publisher: { publish: async () => undefined },
     chains: ['evm'],
     swapPairs: [
       {
@@ -186,61 +166,4 @@ describe('startSwapNode wires the issue #113 on-chain rebind reader (no opt-in k
     }
   });
 
-  it('[P1] a chain family with no on-chain reader implementation (Solana) still fails closed — pre-#113 "sticky forever" behavior preserved', async () => {
-    // No `chainProviders` entry is required to boot a Solana-only pair
-    // (unlike EVM, since #101), so this also proves the reader is scoped
-    // to EVM chains only, not wired unconditionally for every chain.
-    let captured: SwapChannelState | undefined;
-    const instance = await startSwapNode({
-      mnemonic: VALID_MNEMONIC,
-      connector: stubConnector(),
-      relayUrls: ['ws://localhost:0'],
-      blsPort: 0,
-      publisher: { publish: async () => undefined },
-      chains: ['solana'],
-      swapPairs: [
-        {
-          from: { assetCode: 'USDC', assetScale: 6, chain: SOLANA_CHAIN },
-          to: { assetCode: 'USDC', assetScale: 6, chain: SOLANA_CHAIN },
-          rate: '1.0',
-        },
-      ],
-      channels: {
-        [SOLANA_CHAIN]: [
-          {
-            channelId: '11'.repeat(32),
-            cumulativeAmount: 0n,
-            nonce: 0n,
-            updatedAt: 0,
-          },
-        ],
-      },
-      inventory: { [SOLANA_CHAIN]: 1_000_000n },
-      // No chainProviders at all.
-      __testHooks: {
-        onChannelStateBuilt: (cs) => {
-          captured = cs;
-        },
-      },
-    });
-    try {
-      if (!captured) throw new Error('onChannelStateBuilt was never called');
-      await captured.reserve({
-        assetCode: 'USDC',
-        chain: SOLANA_CHAIN,
-        senderPubkey: SENDER_1,
-        cumulativeDelta: 1n,
-      });
-      await expect(
-        captured.reserve({
-          assetCode: 'USDC',
-          chain: SOLANA_CHAIN,
-          senderPubkey: SENDER_2,
-          cumulativeDelta: 1n,
-        })
-      ).rejects.toBeInstanceOf(SwapWalletError);
-    } finally {
-      await instance.stop();
-    }
-  });
 });

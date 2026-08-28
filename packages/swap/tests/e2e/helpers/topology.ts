@@ -115,35 +115,14 @@ export const RELAY_PORT = 18901;
 export const RELAY_URL = `ws://127.0.0.1:${RELAY_PORT}`;
 
 /** Peer1 — the swap node under test, booted in-process (peer-node.ts). */
-export const PEER1_BTP_PORT = 18902;
-export const PEER1_BTP_URL = `ws://127.0.0.1:${PEER1_BTP_PORT}`;
-export const PEER1_BLS_PORT = 18903;
-export const PEER1_BLS_URL = `http://127.0.0.1:${PEER1_BLS_PORT}`;
+/** The relay's `POST /write` — where the relay connector's `g.toon.relay` route terminates. */
+export const RELAY_WRITE_PORT = 18903;
+export const RELAY_WRITE_URL = `http://127.0.0.1:${RELAY_WRITE_PORT}/write`;
 
-/** Peer1's own ILP address — the destination every RFQ and leg-A fill targets. */
-export const PEER1_ILP_ADDRESS = 'g.toon.peer1';
+/** The relay's Rust connector — the client edge both swap parties pay writes through. */
+export const RELAY_CONNECTOR_PORT = 18300;
+export const RELAY_CONNECTOR_URL = `http://127.0.0.1:${RELAY_CONNECTOR_PORT}`;
 
-/**
- * ILP addresses the ROLLING senders authenticate their BTP sessions under.
- *
- * On the rolling path this string is load-bearing in a way it never was on the
- * legacy path: the maker will only mint a session it can answer, and it decides
- * that by comparing the RFQ's `senderIlpAddress` against the peer id the
- * arriving BTP session authenticated with (`leg-b-return-path.ts` —
- * `sourcePeer === senderIlpAddress`). A `ConnectorNode` greets with its
- * `nodeId` verbatim (connector `btp/btp-client.ts`), so for a rolling sender
- * the nodeId IS its ILP address, and `build-live-sender.ts` installs the
- * matching self-route so leg B lands on its local-delivery handler.
- *
- * One per suite: peer1 is shared across every suite file in the run
- * (`vitest.e2e.config.ts` — `singleFork`, `isolate: false`), and two live BTP
- * sessions may not claim the same peer id.
- */
-export const ROLLING_SENDER_ILP = {
-  evm: 'g.toon.client.e2erollevm',
-  crossChain: 'g.toon.client.e2erollxc',
-  solana: 'g.toon.client.e2erollsol',
-  mina: 'g.toon.client.e2erollmina',
-  matrix: 'g.toon.client.e2erollmtx',
-  routing: 'g.toon.client.e2erollroute',
-} as const;
+/** The maker's `/health` + `/admin` listener. */
+export const MAKER_APP_PORT = 18310;
+export const MAKER_APP_URL = `http://127.0.0.1:${MAKER_APP_PORT}`;

@@ -22,7 +22,6 @@ import { base58Encode } from '@toon-protocol/sdk';
 
 import { startSwapNode } from './swap-node.js';
 import type {
-  SwapNodeConfig,
   SwapNodeSolanaChainProvider,
   SwapNodeInstance,
 } from './swap-node.js';
@@ -120,20 +119,6 @@ async function startFakeSolanaRpc(
   return `http://127.0.0.1:${address.port}`;
 }
 
-function stubConnector(): SwapNodeConfig['connector'] {
-  return {
-    sendPacket: async () => ({
-      type: 'reject' as const,
-      code: 'F02',
-      message: 'no route (fixture)',
-    }),
-    registerPeer: async () => undefined,
-    removePeer: async () => undefined,
-    setPacketHandler: () => undefined,
-    close: async () => undefined,
-  } as unknown as SwapNodeConfig['connector'];
-}
-
 /** The node's own Solana address — the participant slot the reader must read. */
 async function ourSolanaPubkey(): Promise<Uint8Array> {
   const keys = await deriveSwapNodeKeys({
@@ -153,13 +138,11 @@ async function bootMaker(rpcUrl: string): Promise<{
     chainId: SOLANA_CHAIN,
     rpcUrl,
     programId: PROGRAM_ID,
+    tokenMint: 'H8HSreUF2s8r8hem4qMttE3bWYCpFuh71jbuos5bA77H',
   };
   const instance = await startSwapNode({
     mnemonic: VALID_MNEMONIC,
-    connector: stubConnector(),
-    relayUrls: ['ws://localhost:0'],
     blsPort: 0,
-    publisher: { publish: async () => undefined },
     chains: ['solana'],
     adminToken: ADMIN_TOKEN,
     // No periodic timer: every pass in this test is explicit.
