@@ -11,11 +11,13 @@ Removed from the public API:
 - `createSwapHandler` / `CreateSwapHandlerConfig` (the `@toon-protocol/sdk` re-export)
 - `withMaxRateAge` / `WithMaxRateAgeOptions` (the legacy handler's staleness-gate decorator)
 - `MultiChainClaimIssuer.issueClaim` (the legacy gift-wrap issuance entrypoint)
-- `SwapInventory.debit` / `.credit` / `.refundDebit` (the permanent-debit accounting the legacy
-  path used — a honeypot sized to notional with no refill loop, per swap#138/#141)
+- `SwapInventory.debit` / `.refundDebit` (the permanent-debit accounting the legacy path used —
+  a honeypot sized to notional with no refill loop, per swap#138/#141). `SwapInventory.credit`
+  goes `private` in the same move: it is now reachable only through
+  `creditCorroboratedFunding()`, so no caller can raise `total` without chain corroboration.
 
-No throwing compatibility shim replaces any of these — a caller gets a missing export at install
-time, not a runtime surprise later.
+No throwing compatibility shim replaces any of these — a caller gets a missing export (or, for
+the removed methods, a type error) at build time, not a runtime surprise later.
 
 **What survives, unchanged in shape:** `MultiChainClaimIssuer` remains the leg-B claim signer
 (`issueRollingClaim` / `commitRollingClaim` / `rollbackRollingClaim`, its per-chain signers and

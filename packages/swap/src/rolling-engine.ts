@@ -4,10 +4,10 @@
  * Implements the maker side of toon-meta `docs/rolling-swap.md` §3: each fill
  * packet's two legs — sender→maker on chain A, maker→sender chain-B channel
  * advance — share ONE sender-minted execution condition `C_i = sha256(P_i)`,
- * so the legs commit or fail together, packet by packet. This replaces the
- * legacy `issueClaim`-in-FULFILL response shape ON THE ROLLING PATH ONLY (the
- * legacy gift-wrap path is preserved byte-for-byte for zero-condition
- * packets — see the dispatch matrix in `swap-node.ts`).
+ * so the legs commit or fail together, packet by packet. This replaced the
+ * legacy claim-in-FULFILL response shape, which swap#154/#155 (toon-meta#411
+ * Stage 5/6) then retired outright — a zero/absent condition is now a named
+ * reject, not a legacy dispatch (see the matrix in `swap-node.ts`).
  *
  * ## The coupling, as implemented (spec §3 R1–R8)
  *
@@ -653,8 +653,8 @@ export const DEFAULT_MIN_LEG_B_TIME_MS = 2_000;
 export const DEFAULT_RESERVATION_GRACE_MS = 5_000;
 
 /**
- * Synthetic inner-rumor kind attached to `issueClaim` calls on the rolling
- * path (the issuer's `rumor` param is context-only). No gift wrap exists on
+ * Synthetic inner-rumor kind attached to `issueRollingClaim` calls (the
+ * issuer's `rumor` param is context-only). No gift wrap exists on
  * rolling fills, so the engine synthesizes an unsigned event carrying the
  * session context for logging/audit parity with the legacy path.
  */
@@ -720,7 +720,8 @@ export class RollingSwapEngine {
    *   3. replay reservation        (persisted synchronously; never released)
    *   4. leg-A expiry budget check (no debit yet)
    *   5. fresh rate + pricing      (no debit yet)
-   *   6. issueClaim                (debit + watermark + WRITE-AHEAD persist)
+   *   6. issueRollingClaim         (window reservation + watermark +
+   *                                  WRITE-AHEAD persist)
    *   7. leg-B send, SAME condition
    *   8a. preimage verified → accept { fulfillment }
    *   8b. anything else → rollbackClaim (full unwind) + benign reject

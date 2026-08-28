@@ -30,7 +30,7 @@
  * ## Crash-consistency rules (write-ahead / persist-before-hand-out)
  *
  * 1. **Watermarks are persisted BEFORE a claim can leave the process.**
- *    `MultiChainClaimIssuer.issueClaim` persists immediately after the
+ *    `MultiChainClaimIssuer.issueRollingClaim` persists immediately after the
  *    inventory hold + channel reserve and BEFORE `signBalanceProof` — so at every instant the
  *    stored watermark is >= the highest watermark embedded in any claim a
  *    counterparty could hold. If the write-ahead persist fails, the
@@ -40,8 +40,8 @@
  *    window capacity held for nothing). This is the deliberate safe side of
  *    the race: on restart the next claim continues monotonically ABOVE the
  *    aborted reservation, and capacity under-reports rather than
- *    over-reports. Since issue #138 the hold is a TTL'd window reservation
- *    on BOTH paths, so the held capacity frees itself at `expiresAt`
+ *    over-reports. Since issue #138 the hold is a TTL'd window reservation,
+ *    so the held capacity frees itself at `expiresAt`
  *    (rule 6) instead of needing an operator credit; the swap node never
  *    hands out a claim that is AHEAD of the stored watermark.
  * 3. **Signer-failure rollback** (`claim-issuer.ts`): the in-memory

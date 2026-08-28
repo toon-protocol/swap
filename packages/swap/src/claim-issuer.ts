@@ -231,7 +231,7 @@ export class MultiChainClaimIssuer {
     const targetAsset = pair.to.assetCode;
     const targetChain = pair.to.chain;
     let reservationId = '';
-    const { result } = await this.issueWithHold(params, () => {
+    const result = await this.issueWithHold(params, () => {
       const reserved = this.inventory.reserve({
         assetCode: targetAsset,
         chain: targetChain,
@@ -248,11 +248,11 @@ export class MultiChainClaimIssuer {
     return { ...result, reservationId };
   }
 
-  /** Claim-issuance core shared by {@link issueRollingClaim} — see the class docblock. */
+  /** Claim-issuance core behind {@link issueRollingClaim} — see the class docblock. */
   private async issueWithHold(
     params: IssueClaimParams,
     acquireHold: () => InventoryHold
-  ): Promise<{ result: IssueClaimResult }> {
+  ): Promise<IssueClaimResult> {
     const { pair, senderPubkey, chainRecipient, targetAmount } = params;
     const targetChain = pair.to.chain;
     const targetAsset = pair.to.assetCode;
@@ -287,8 +287,10 @@ export class MultiChainClaimIssuer {
       targetChain
     );
 
-    // 2. Acquire the inventory hold SYNCHRONOUSLY (before any await):
-    //    an in-flight window reservation on both paths (issue #138).
+    // 2. Acquire the inventory hold SYNCHRONOUSLY (before any await): an
+    //    in-flight window reservation (issue #138). Passed in by the caller
+    //    rather than taken here so the AC-2 validation above provably runs
+    //    first — see the pre-hold-rejection test in `claim-issuer.test.ts`.
     const hold = acquireHold();
 
     // 3. Reserve channel state. The common paths (existing sticky binding;
@@ -435,7 +437,7 @@ export class MultiChainClaimIssuer {
       result.recipient = normalizedChainRecipient;
       result.swapSignerAddress = swapSignerAddress;
     }
-    return { result };
+    return result;
   }
 
   /**

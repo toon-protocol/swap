@@ -2,22 +2,22 @@
  * `SwapInventory` — per-pair reserves + in-flight window reservations.
  *
  * Single-threaded microtask atomicity: every mutator is synchronous and
- * therefore atomic w.r.t. concurrent `issueClaim` callers under `Promise.all`.
- * See Dev Notes "Microtask atomicity argument" in the story doc.
+ * therefore atomic w.r.t. concurrent claim-issuance callers under
+ * `Promise.all`. See Dev Notes "Microtask atomicity argument" in the story
+ * doc.
  *
  * ## ONE capital model on one surface (issue #49, unified by issue #138)
  *
- * Both claim paths — legacy gift-wrap and rolling coupled-leg — now use the
- * **in-flight window reservation lifecycle** (toon-meta#145 /
- * rolling-swap.md §8). A claim `reserve`s its leg-B amount while it is being
- * issued, then either
+ * The one surviving claim path — rolling coupled-leg — uses the **in-flight
+ * window reservation lifecycle** (toon-meta#145 / rolling-swap.md §8). A
+ * claim `reserve`s its leg-B amount while it is being issued, then either
  *   - **commits** (claim handed to the counterparty → the amount becomes
  *     *unsettled channel liability*, shrunk later when the chain shows the
  *     claim redeemed — {@link recordChainRedemption}), or
  *   - **releases** (reject / rollback / TTL expiry → capacity returns).
  *
- * Nothing ever debits `available` permanently on either path: what was a
- * notional-sized pre-fund becomes working capital cycling through settlement
+ * Nothing ever debits `available` permanently: what was a notional-sized
+ * pre-fund becomes working capital cycling through settlement
  * (spec §8 "settle-and-recycle replaces manual refill").
  *
  * ### Why the legacy permanent debit was removed (issue #138)
@@ -105,7 +105,7 @@
  * plus a settlement-latency buffer). It is clamped to `available` so a
  * misconfigured budget can never advertise capital the maker does not hold.
  * Both paths drew on this one formula against the same real pool (issue
- * #138) before the legacy path was removed (toon-meta#411 Stage 6). Without
+ * #138) until the legacy path was removed (toon-meta#411 Stage 6). Without
  * an explicit budget the ceiling degrades to `available` — which is exactly
  * the threshold the legacy permanent debit used to enforce, so removing it
  * did not loosen any refusal.

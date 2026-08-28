@@ -54,30 +54,25 @@ describe('@toon-protocol/swap public API exports (Story 12.4 AC-9)', () => {
   });
 
   it('[P0] (toon-meta#411 Stage 6) does NOT re-export the withdrawn legacy API surface', () => {
-    const legacy = swapNode as unknown as Record<string, unknown>;
-    expect(legacy['createSwapHandler']).toBeUndefined();
-    expect(legacy['CreateSwapHandlerConfig']).toBeUndefined();
-    expect(legacy['withMaxRateAge']).toBeUndefined();
-    expect(legacy['WithMaxRateAgeOptions']).toBeUndefined();
+    const exported = swapNode as unknown as Record<string, unknown>;
+    // Their paired types (`CreateSwapHandlerConfig`, `WithMaxRateAgeOptions`)
+    // are erased at runtime and cannot be asserted here — `pnpm typecheck`
+    // against this file's `import * as swapNode` is what pins those.
+    for (const name of ['createSwapHandler', 'withMaxRateAge']) {
+      expect(exported[name]).toBeUndefined();
+    }
+
     // MultiChainClaimIssuer and SwapInventory survive as the leg-B signer and
     // the rolling window's capital — only their legacy methods are gone.
+    // (`SwapInventory.credit` is `private`, so it leaves the typed surface
+    // without leaving the prototype; there is nothing to assert on it here.)
+    const prototypeOf = (ctor: unknown): Record<string, unknown> =>
+      (ctor as { prototype: Record<string, unknown> }).prototype;
     expect(
-      (
-        swapNode.MultiChainClaimIssuer.prototype as unknown as Record<
-          string,
-          unknown
-        >
-      )['issueClaim']
+      prototypeOf(swapNode.MultiChainClaimIssuer)['issueClaim']
     ).toBeUndefined();
-    expect(
-      (swapNode.SwapInventory.prototype as unknown as Record<string, unknown>)[
-        'debit'
-      ]
-    ).toBeUndefined();
-    expect(
-      (swapNode.SwapInventory.prototype as unknown as Record<string, unknown>)[
-        'refundDebit'
-      ]
-    ).toBeUndefined();
+    for (const name of ['debit', 'refundDebit']) {
+      expect(prototypeOf(swapNode.SwapInventory)[name]).toBeUndefined();
+    }
   });
 });

@@ -18,7 +18,7 @@ gone. Nothing here is a rename.
 | A counterparty that redeems maker claims on chain | **Yes** — §3, EVM *and* Solana |
 | Anything that reacts programmatically to a swap refusal | **Yes** — §4 |
 | A client on `@toon-protocol/client@0.29.8` or earlier | **Yes, silently** — see §5 |
-| Code importing `createSwapHandler`, `withMaxRateAge`, `MultiChainClaimIssuer.issueClaim`, or `SwapInventory.debit`/`.credit`/`.refundDebit` from this package | **Yes** — §6, install-time failure |
+| Code importing `createSwapHandler`, `withMaxRateAge`, `MultiChainClaimIssuer.issueClaim`, or `SwapInventory.debit`/`.credit`/`.refundDebit` from this package | **Yes** — §6, build-time failure |
 
 ---
 
@@ -143,16 +143,18 @@ which states the same gap honestly for the legacy-path removal.
 The maker itself stopped serving the legacy claim-in-FULFILL protocol in swap#154; 3.0.0 removes
 the now-dead exports so a published version no longer promises them:
 
-| Removed | Was |
+| Withdrawn | Was |
 |---|---|
 | `createSwapHandler` / `CreateSwapHandlerConfig` | The `@toon-protocol/sdk` re-export `startSwapNode()` no longer wires in |
 | `withMaxRateAge` / `WithMaxRateAgeOptions` | The legacy handler's staleness-gate decorator |
 | `MultiChainClaimIssuer.issueClaim` | The legacy gift-wrap issuance entrypoint |
-| `SwapInventory.debit` / `.credit` / `.refundDebit` | The permanent-debit accounting the legacy path used (swap#138/#141: a honeypot sized to notional, with no refill loop) |
+| `SwapInventory.debit` / `.refundDebit` | The permanent-debit accounting the legacy path used (swap#138/#141: a honeypot sized to notional, with no refill loop) |
+| `SwapInventory.credit` | Now `private` — reachable only through `creditCorroboratedFunding()`, so `total` cannot rise without chain corroboration |
 
-**No throwing compatibility shim replaces any of these.** A caller importing one gets a missing
-export at install time — TypeScript fails the build, or Node throws `SyntaxError: The requested
-module does not provide an export` — rather than a runtime surprise deep in a request path.
+**No throwing compatibility shim replaces any of these.** A caller gets a build-time failure, not
+a runtime surprise deep in a request path: a removed *export* is a TypeScript error or a Node
+`SyntaxError: The requested module does not provide an export`, and a removed (or now-`private`)
+*method* is a TypeScript error on the call site.
 
 **What did not change:** `MultiChainClaimIssuer` remains the leg-B claim signer
 (`issueRollingClaim` / `commitRollingClaim` / `rollbackRollingClaim`) and `SwapInventory` remains
@@ -176,5 +178,5 @@ rolling is not a handler you install onto a connector; it is a maker you run. Ru
    chain family you actually run. Leaving a claim unredeemed jams the maker (§4's `T04`).
 5. **Then** update counterparties' verifiers and any code branching on refusal codes (§3, §4).
 6. **Before any of the above**, if you import this package directly (rather than only running
-   `toon-swap`), build against 3.0.0 first — a missing export from §6 fails at compile/import time,
+   `toon-swap`), build against 3.0.0 first — everything §6 removed fails at compile/import time,
    which is the cheapest place to catch it.

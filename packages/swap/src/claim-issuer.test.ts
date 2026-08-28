@@ -206,7 +206,7 @@ describe('MultiChainClaimIssuer (Story 12.4 AC-6, AC-8, AC-10)', () => {
     expect(SwapInventoryError.name).toBe('SwapInventoryError');
   });
 
-  it('[P0] unsupported target chain throws SwapWalletError(UNSUPPORTED_CHAIN); inventory NOT debited', async () => {
+  it('[P0] unsupported target chain throws SwapWalletError(UNSUPPORTED_CHAIN); no window reservation taken', async () => {
     const inventory = new SwapInventory({
       balances: { 'ETH:evm:base:8453': { available: 1_000n, total: 1_000n } },
     });
@@ -235,7 +235,7 @@ describe('MultiChainClaimIssuer (Story 12.4 AC-6, AC-8, AC-10)', () => {
     expect(SwapWalletError.name).toBe('SwapWalletError');
   });
 
-  it('[P1] signer throws → issuer reverses debit via inventory.credit; final throw code = SIGNING_FAILED', async () => {
+  it('[P1] signer throws → issuer releases the window reservation, leaving the pool byte-identical; final throw code = SIGNING_FAILED', async () => {
     const inventory = new SwapInventory({
       balances: { 'ETH:evm:base:8453': { available: 1_000n, total: 1_000n } },
     });
@@ -262,6 +262,12 @@ describe('MultiChainClaimIssuer (Story 12.4 AC-6, AC-8, AC-10)', () => {
       channelState,
     });
 
+    const buckets = (): Record<string, bigint> => {
+      const b = inventory.get('ETH', 'evm:base:8453')!;
+      return { available: b.available, total: b.total, unsettled: b.unsettled };
+    };
+    const before = buckets();
+
     await expect(
       issuer.issueRollingClaim({
         sourceAmount: 1n,
@@ -276,7 +282,10 @@ describe('MultiChainClaimIssuer (Story 12.4 AC-6, AC-8, AC-10)', () => {
       code: 'SIGNING_FAILED',
     });
 
-    expect(inventory.get('ETH', 'evm:base:8453')!.available).toBe(1_000n);
+    // swap#136: a failed issuance is a no-op on EVERY bucket, not just
+    // `available` — `total` is what kind:10032 advertises, and an unwind
+    // that raised it made the maker over-advertise its own capital.
+    expect(buckets()).toEqual(before);
   });
 
   it('[P0] (T-026) 10 concurrent issueRollingClaim calls produce 10 distinct claimIds and monotonic nonces; cumulativeAmount = sum(targetAmount)', async () => {
@@ -475,11 +484,12 @@ describe('MultiChainClaimIssuer (Story 12.4 AC-6, AC-8, AC-10)', () => {
 // to IssueClaimResult.
 //
 // When the issuer is constructed with a `signerAddresses` map, every
-// `issueClaim()` result MUST expose channelId/nonce/cumulativeAmount/
+// `issueRollingClaim()` result MUST expose channelId/nonce/cumulativeAmount/
 // recipient/swapSignerAddress so the swap node's swap handler can emit them in
 // FULFILL metadata (the load-bearing contract for `buildSettlementTx()`).
 //
-// When `signerAddresses` is omitted (legacy caller), the result MUST stay in
+// When `signerAddresses` is omitted (a directly-constructed issuer, e.g. a
+// unit test), the result MUST stay in
 // the pre-12.6 shape ({ claim, claimId } only) — this is the "one story-cycle
 // of compatibility" AC-3 calls out.
 // ---------------------------------------------------------------------------
