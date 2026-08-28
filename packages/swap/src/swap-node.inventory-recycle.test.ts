@@ -19,7 +19,6 @@ import { createServer, type Server } from 'node:http';
 
 import { startSwapNode } from './swap-node.js';
 import type {
-  SwapNodeConfig,
   SwapNodeEvmChainProvider,
   SwapNodeInstance,
 } from './swap-node.js';
@@ -103,20 +102,6 @@ async function startFakeChainRpc(chain: {
   return `http://127.0.0.1:${address.port}`;
 }
 
-function stubConnector(): SwapNodeConfig['connector'] {
-  return {
-    sendPacket: async () => ({
-      type: 'reject' as const,
-      code: 'F02',
-      message: 'no route (fixture)',
-    }),
-    registerPeer: async () => undefined,
-    removePeer: async () => undefined,
-    setPacketHandler: () => undefined,
-    close: async () => undefined,
-  } as unknown as SwapNodeConfig['connector'];
-}
-
 async function bootMaker(rpcUrl: string): Promise<{
   instance: SwapNodeInstance;
   issuer: MultiChainClaimIssuer;
@@ -133,10 +118,7 @@ async function bootMaker(rpcUrl: string): Promise<{
   };
   const instance = await startSwapNode({
     mnemonic: VALID_MNEMONIC,
-    connector: stubConnector(),
-    relayUrls: ['ws://localhost:0'],
     blsPort: 0,
-    publisher: { publish: async () => undefined },
     chains: ['evm'],
     adminToken: ADMIN_TOKEN,
     // No periodic timer: every pass in this test is explicit.

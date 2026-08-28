@@ -29,17 +29,9 @@ import { SwapNodeStartError } from './errors.js';
 const VALID_MNEMONIC =
   'abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about';
 
-function fakeConnector() {
-  return {
-    close: async () => undefined,
-    send: async () => ({ ok: true }),
-  };
-}
-
 function validConfig(statePath: string): SwapNodeConfig {
   return {
     mnemonic: VALID_MNEMONIC,
-    connector: fakeConnector() as unknown as SwapNodeConfig['connector'],
     swapPairs: [
       {
         from: { assetCode: 'USDC', assetScale: 6, chain: 'evm:8453' },
@@ -65,7 +57,6 @@ function validConfig(statePath: string): SwapNodeConfig {
         channelAddress: '0x' + '33'.repeat(20),
       },
     ],
-    relayUrls: ['ws://localhost:0'],
     blsPort: 0,
     statePath,
   };
@@ -152,7 +143,6 @@ describe('issue #46 — startSwapNode state persistence', () => {
         '750000'
       );
       expect(snap.channels['USDC:evm:8453:c-dynamic']?.nonce).toBe('2');
-      expect(snap.seenPacketIds).toEqual(['pkt-replayed']);
     } finally {
       await instance.stop();
     }

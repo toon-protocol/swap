@@ -123,6 +123,8 @@ export interface IssueRollingClaimParams extends IssueClaimParams {
    * inventory's `defaultReservationTtlMs`.
    */
   reservationTtlMs?: number;
+  /** See `ReserveParams.preferredChannelId`. */
+  preferredChannelId?: string;
 }
 
 /** {@link MultiChainClaimIssuer.issueRollingClaim} result (issue #49). */
@@ -374,6 +376,8 @@ export class MultiChainClaimIssuer implements ClaimIssuer {
     acquireHold: () => InventoryHold
   ): Promise<{ result: IssueClaimResult }> {
     const { pair, senderPubkey, chainRecipient, targetAmount } = params;
+    const preferredChannelId = (params as IssueRollingClaimParams)
+      .preferredChannelId;
     const targetChain = pair.to.chain;
     const targetAsset = pair.to.assetCode;
 
@@ -424,6 +428,7 @@ export class MultiChainClaimIssuer implements ClaimIssuer {
         chain: targetChain,
         senderPubkey,
         cumulativeDelta: targetAmount,
+        ...(preferredChannelId !== undefined && { preferredChannelId }),
       });
     } catch (err) {
       hold.undo();

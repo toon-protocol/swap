@@ -72,9 +72,9 @@ export const SOLANA_PROGRAM_SO = join(FIXTURES_DIR, 'payment_channel.so');
  * these and the table in `../fixtures/solana/README.md` whenever the blob is
  * refreshed — the mismatch message points a reader at that file.
  */
-const SOLANA_PROGRAM_SO_BYTES = 109_416;
+const SOLANA_PROGRAM_SO_BYTES = 109_400;
 const SOLANA_PROGRAM_SO_SHA256 =
-  'b15e3c808bda581457110193dcdecd060d22c0697b40ce245b4f9188c7497600';
+  'ae2e91488c5b7920ca58279359d99cf8a3726d6b3f3b80a398a014af759e7e87';
 
 /** The BPF upgradeable loader — the owner every loaded program account has. */
 const BPF_UPGRADEABLE_LOADER = 'BPFLoaderUpgradeab1e11111111111111111111111';

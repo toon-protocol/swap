@@ -61,6 +61,9 @@ export {
   EvmPaymentChannelSigner,
   MinaPaymentChannelSigner,
   SolanaPaymentChannelSigner,
+  solanaBalanceProofMessage,
+  SOLANA_BALANCE_PROOF_DOMAIN_TAG,
+  SOLANA_BALANCE_PROOF_MESSAGE_SIZE,
 } from './payment-channel-signer.js';
 
 // Channel state (Story 12.4)
@@ -152,7 +155,15 @@ export type {
   SwapNodeHealthResponse,
   SwapNodeHealthWindowEntry,
   SwapNodeLogger,
-  Publisher,
+  SwapNodeChainProvider,
+  SwapNodeEvmChainProvider,
+  SwapNodeSolanaChainProvider,
+  SwapNodeMinaChainProvider,
+} from './swap-node.js';
+export {
+  validateConfig as validateSwapNodeConfig,
+  buildSignerAddresses,
+  parseEvmChainId,
 } from './swap-node.js';
 export { SwapNodeStartError } from './errors.js';
 export type { SwapNodeStartErrorCode } from './errors.js';
@@ -160,9 +171,7 @@ export type { SwapNodeStartErrorCode } from './errors.js';
 // Maker staleness reject — maxRateAge (toon-protocol/swap#48, rolling-swap §4)
 export {
   RateFreshnessGuard,
-  withMaxRateAge,
   buildStaleRateReject,
-  normalizeRateProvider,
   validateMaxRateAgeConfig,
   pairKey,
   StaleRateError,
@@ -180,78 +189,60 @@ export type {
   StaleRateRejectData,
   FreshnessVerdict,
   RateFreshnessGuardConfig,
-  WithMaxRateAgeOptions,
   RateStalenessLogger,
 } from './rate-staleness.js';
 
-// Rolling coupled-leg engine (issue #47 — rolling-swap §3)
+// ---------------------------------------------------------------------------
+// The rolling/2 wire — what a taker speaks to a maker behind a Rust connector
+// ---------------------------------------------------------------------------
 export {
-  RollingSwapEngine,
-  RollingSessionStore,
-  createConnectorLegBSender,
-  parseRollingFillPayload,
-  buildRollingReject,
-  ROLLING_PROTOCOL,
-  ROLLING_REJECT_REASONS,
-  ROLLING_FILL_CONTEXT_KIND,
-  DEFAULT_ROLLING_SESSION_TTL_MS,
-  DEFAULT_ROLLING_MAX_SESSIONS,
-  DEFAULT_LEG_B_BUDGET_MS,
-  DEFAULT_LEG_B_EXPIRY_MARGIN_MS,
-  DEFAULT_MIN_LEG_B_TIME_MS,
-  DEFAULT_RESERVATION_GRACE_MS,
-} from './rolling-engine.js';
+  SWAP_WIRE_PROTOCOL,
+  SWAP_REFUSAL_REASONS,
+  SWAP_REFUSAL_STATUS,
+  PAYMENT_HEADER_PAYER,
+  PAYMENT_HEADER_AMOUNT,
+  PAYMENT_HEADER_CHAIN,
+  isValidStreamNonce,
+  parseSwapRfqRequest,
+  parseSwapFillRequest,
+  parseSwapWireAnswer,
+  readPaymentAttribution,
+} from './wire.js';
 export type {
-  RollingSwapEngineConfig,
-  RollingSession,
-  RollingSessionStoreConfig,
-  RollingFillPayload,
-  RollingAdvancePayload,
-  RollingAcceptRecord,
-  RollingFillRequest,
-  RollingFillResponse,
-  RollingRejectReason,
-  RollingSeenPacketIds,
-  LegBPrepare,
-  LegBResult,
-  LegBSender,
-  ConnectorLegBSenderOptions,
-} from './rolling-engine.js';
-
-// Rolling RFQ intake — the kind:20033/20034 session transport (spec §2.2)
+  SwapWireAsset,
+  SwapWirePair,
+  SwapRfqRequest,
+  SwapLegBTerms,
+  SwapQuote,
+  SwapFillRequest,
+  SwapAdvance,
+  SwapRefusal,
+  SwapRefusalReason,
+  SwapWireAnswer,
+  SwapWireParse,
+  PaymentAttribution,
+} from './wire.js';
 export {
-  createRollingRfqIntake,
-  parseRollingRfqRequest,
-  findRfqPair,
-  ROLLING_RFQ_REQUEST_KIND,
-  ROLLING_RFQ_RESPONSE_KIND,
-  ROLLING_RFQ_REJECT_REASONS,
-  DEFAULT_RFQ_QUOTE_TTL_MS,
-} from './rolling-rfq.js';
+  MakerEngine,
+  defaultValidateRecipient,
+  DEFAULT_QUOTE_TTL_MS,
+  DEFAULT_SESSION_TTL_MS,
+  DEFAULT_MAX_SESSIONS,
+  SWAP_FILL_CONTEXT_KIND,
+} from './maker-engine.js';
 export type {
-  RollingRfqRequest,
-  RollingRfqResponse,
-  RollingRfqAsset,
-  RollingRfqConfig,
-  RollingRfqIntakeConfig,
-  RollingRfqOutcome,
-  RfqQuote,
-} from './rolling-rfq.js';
-
-// Leg-B return path — how a maker addresses a direct-dialled sender's daemon
+  MakerEngineConfig,
+  MakerEngineLogger,
+  MakerSession,
+  MakerAnswer,
+} from './maker-engine.js';
 export {
-  createLegBReturnRouteBinder,
-  DEFAULT_MAX_RETURN_ROUTE_BINDINGS,
-  DEFAULT_RETURN_ROUTE_PRIORITY,
-} from './leg-b-return-path.js';
-export type {
-  LegBReturnPath,
-  LegBReturnRouteBinder,
-  LegBReturnRouteBinderOptions,
-  ReturnRouteConnectorLike,
-} from './leg-b-return-path.js';
-
-// HTTP rate provider — CLI `rateProvider` wiring (issue #47 AC-3)
+  registerMakerRoutes,
+  MAKER_RFQ_PATH,
+  MAKER_FILL_PATH,
+} from './maker-app.js';
+export type { MakerAppDeps, MakerAppLogger } from './maker-app.js';
+export { deriveSolanaChannelPda, findProgramAddress } from './solana-pda.js';
 export {
   createHttpRateProvider,
   DEFAULT_RATE_FETCH_TIMEOUT_MS,

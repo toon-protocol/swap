@@ -1,93 +1,16 @@
 #!/usr/bin/env node
-
 /**
- * CLI entrypoint for `@toon-protocol/swap` (Story 12.7 AC-9).
+ * `toon-swap` — the maker's CLI entrypoint (the runtime image runs this).
  *
- * Thin wrapper around `startSwapNode()`. Reads a JSON config file and overlays
- * env-var overrides. Mirrors `packages/town/src/cli.ts`'s shape.
- *
- * Usage:
  *   toon-swap --config ./swap.config.json
  *
- * Environment variables (override config file):
- *   SWAP_MNEMONIC          — BIP-39 mnemonic
- *   SWAP_SECRET_KEY_HEX    — 64-char hex-encoded 32-byte secret key
- *   SWAP_BLS_PORT          — numeric port for /health server
- *   SWAP_RELAYS            — comma-separated relay WebSocket URLs
- *   SWAP_LOG_LEVEL         — swap#136: verbosity of the JSON-line console
- *                            logger this CLI installs
- *                            (debug|info|warn|error|silent, default info).
- *                            OPTIONAL — an unset or unrecognised value
- *                            degrades to the default; the maker never
- *                            fails boot over it.
- *   SWAP_STATE_PATH        — durable state snapshot path (issue #46);
- *                            enables persistence of inventory, channel
- *                            watermarks, sticky bindings + replay
- *                            reservations across restarts
- *   TOON_CONNECTOR_URL     — parent BTP URL; activates embedded-with-parent mode
- *   TOON_PARENT_PEER_ID    — peer id for the parent (default: "apex")
- *   TOON_PARENT_AUTH_TOKEN — BTP auth token for the parent peer (default: "")
- *   TOON_ILP_ADDRESS       — advertised ILP address + self-route prefix
- *   TOON_NODE_ID           — connector nodeId override (default: toon-swap-<pk16>)
- *   SWAP_MAX_RATE_AGE_MS   — maker staleness bound default (positive integer ms;
- *                            sets/overrides maxRateAge.defaultMs)
- *   SWAP_MAX_RATE_AGE      — full per-chain/per-pair maxRateAge config as JSON,
- *                            e.g. '{"defaultMs":3000,"perChain":{"mina":15000}}'
- *                            (SWAP_MAX_RATE_AGE_MS still overrides defaultMs)
- *   SWAP_RATE_URL          — HTTP JSON rate feed (issue #47 AC-3): wires the
- *                            per-packet `rateProvider` so deployed swap nodes
- *                            price every fill at the feed's current tick
- *                            instead of the config-frozen pair.rate. Accepted
- *                            response shapes: {"rate":"0.0004","at":<unix-ms>}
- *                            or a map keyed by pairKey (optionally under
- *                            "rates"). Timestamped ("at") responses arm the
- *                            SWAP_MAX_RATE_AGE staleness guard.
- *   SWAP_RATE_TIMEOUT_MS   — per-request feed timeout (default 1500)
- *   SWAP_AUTOGEN_IDENTITY  — "1"/"true" (issue #126): when no identity is
- *                            otherwise provided (no mnemonic/secretKey in
- *                            the config file, no SWAP_MNEMONIC/
- *                            SWAP_SECRET_KEY_HEX env), generate a fresh
- *                            BIP-39 mnemonic and persist it to an identity
- *                            file (default `<dir of statePath>/identity.json`,
- *                            mode 600; override with SWAP_IDENTITY_FILE).
- *                            A later boot against the same file LOADS the
- *                            persisted mnemonic instead of regenerating —
- *                            idempotent, since funds are tied to the
- *                            identity. A no-op when an identity is already
- *                            provided. Config-file equivalent:
- *                            `identityAutogen: true`.
- *   SWAP_IDENTITY_FILE     — overrides the identity-file path used by
- *                            SWAP_AUTOGEN_IDENTITY (default: see above).
- *   SWAP_ADMIN_TOKEN       — issue #138: operator token for the
- *                            `/admin/inventory/*` WRITE routes on the BLS
- *                            server (Authorization: Bearer <token>, or
- *                            X-Swap-Admin-Token). OPTIONAL: unset means the
- *                            writes are DISABLED (503), never open. The read
- *                            route `GET /admin/inventory` needs no token and
- *                            is protected by the box nginx `^~ /admin` 404.
- *   SWAP_RECONCILE_INTERVAL_MS — issue #138: cadence of the chain-truth
- *                            inventory reconcile (default 60000; 0 disables
- *                            the periodic pass, boot pass still runs).
- *
- * NOTE on maxRateAge (swap#48): the staleness bound applies to the maker's
- * own rate-feed ticks, so it REQUIRES a `rateProvider` returning timestamped
- * quotes — set SWAP_RATE_URL (timestamped responses) or use a programmatic
- * `startSwapNode()` embedding. Setting it on a static-rate JSON-config swap
- * node fails boot with INVALID_CONFIG (loud by design; a static rate has no
- * age to measure).
- *
- * Config-file-only fields (no env override, matching `btpEndpoint`):
- * `peerInfoIlpDestination` + `peerInfoPricePerByte` (issue #124) — route the
- * paid kind:10032 announce over ILP through a connector (`connectorUrl`,
- * `connector`, or the auto-created standalone one) instead of the legacy
- * unpaid Nostr WS publish a TOON relay drops. See
- * `SwapNodeConfig.peerInfoIlpDestination`.
- *
- * `settlementPrivateKey` auto-derivation (issue #126): whenever the resolved
- * identity is a mnemonic — auto-generated or operator-provided — and
- * `settlementPrivateKey` is unset (or a `0xdead…`-style placeholder), the CLI
- * fills it with the BIP-44 account-index-2 EVM key. See
- * `resolveIdentityConfig()` below.
+ * Reads a JSON config, overlays a small set of environment variables, and
+ * calls {@link startSwapNode}. The maker is an app behind a Rust connector's
+ * route termination, so there is nothing connector-shaped left to configure
+ * here: keys that configured the retired embedded `ConnectorNode`, the
+ * kind:10032 announce or the BTP listener are **accepted and ignored with a
+ * warning** rather than refused, so a committed fleet config written for
+ * 2.x still boots (`CLAUDE.md` › "Config first, code second").
  */
 
 import { parseArgs } from 'node:util';
@@ -95,7 +18,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
-import { fromMnemonic, generateMnemonic } from '@toon-protocol/sdk';
+import { fromMnemonic, generateMnemonic, base58Encode } from '@toon-protocol/sdk';
 
 import { startSwapNode } from './swap-node.js';
 import type { SwapNodeConfig, SwapNodeInstance } from './swap-node.js';
@@ -103,7 +26,7 @@ import { createHttpRateProvider } from './rate-provider.js';
 import { createConsoleLogger } from './logger.js';
 import { deriveSwapNodeKeys } from './wallet.js';
 
-interface CliRawConfig {
+export interface CliRawConfig {
   mnemonic?: string;
   secretKey?: string; // hex
   swapPairs?: unknown;
@@ -118,87 +41,60 @@ interface CliRawConfig {
     }[]
   >;
   inventory?: Record<string, string | number>;
-  /**
-   * Issue #49 — per-chain in-flight window ceiling for the rolling path
-   * (rolling-swap §8). Same keying as `inventory`.
-   */
   windowBudget?: Record<string, string | number>;
-  /**
-   * Rolling-path knobs, forwarded verbatim to `startSwapNode()` (which owns
-   * every default). Entirely optional — a config file that omits it gets the
-   * shipped defaults, including RFQ intake ON. File-only, no env overlay,
-   * matching `peerInfoIlpDestination`/`btpEndpoint`.
-   */
-  rolling?: SwapNodeConfig['rolling'];
-  relayUrls?: string[];
+  chainProviders?: unknown;
+  maxRateAge?: unknown;
+  quote?: SwapNodeConfig['quote'];
+  ilpAddress?: string;
+  fillAmount?: string | number;
+  appPort?: number;
   blsPort?: number;
-  btpServerPort?: number;
-  /** Durable swap-state snapshot path (issue #46). */
   statePath?: string;
   passphrase?: string;
-  knownPeers?: { ilpAddress: string; btpUrl?: string }[];
-  // Story 12.7 Review Pass #1 additions — operator-surfaced kind:10032 fields.
-  ilpAddress?: string;
-  btpEndpoint?: string;
-  advertisedAsset?: { assetCode: string; assetScale: number };
-  // Ator/SOCKS5 transport overlay (Epic 35 integration).
-  transport?: {
-    type: string;
-    socksProxy?: string;
-    externalUrl?: string;
-    managed?: boolean;
-    managedOptions?: Record<string, unknown>;
-  };
-  // Embedded-with-parent connector wiring.
-  connectorUrl?: string;
-  parentPeerId?: string;
-  parentAuthToken?: string;
-  nodeId?: string;
-  // Embedded-connector chain providers (EVM / Solana / Mina). Forwarded
-  // verbatim to startSwapNode(), which validates the discriminated-union shape and
-  // defaults each entry's keyId. See SwapNodeConfig.chainProviders.
-  chainProviders?: unknown;
-  // Embedded-connector ClaimReceiver signer + parent treasury address.
-  settlementPrivateKey?: string;
-  parentEvmAddress?: string;
-  // Story 50.4 — paid kind:10032 advertisement via ILP (issue #124). Requires
-  // a connector (`connectorUrl`/`connector`/an auto-created standalone one);
-  // see SwapNodeConfig.peerInfoIlpDestination.
-  peerInfoIlpDestination?: string;
-  peerInfoPricePerByte?: string | number;
-  // NIP-40 expiry on the kind:10032 advertisement, and the cadence that keeps
-  // it alive. Both OPTIONAL with fleet-convention defaults (600s / 240s) —
-  // forwarded verbatim so an operator who needs to override them can, without
-  // either becoming a key a config file must carry. See
-  // SwapNodeConfig.peerInfoTtlSeconds / .peerInfoRefreshIntervalMs.
-  peerInfoTtlSeconds?: number;
-  peerInfoRefreshIntervalMs?: number;
-  // Maker staleness bound(s) — swap#48. Forwarded verbatim; startSwapNode()'s
-  // validateConfig() enforces the shape AND the rateProvider requirement
-  // (see the maxRateAge NOTE in the header).
-  maxRateAge?: unknown;
-  // Issue #126 — config-file equivalent of SWAP_AUTOGEN_IDENTITY. Consumed
-  // entirely by resolveIdentityConfig(); never forwarded to SwapNodeConfig.
   identityAutogen?: boolean;
-  // Issue #138 — operator surface. Both optional; env wins.
   adminToken?: string;
   reconcileIntervalMs?: number;
-}
-
-function toBigInt(v: unknown): bigint {
-  if (typeof v === 'bigint') return v;
-  if (typeof v === 'number') return BigInt(v);
-  if (typeof v === 'string') return BigInt(v);
-  throw new Error(`Cannot convert to bigint: ${String(v)}`);
+  /** Accepted for 2.x compatibility; ignored. */
+  settlementPrivateKey?: string;
+  [retired: string]: unknown;
 }
 
 /**
- * Reject map keys that would pollute `Object.prototype` or shadow built-ins
- * when assigned to a plain object (`__proto__`, `constructor`, `prototype`).
- * JSON.parse preserves `__proto__` as an own property, so raw config input
- * must be filtered before being fanned out into the `channels` / `inventory`
- * maps consumed by `startSwapNode()`.
+ * Config keys the 2.x maker consumed and this one does not. Each is named
+ * in a boot-time warning so an operator sees exactly what stopped mattering.
  */
+export const RETIRED_CONFIG_KEYS: Readonly<Record<string, string>> = {
+  relayUrls: 'the maker no longer publishes a kind:10032 (connector ADR 0046)',
+  btpServerPort: 'the maker no longer embeds a connector; its Rust connector listens',
+  btpEndpoint: 'announced by the connector self-description, not the maker',
+  advertisedAsset: 'the kind:10032 announce is gone',
+  knownPeers: 'no embedded connector to peer',
+  transport: 'no embedded connector to configure a transport for',
+  connectorUrl: 'the maker does not dial a parent; a connector delivers to it',
+  parentPeerId: 'no parent/child peer relation exists on the Rust connector',
+  parentAuthToken: 'no parent/child peer relation exists on the Rust connector',
+  parentEvmAddress: 'no parent/child peer relation exists on the Rust connector',
+  nodeId: 'no embedded connector to name',
+  peerInfoIlpDestination: 'the kind:10032 announce is gone',
+  peerInfoPricePerByte: 'the kind:10032 announce is gone',
+  peerInfoTtlSeconds: 'the kind:10032 announce is gone',
+  peerInfoRefreshIntervalMs: 'the kind:10032 announce is gone',
+  rolling: 'rolling/1 coupled legs are gone; see `quote` for the rolling/2 knobs',
+  rollingLegBSender: 'leg B rides in the paid response, nothing is sent',
+  settlementPrivateKey:
+    'leg-B claims are signed with the BIP-44 index-2 key derived from the mnemonic; the connector in front holds its own settlement keys',
+};
+
+function toBigInt(v: unknown): bigint {
+  if (typeof v === 'bigint') return v;
+  if (typeof v === 'number') {
+    if (!Number.isInteger(v)) throw new Error(`expected an integer, got ${v}`);
+    return BigInt(v);
+  }
+  if (typeof v === 'string' && /^[0-9]+$/.test(v)) return BigInt(v);
+  throw new Error(`expected a decimal integer, got ${JSON.stringify(v)}`);
+}
+
 function assertSafeKey(key: string, scope: string): void {
   if (key === '__proto__' || key === 'constructor' || key === 'prototype') {
     throw new Error(
@@ -207,9 +103,14 @@ function assertSafeKey(key: string, scope: string): void {
   }
 }
 
-function parseRawConfig(raw: CliRawConfig): SwapNodeConfig {
-  // Normalize channels: string/number → bigint. Use null-prototype accumulators
-  // to defend against prototype-pollution via crafted JSON input.
+/** Retired keys present in `raw`, each with the reason it stopped mattering. */
+export function retiredKeysIn(raw: CliRawConfig): { key: string; why: string }[] {
+  return Object.entries(RETIRED_CONFIG_KEYS)
+    .filter(([key]) => raw[key] !== undefined)
+    .map(([key, why]) => ({ key, why }));
+}
+
+export function parseRawConfig(raw: CliRawConfig): SwapNodeConfig {
   const channels: SwapNodeConfig['channels'] = Object.create(
     null
   ) as SwapNodeConfig['channels'];
@@ -224,8 +125,6 @@ function parseRawConfig(raw: CliRawConfig): SwapNodeConfig {
       }));
     }
   }
-
-  // Normalize inventory.
   const inventory: Record<string, bigint> = Object.create(null) as Record<
     string,
     bigint
@@ -236,8 +135,6 @@ function parseRawConfig(raw: CliRawConfig): SwapNodeConfig {
       inventory[chain] = toBigInt(amt);
     }
   }
-
-  // Normalize windowBudget (issue #49) — same shape/guards as inventory.
   let windowBudget: Record<string, bigint> | undefined;
   if (raw.windowBudget) {
     windowBudget = Object.create(null) as Record<string, bigint>;
@@ -252,14 +149,10 @@ function parseRawConfig(raw: CliRawConfig): SwapNodeConfig {
     chains: (raw.chains as SwapNodeConfig['chains']) ?? [],
     channels,
     inventory,
-    relayUrls: raw.relayUrls ?? [],
   };
   if (windowBudget) cfg.windowBudget = windowBudget;
-  if (raw.rolling) cfg.rolling = raw.rolling;
   if (raw.mnemonic) cfg.mnemonic = raw.mnemonic;
   if (raw.secretKey) {
-    // Strict 64-char hex validation — `Buffer.from(str, 'hex')` silently
-    // truncates on invalid chars, yielding a confusing downstream error.
     if (!/^[0-9a-fA-F]{64}$/.test(raw.secretKey)) {
       throw new Error(
         'config.secretKey must be a 64-character hex string (32 bytes)'
@@ -267,42 +160,15 @@ function parseRawConfig(raw: CliRawConfig): SwapNodeConfig {
     }
     cfg.secretKey = Uint8Array.from(Buffer.from(raw.secretKey, 'hex'));
   }
+  if (raw.appPort !== undefined) cfg.appPort = raw.appPort;
   if (raw.blsPort !== undefined) cfg.blsPort = raw.blsPort;
-  if (raw.btpServerPort !== undefined) cfg.btpServerPort = raw.btpServerPort;
   if (raw.statePath) cfg.statePath = raw.statePath;
   if (raw.passphrase) cfg.passphrase = raw.passphrase;
-  if (raw.knownPeers) cfg.knownPeers = raw.knownPeers;
   if (raw.ilpAddress) cfg.ilpAddress = raw.ilpAddress;
-  if (raw.btpEndpoint) cfg.btpEndpoint = raw.btpEndpoint;
-  if (raw.advertisedAsset) cfg.advertisedAsset = raw.advertisedAsset;
-  if (raw.transport)
-    cfg.transport = raw.transport as SwapNodeConfig['transport'];
-  if (raw.connectorUrl) cfg.connectorUrl = raw.connectorUrl;
-  if (raw.parentPeerId) cfg.parentPeerId = raw.parentPeerId;
-  if (raw.parentAuthToken !== undefined) {
-    cfg.parentAuthToken = raw.parentAuthToken;
-  }
-  if (raw.nodeId) cfg.nodeId = raw.nodeId;
+  if (raw.fillAmount !== undefined) cfg.fillAmount = toBigInt(raw.fillAmount);
+  if (raw.quote) cfg.quote = raw.quote;
   if (raw.chainProviders !== undefined) {
-    // Forward verbatim; startSwapNode()'s validateConfig() enforces the
-    // discriminated-union shape (EVM / Solana / Mina) and defaults keyId.
     cfg.chainProviders = raw.chainProviders as SwapNodeConfig['chainProviders'];
-  }
-  if (raw.settlementPrivateKey) {
-    cfg.settlementPrivateKey = raw.settlementPrivateKey;
-  }
-  if (raw.parentEvmAddress) cfg.parentEvmAddress = raw.parentEvmAddress;
-  if (raw.peerInfoIlpDestination) {
-    cfg.peerInfoIlpDestination = raw.peerInfoIlpDestination;
-  }
-  if (raw.peerInfoPricePerByte !== undefined) {
-    cfg.peerInfoPricePerByte = toBigInt(raw.peerInfoPricePerByte);
-  }
-  if (raw.peerInfoTtlSeconds !== undefined) {
-    cfg.peerInfoTtlSeconds = raw.peerInfoTtlSeconds;
-  }
-  if (raw.peerInfoRefreshIntervalMs !== undefined) {
-    cfg.peerInfoRefreshIntervalMs = raw.peerInfoRefreshIntervalMs;
   }
   if (raw.maxRateAge !== undefined) {
     cfg.maxRateAge = raw.maxRateAge as SwapNodeConfig['maxRateAge'];
@@ -314,7 +180,7 @@ function parseRawConfig(raw: CliRawConfig): SwapNodeConfig {
   return cfg;
 }
 
-function applyEnvOverlay(cfg: SwapNodeConfig): SwapNodeConfig {
+export function applyEnvOverlay(cfg: SwapNodeConfig): SwapNodeConfig {
   const out = { ...cfg };
   const env = process.env;
   if (env['SWAP_MNEMONIC']) {
@@ -328,33 +194,19 @@ function applyEnvOverlay(cfg: SwapNodeConfig): SwapNodeConfig {
     out.secretKey = Uint8Array.from(Buffer.from(hex, 'hex'));
     delete out.mnemonic;
   }
-  if (env['SWAP_BLS_PORT']) {
-    const p = parseInt(env['SWAP_BLS_PORT'], 10);
+  const portVar = env['SWAP_APP_PORT'] ? 'SWAP_APP_PORT' : 'SWAP_BLS_PORT';
+  const portEnv = env[portVar];
+  if (portEnv) {
+    const p = parseInt(portEnv, 10);
     if (!Number.isFinite(p) || p < 0 || p > 65535) {
-      throw new Error('SWAP_BLS_PORT must be 0..65535');
+      throw new Error(`${portVar} must be 0..65535`);
     }
-    out.blsPort = p;
-  }
-  if (env['SWAP_RELAYS']) {
-    out.relayUrls = env['SWAP_RELAYS']
-      .split(',')
-      .map((s) => s.trim())
-      .filter(Boolean);
+    out.appPort = p;
+    delete out.blsPort;
   }
   if (env['SWAP_STATE_PATH']) out.statePath = env['SWAP_STATE_PATH'];
-  // Embedded-with-parent connector wiring (TOON_* env vars). Setting
-  // TOON_CONNECTOR_URL activates the embedded-with-parent path; the
-  // remaining TOON_* vars are optional refinements.
-  if (env['TOON_CONNECTOR_URL']) out.connectorUrl = env['TOON_CONNECTOR_URL'];
-  if (env['TOON_PARENT_PEER_ID']) out.parentPeerId = env['TOON_PARENT_PEER_ID'];
-  if (env['TOON_PARENT_AUTH_TOKEN'] !== undefined) {
-    out.parentAuthToken = env['TOON_PARENT_AUTH_TOKEN'];
-  }
-  if (env['TOON_ILP_ADDRESS']) out.ilpAddress = env['TOON_ILP_ADDRESS'];
-  if (env['TOON_NODE_ID']) out.nodeId = env['TOON_NODE_ID'];
-  // Maker staleness bound(s) — swap#48. SWAP_MAX_RATE_AGE replaces the whole
-  // structure; SWAP_MAX_RATE_AGE_MS then overrides just defaultMs (so the two
-  // compose: JSON for per-chain/per-pair shape, _MS for a quick default).
+  if (env['SWAP_ILP_ADDRESS']) out.ilpAddress = env['SWAP_ILP_ADDRESS'];
+  if (env['SWAP_FILL_AMOUNT']) out.fillAmount = toBigInt(env['SWAP_FILL_AMOUNT']);
   if (env['SWAP_MAX_RATE_AGE']) {
     let parsed: unknown;
     try {
@@ -364,11 +216,7 @@ function applyEnvOverlay(cfg: SwapNodeConfig): SwapNodeConfig {
         'SWAP_MAX_RATE_AGE must be valid JSON, e.g. {"defaultMs":3000,"perChain":{"mina":15000}}'
       );
     }
-    if (
-      typeof parsed !== 'object' ||
-      parsed === null ||
-      Array.isArray(parsed)
-    ) {
+    if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
       throw new Error('SWAP_MAX_RATE_AGE must be a JSON object');
     }
     out.maxRateAge = parsed as SwapNodeConfig['maxRateAge'];
@@ -380,18 +228,11 @@ function applyEnvOverlay(cfg: SwapNodeConfig): SwapNodeConfig {
     }
     out.maxRateAge = { ...(out.maxRateAge ?? {}), defaultMs: ms };
   }
-  // Fresh per-packet rate feed (issue #47 AC-3). Deployed swap nodes have
-  // always priced at the config-frozen pair.rate because nothing wired the
-  // SDK's per-packet rateProvider hook; SWAP_RATE_URL closes that gap.
   if (env['SWAP_RATE_URL']) {
     let timeoutMs: number | undefined;
     if (env['SWAP_RATE_TIMEOUT_MS']) {
       timeoutMs = Number(env['SWAP_RATE_TIMEOUT_MS']);
-      if (
-        !Number.isFinite(timeoutMs) ||
-        !Number.isInteger(timeoutMs) ||
-        timeoutMs <= 0
-      ) {
+      if (!Number.isFinite(timeoutMs) || !Number.isInteger(timeoutMs) || timeoutMs <= 0) {
         throw new Error('SWAP_RATE_TIMEOUT_MS must be a positive integer (ms)');
       }
     }
@@ -399,9 +240,6 @@ function applyEnvOverlay(cfg: SwapNodeConfig): SwapNodeConfig {
       ...(timeoutMs !== undefined && { timeoutMs }),
     });
   }
-  // Issue #138 — operator surface. BOTH are optional: a required key would
-  // crash-loop every `:release`-tracking deployment on its next auto-deploy
-  // (swap#134). No token ⇒ `/admin/inventory/*` writes answer 503, closed.
   if (env['SWAP_ADMIN_TOKEN']) out.adminToken = env['SWAP_ADMIN_TOKEN'];
   if (env['SWAP_RECONCILE_INTERVAL_MS']) {
     const ms = Number(env['SWAP_RECONCILE_INTERVAL_MS']);
@@ -416,28 +254,8 @@ function applyEnvOverlay(cfg: SwapNodeConfig): SwapNodeConfig {
 }
 
 // ---------------------------------------------------------------------------
-// Issue #126 — self-generate + persist maker identity on boot, auto-derive
-// the index-2 settlement key.
+// Identity — self-generated on first boot when asked (swap#126)
 // ---------------------------------------------------------------------------
-
-/**
- * A `0xdead…`-style placeholder settlementPrivateKey: a syntactically valid
- * 32-byte hex key made up entirely of repeated `dead` nibbles, the shape a
- * committed config skeleton ships so it passes format validation while
- * still being an obvious non-key. Detected case-insensitively.
- */
-const PLACEHOLDER_SETTLEMENT_KEY_RE = /^0x(?:dead)+$/i;
-
-/**
- * @internal — exported for unit testability (issue #126). True when
- * `settlementPrivateKey` needs to be (re-)derived from the mnemonic: unset,
- * or a `0xdead…`-style placeholder.
- */
-export function needsSettlementKeyDerivation(
-  value: string | undefined
-): boolean {
-  return value === undefined || PLACEHOLDER_SETTLEMENT_KEY_RE.test(value);
-}
 
 function isAutogenEnabled(raw: CliRawConfig): boolean {
   const env = process.env['SWAP_AUTOGEN_IDENTITY'];
@@ -445,7 +263,6 @@ function isAutogenEnabled(raw: CliRawConfig): boolean {
   return raw.identityAutogen === true;
 }
 
-/** Default: beside `statePath` (or the cwd when unset); overridable. */
 function resolveIdentityFilePath(cfg: SwapNodeConfig): string {
   const override = process.env['SWAP_IDENTITY_FILE'];
   if (override) return resolve(override);
@@ -453,21 +270,12 @@ function resolveIdentityFilePath(cfg: SwapNodeConfig): string {
   return resolve(base, 'identity.json');
 }
 
-/**
- * Load the mnemonic persisted at `identityFilePath`, or generate + persist a
- * fresh one (mode 600) when no identity file exists yet. Idempotent across
- * restarts — a persisted identity is NEVER regenerated, since funds are
- * tied to it.
- */
 function loadOrCreatePersistedMnemonic(identityFilePath: string): string {
   if (existsSync(identityFilePath)) {
     const persisted = JSON.parse(readFileSync(identityFilePath, 'utf-8')) as {
       mnemonic?: unknown;
     };
-    if (
-      typeof persisted.mnemonic !== 'string' ||
-      persisted.mnemonic.length === 0
-    ) {
+    if (typeof persisted.mnemonic !== 'string' || persisted.mnemonic.length === 0) {
       throw new Error(
         `Identity file ${identityFilePath} does not contain a valid "mnemonic" string`
       );
@@ -484,69 +292,40 @@ function loadOrCreatePersistedMnemonic(identityFilePath: string): string {
 }
 
 /**
- * @internal — exported for unit testability (issue #126). Resolves the
- * swap node's identity for boot:
- *  1. Self-generates + persists a mnemonic (idempotent) when autogen is
- *     enabled and no identity was otherwise provided.
- *  2. Auto-derives the BIP-44 account-index-2 EVM key into
- *     `settlementPrivateKey` whenever the resolved identity is a mnemonic
- *     and `settlementPrivateKey` is unset/a placeholder — this is the same
- *     key `buildSignerAddresses()` advertises via `settlementAddresses` and
- *     signs leg-B v2 EIP-712 claims with, so this applies regardless of
- *     whether the mnemonic came from step 1 or was operator-provided.
- *  3. Logs the resolved index-0 Nostr pubkey + index-2 EVM settlement
- *     address once (never the secret).
+ * Resolve the identity: load/create the persisted mnemonic when autogen is
+ * on, then print the addresses an operator has to fund — the index-0 Nostr
+ * pubkey, and the index-2 EVM / Solana leg-B signers.
  */
 export async function resolveIdentityConfig(
   config: SwapNodeConfig,
   raw: CliRawConfig
 ): Promise<SwapNodeConfig> {
   const out = { ...config };
-
-  if (
-    isAutogenEnabled(raw) &&
-    out.mnemonic === undefined &&
-    out.secretKey === undefined
-  ) {
+  if (isAutogenEnabled(raw) && out.mnemonic === undefined && out.secretKey === undefined) {
     out.mnemonic = loadOrCreatePersistedMnemonic(resolveIdentityFilePath(out));
   }
+  if (out.mnemonic === undefined) return out;
 
-  if (out.mnemonic === undefined) {
-    return out;
-  }
-
+  const chains = out.chains.length > 0 ? out.chains : (['evm'] as const);
   const swapNodeKeys = await deriveSwapNodeKeys({
     mnemonic: out.mnemonic,
-    chains: ['evm'],
+    chains: [...chains],
   });
-
-  if (
-    needsSettlementKeyDerivation(out.settlementPrivateKey) &&
-    swapNodeKeys.evm
-  ) {
-    out.settlementPrivateKey = `0x${Buffer.from(
-      swapNodeKeys.evm.privateKey
-    ).toString('hex')}`;
-  }
-
   const identity = fromMnemonic(out.mnemonic);
-  console.log(
-    `[swap-node] identity pubkey (Nostr, index-0): ${identity.pubkey}`
-  );
+  console.log(`[swap-node] identity pubkey (Nostr, index-0): ${identity.pubkey}`);
   if (swapNodeKeys.evm) {
     console.log(
-      `[swap-node] settlement address (EVM, index-2): ${swapNodeKeys.evm.address}`
+      `[swap-node] settlement address (EVM, index-2): ${swapNodeKeys.evm.address} — the leg-B signer`
     );
   }
-
+  if (swapNodeKeys.solana) {
+    console.log(
+      `[swap-node] settlement address (Solana, index-2): ${base58Encode(swapNodeKeys.solana.publicKey)} — the leg-B signer`
+    );
+  }
   return out;
 }
 
-/**
- * Error thrown when `main()` is invoked with `--help`. Callers (tests) can
- * distinguish this from genuine failures; the top-level entrypoint catches
- * it and exits 0.
- */
 export class CliHelpRequested extends Error {
   constructor() {
     super('Usage: toon-swap --config <path>');
@@ -554,23 +333,6 @@ export class CliHelpRequested extends Error {
   }
 }
 
-/**
- * swap#136 — install the process-level logger.
- *
- * `startSwapNode()` defaults `config.logger` to a NO-OP (correct for
- * embedders: a library must not print uninvited), and this CLI — the
- * entrypoint the published image runs, `ENTRYPOINT ["node", "dist/cli.js"]` —
- * never replaced it. Result: a live maker refused every swap after the first
- * and `docker logs` showed nothing at all, because both the swap node's own
- * `logger.warn?.(...)` calls AND the logger forwarded into the SDK swap
- * handler were the no-op.
- *
- * Verbosity comes from the optional `SWAP_LOG_LEVEL` env var, NOT a config
- * key: `:release` auto-deploys on green main, so a newly *required* config
- * key would crash-loop the live maker (swap#134).
- *
- * Exported so `cli.test.ts` can assert the wiring without booting a node.
- */
 export function installDefaultLogger(config: SwapNodeConfig): SwapNodeConfig {
   if (config.logger) return config;
   return { ...config, logger: createConsoleLogger() };
@@ -586,32 +348,32 @@ export async function main(argv: string[]): Promise<SwapNodeInstance> {
     strict: false,
     allowPositionals: false,
   });
-
   if (values.help) {
-    // Library-safe: do NOT call process.exit() here — the CLI entrypoint
-    // below handles exit codes. Tests can catch this to assert --help path.
     console.log(`Usage: toon-swap --config <path>`);
     throw new CliHelpRequested();
   }
 
   const configPath = resolve(String(values.config ?? './swap.config.json'));
-  const rawText = readFileSync(configPath, 'utf-8');
-  const raw = JSON.parse(rawText) as CliRawConfig;
+  const raw = JSON.parse(readFileSync(configPath, 'utf-8')) as CliRawConfig;
   const parsed = parseRawConfig(raw);
   const overlaid = applyEnvOverlay(parsed);
-  const config = installDefaultLogger(
-    await resolveIdentityConfig(overlaid, raw)
-  );
+  const config = installDefaultLogger(await resolveIdentityConfig(overlaid, raw));
+
+  for (const { key, why } of retiredKeysIn(raw)) {
+    config.logger?.warn?.('swap.config.retired_key_ignored', { key, why });
+  }
 
   const instance = await startSwapNode(config);
-
-  console.log(`Swap node listening on http://localhost:${instance.blsPort}`);
-  console.log(`Advertising ${config.swapPairs.length} swap pairs`);
-
+  console.log(`Swap maker listening on http://localhost:${instance.appPort}`);
+  console.log(
+    `Route this maker behind your Rust connector: ` +
+      `[[routes]] prefix="${instance.rfqDestination}" handler_url="http://<maker>:${instance.appPort}/swap/rfq" price=0 ; ` +
+      `[[routes]] prefix="${instance.fillDestination}" handler_url="http://<maker>:${instance.appPort}/swap/fill" price=<fill size>`
+  );
+  console.log(`Quoting ${config.swapPairs.length} swap pair(s)`);
   return instance;
 }
 
-// Self-invoke when run as entrypoint (mirrors Town's pattern).
 const invokedDirectly =
   typeof process.argv[1] === 'string' &&
   import.meta.url === pathToFileURL(process.argv[1]).href;
@@ -632,9 +394,7 @@ if (invokedDirectly) {
       });
     })
     .catch((error: unknown) => {
-      if (error instanceof CliHelpRequested) {
-        process.exit(0);
-      }
+      if (error instanceof CliHelpRequested) process.exit(0);
       console.error('[swap-node] Startup error:', error);
       process.exit(1);
     });

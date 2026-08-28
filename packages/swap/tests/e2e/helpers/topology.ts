@@ -147,3 +147,20 @@ export const ROLLING_SENDER_ILP = {
   matrix: 'g.toon.client.e2erollmtx',
   routing: 'g.toon.client.e2erollroute',
 } as const;
+
+/**
+ * The maker's Rust connector (toon-protocol/connector) — the client edge the
+ * taker pays leg A into (`POST /ilp`), booted by `helpers/rust-connector.ts`.
+ * Sits below the old 189xx/1890x blocks so a stale in-process peer1 on 18902
+ * and a stale validator on 18899 can never collide with it.
+ */
+export const MAKER_CONNECTOR_CLIENT_EDGE_PORT = 18300;
+export const MAKER_CONNECTOR_URL = `http://127.0.0.1:${MAKER_CONNECTOR_CLIENT_EDGE_PORT}`;
+
+/**
+ * The maker app behind the connector's route termination — what
+ * `[[routes]] handler_url` points at. In the toolkit self-check this is a tiny
+ * in-process `node:http` recorder; in the real harness it is the swap maker.
+ */
+export const MAKER_APP_PORT = 18310;
+export const MAKER_APP_URL = `http://127.0.0.1:${MAKER_APP_PORT}`;

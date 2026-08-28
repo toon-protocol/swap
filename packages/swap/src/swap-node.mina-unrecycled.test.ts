@@ -21,7 +21,6 @@ import { base58Encode } from '@toon-protocol/sdk';
 
 import { startSwapNode } from './swap-node.js';
 import type {
-  SwapNodeConfig,
   SwapNodeMinaChainProvider,
   SwapNodeInstance,
 } from './swap-node.js';
@@ -46,20 +45,6 @@ function must<T>(value: T | null | undefined, what: string): T {
   return value;
 }
 
-function stubConnector(): SwapNodeConfig['connector'] {
-  return {
-    sendPacket: async () => ({
-      type: 'reject' as const,
-      code: 'F02',
-      message: 'no route (fixture)',
-    }),
-    registerPeer: async () => undefined,
-    removePeer: async () => undefined,
-    setPacketHandler: () => undefined,
-    close: async () => undefined,
-  } as unknown as SwapNodeConfig['connector'];
-}
-
 async function bootMinaMaker(): Promise<{
   instance: SwapNodeInstance;
   issuer: MultiChainClaimIssuer;
@@ -73,16 +58,13 @@ async function bootMinaMaker(): Promise<{
   };
   const instance = await startSwapNode({
     mnemonic: VALID_MNEMONIC,
-    connector: stubConnector(),
-    relayUrls: ['ws://localhost:0'],
     blsPort: 0,
-    publisher: { publish: async () => undefined },
     chains: ['mina'],
     adminToken: 'operator-secret',
     reconcileIntervalMs: 0,
     swapPairs: [
       {
-        from: { assetCode: ASSET, assetScale: 6, chain: MINA_CHAIN },
+        from: { assetCode: ASSET, assetScale: 6, chain: 'evm:8453' },
         to: { assetCode: ASSET, assetScale: 6, chain: MINA_CHAIN },
         rate: '1.0',
       },
@@ -137,7 +119,7 @@ describe('issue #141 — a Mina maker stays unrecycled, visibly and on purpose',
         sourceAmount: SWAP_AMOUNT,
         targetAmount: SWAP_AMOUNT,
         pair: {
-          from: { assetCode: ASSET, assetScale: 6, chain: MINA_CHAIN },
+          from: { assetCode: ASSET, assetScale: 6, chain: 'evm:8453' },
           to: { assetCode: ASSET, assetScale: 6, chain: MINA_CHAIN },
           rate: '1.0',
         },

@@ -143,6 +143,9 @@ importers:
         specifier: ^2.20.0
         version: 2.23.1(typescript@5.9.3)
     devDependencies:
+      '@solana/web3.js':
+        specifier: ^1.98.4
+        version: 1.98.4(typescript@5.9.3)
       '@toon-protocol/client':
         specifier: ^0.29.8
         version: 0.29.8(@toon-protocol/connector@3.30.0)(typescript@5.9.3)(zod@3.25.76)
@@ -2046,7 +2049,7 @@ packages:
       '@ethersproject/bytes': 5.8.0
       '@ethersproject/logger': 5.8.0
       '@ethersproject/properties': 5.8.0
-      bn.js: 5.2.2
+      bn.js: 5.2.3
       elliptic: 6.6.1
       hash.js: 1.1.7
 
@@ -6925,9 +6928,6 @@ packages:
 
   /bn.js@4.12.2:
     resolution: {integrity: sha512-n4DSx829VRTRByMRGdjQ9iqsN0Bh4OolPsFnaZBLcbi8iXcB+kJ9s7EnRt4wILZNV3kPLHkRVfOc/HvhC3ovDw==}
-
-  /bn.js@5.2.2:
-    resolution: {integrity: sha512-v2YAxEmKaBLahNwE1mjp4WON6huMNeuDvagFZW+ASCuA/ku0bXR9hSMw0XpiqMoA3+rmnyck/tPRSFQkoC9Cuw==}
 
   /bn.js@5.2.3:
     resolution: {integrity: sha512-EAcmnPkxpntVL+DS7bO1zhcZNvCkxqtkd0ZY53h06GNQ3DEkkGZ/gKgmDv6DdZQGj9BgfSPKtJJ7Dp1GPP8f7w==}
@@ -12767,6 +12767,7 @@ packages:
 
   /uuid@8.3.2:
     resolution: {integrity: sha512-+NYs2QeMWy+GWFOEm9xnn6HCDp0l7QBD7ml8zLUmJ+93Q5NF0NocErnwkTkXVFNiX3/fpC6afS8Dhb/gz7R7eg==}
+    deprecated: uuid@10 and below is no longer supported.  For ESM codebases, update to uuid@latest.  For CommonJS codebases, use uuid@11 (but be aware this version will likely be deprecated in 2028).
     hasBin: true
 
   /uuid@9.0.1:

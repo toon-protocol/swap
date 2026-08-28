@@ -53,7 +53,4 @@ describe('@toon-protocol/swap public API exports (Story 12.4 AC-9)', () => {
     expect(typeof swapNode.SwapNodeStartError).toBe('function');
   });
 
-  it('[P2] re-exports createSwapHandler from @toon-protocol/sdk (Story 12.7)', () => {
-    expect(typeof swapNode.createSwapHandler).toBe('function');
-  });
 });

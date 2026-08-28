@@ -38,7 +38,6 @@ import {
 // vectors in `solana-balance-proof.test.ts` before removal.
 import {
   balanceProofHashEvm,
-  balanceProofMessageSolana,
 } from '@toon-protocol/settlement-digest';
 
 import type { SwapNodeChainKind } from './wallet.js';
@@ -344,49 +343,68 @@ export class MinaPaymentChannelSigner implements PaymentChannelSigner {
 export interface SolanaPaymentChannelSignerConfig {
   chain: string;
   privateKey: Uint8Array; // 32-byte Ed25519 seed
+  /**
+   * The payment-channel program the channel lives under. Bound into every
+   * signed message (connector ADR 0053), so a claim is valid only against
+   * this deployment: a signature over a channel account alone would verify
+   * on any cluster where that account happened to exist.
+   */
+  programId: string;
+}
+
+/** `TOON-BALPROOF-V2` — the domain tag every Solana balance proof begins with. */
+export const SOLANA_BALANCE_PROOF_DOMAIN_TAG = new TextEncoder().encode(
+  'TOON-BALPROOF-V2'
+);
+
+/** Byte length of the ADR 0053 Solana balance-proof message. */
+export const SOLANA_BALANCE_PROOF_MESSAGE_SIZE = 96;
+
+function decodeSolanaKey(label: string, value: string): Uint8Array {
+  let bytes: Uint8Array;
+  try {
+    bytes = base58Decode(value);
+  } catch (err) {
+    throw new SwapWalletError(
+      'SIGNING_FAILED',
+      `Solana ${label} is not valid base58: ${value}`,
+      { cause: err }
+    );
+  }
+  if (bytes.length !== 32) {
+    throw new SwapWalletError(
+      'SIGNING_FAILED',
+      label === 'channelId'
+        ? `Solana channelId must be a 32-byte channel PDA in base58 (got ` +
+          `${bytes.length} bytes from "${value}"). The on-chain program ` +
+          `rebuilds the balance proof from the channel account itself, so a ` +
+          `claim signed over anything else can never be redeemed.`
+        : `Solana ${label} must be 32 bytes in base58 (got ${bytes.length} bytes from "${value}")`
+    );
+  }
+  return bytes;
 }
 
 /**
- * Build the 48-byte Solana balance-proof message from a base58 `channelId`.
+ * The 96-byte message the deployed program's Ed25519 precompile check
+ * verifies (connector ADR 0053, `packages/solana-program/src/processor.rs`):
  *
- * The bytes themselves come from `@toon-protocol/settlement-digest`'s
- * `balanceProofMessageSolana` — the shared leaf every signer, off-chain verifier
- * and the on-chain program agree on. All this adds is the swap's own input
- * contract:
+ *   "TOON-BALPROOF-V2"(16) || program_id(32) || channel_pda(32)
+ *     || nonce(u64 LE) || transferred_amount(u64 LE)
  *
- * - a `channelId` is carried as base58 on the wire, and on Solana a channelId IS
- *   its 32-byte channel PDA, so it is decoded here and refused if it cannot name
- *   a channel on chain;
- * - the u64 range failures are reported as `SwapWalletError`s that NAME the
- *   offending field, which the shared leaf's plain `Error`s do not — and which
- *   `signBalanceProof` would otherwise bury in `cause`.
- *
- * Exported for `solana-balance-proof.test.ts`, which pins the byte layout.
+ * The 48-byte layout this signer produced before (channel ‖ nonce ‖ amount)
+ * is NOT a prefix of this one — the domain tag comes first, deliberately, so
+ * a truncated message can never verify. Every claim signed over the old
+ * layout is unredeemable on the current program.
  */
 export function solanaBalanceProofMessage(
+  programId: string,
   channelId: string,
   nonce: bigint,
   transferredAmount: bigint
 ): Uint8Array {
-  let channelPda: Uint8Array;
-  try {
-    channelPda = base58Decode(channelId);
-  } catch (err) {
-    throw new SwapWalletError(
-      'SIGNING_FAILED',
-      `Solana channelId is not valid base58: ${channelId}`,
-      { cause: err }
-    );
-  }
-  if (channelPda.length !== 32) {
-    throw new SwapWalletError(
-      'SIGNING_FAILED',
-      `Solana channelId must be a 32-byte channel PDA in base58 (got ` +
-        `${channelPda.length} bytes from "${channelId}"). The on-chain program ` +
-        `rebuilds the balance proof from the channel account itself, so a claim ` +
-        `signed over anything else can never be redeemed.`
-    );
-  }
+  const program = decodeSolanaKey('programId', programId);
+  const channelPda = decodeSolanaKey('channelId', channelId);
   for (const [label, value] of [
     ['nonce', nonce],
     ['transferredAmount', transferredAmount],
@@ -398,15 +416,23 @@ export function solanaBalanceProofMessage(
       );
     }
   }
-  return balanceProofMessageSolana(channelPda, nonce, transferredAmount);
+  const out = new Uint8Array(SOLANA_BALANCE_PROOF_MESSAGE_SIZE);
+  out.set(SOLANA_BALANCE_PROOF_DOMAIN_TAG, 0);
+  out.set(program, 16);
+  out.set(channelPda, 48);
+  new DataView(out.buffer).setBigUint64(80, nonce, true);
+  new DataView(out.buffer).setBigUint64(88, transferredAmount, true);
+  return out;
 }
 
 export class SolanaPaymentChannelSigner implements PaymentChannelSigner {
   public readonly chain: string;
   public readonly chainKind: SwapNodeChainKind = 'solana';
+  public readonly programId: string;
   private readonly privateKey: Uint8Array;
 
   constructor(cfg: SolanaPaymentChannelSignerConfig) {
+    decodeSolanaKey('programId', cfg.programId);
     if (
       !(cfg.privateKey instanceof Uint8Array) ||
       cfg.privateKey.length !== 32
@@ -421,6 +447,7 @@ export class SolanaPaymentChannelSigner implements PaymentChannelSigner {
       );
     }
     this.chain = cfg.chain;
+    this.programId = cfg.programId;
     this.privateKey = cfg.privateKey;
   }
 
@@ -429,6 +456,7 @@ export class SolanaPaymentChannelSigner implements PaymentChannelSigner {
   ): Promise<Uint8Array> {
     try {
       const msg = solanaBalanceProofMessage(
+        this.programId,
         params.channelId,
         params.nonce,
         params.cumulativeAmount
