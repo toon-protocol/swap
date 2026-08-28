@@ -1,8 +1,10 @@
 /**
  * swap#153 — ROLLING pair-matrix coverage.
  *
- * The rolling counterpart of `docker-swap-flow-pair-matrix-e2e.test.ts`
- * (AC-9/AC-10), with two differences that both make the matrix say more:
+ * The rolling counterpart of the now-deleted
+ * `docker-swap-flow-pair-matrix-e2e.test.ts` (AC-9/AC-10; deleted by swap#154,
+ * toon-meta#411 Stage 5), with two differences that both made the matrix say
+ * more:
  *
  * 1. **Four chains, sixteen ordered pairs**, not three and nine — the second
  *    anvil (`topology.ts`'s `ANVIL_B_CHAIN_ID`) is in the matrix, so a pair

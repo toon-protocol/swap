@@ -1,12 +1,11 @@
 # Docker cross-chain E2E harness
 
-Ten suites here drive a real swap session over real BTP against a real swap
+Six suites here drive a real swap session over real BTP against a real swap
 node (`peer1`), then check settlement-bundle construction on each target chain.
-As of swap#160 a full local run collects **52 tests and skips only the 4 Mina
-ones** — every EVM and Solana case executes.
-There are **two families**, and they run side by side:
+A full local run collects **34 tests and skips only the 4 Mina ones** — every
+EVM and Solana case executes.
 
-### Rolling (swap#153) — the protocol ADR 0003 keeps
+### Rolling (swap#153) — the protocol ADR 0003 keeps, and the only one left
 
 kind:20033 RFQ → kind:20034 quote → coupled fills carrying a real 32-byte
 sender-minted execution condition, with the chain-B claim arriving on **leg B**.
@@ -20,28 +19,22 @@ sender-minted execution condition, with the chain-B claim arriving on **leg B**.
 | `docker-rolling-swap-mina-e2e.test.ts` | 2 | Mina target (skips without a lightnet) |
 | `docker-rolling-leg-b-routing-e2e.test.ts` | 3 | the swap#148 `F02` and `T00` routing shapes |
 
-### Legacy (`streamSwap`) — kept until Stage 5 of toon-meta#411
+### Legacy (`streamSwap`) — deleted, swap#154 (toon-meta#411 Stage 5)
 
-| suite | collects |
-| --- | --- |
-| `docker-swap-flow-evm-e2e.test.ts` (AC-3..6) | 4 |
-| `docker-swap-flow-solana-e2e.test.ts` (AC-7) | 2 |
-| `docker-swap-flow-mina-e2e.test.ts` (AC-8) | 2 |
-| `docker-swap-flow-pair-matrix-e2e.test.ts` (AC-9/10) | 10 |
+The four `docker-swap-flow-*-e2e.test.ts` suites drove the legacy
+claim-in-FULFILL protocol (kind:20032) end to end. swap#153 proved the rolling
+six were a complete multi-chain replacement before swap#154 made the maker
+refuse kind:20032 outright, at which point every assertion in the legacy four
+would have failed by construction rather than testing anything — they are
+gone, not skipped.
 
-**Do not delete the legacy four before the rolling six are green in CI** — they
-were the project's only multi-chain E2E swap coverage, and swap#106 had already
-found four of them silently collecting *zero* tests while reporting a pass.
-The counts in the tables above are the guard against that happening again: a
-suite that collects fewer than its number has lost coverage, whatever colour CI
-reports. The `solana-e2e` CI job enforces the two Solana rows mechanically (it
-greps the vitest output for the exact collected count), because "green" has
-twice now meant "ran nothing".
-
-Whole-run totals, as a second guard on the same thing: **52 collected, 48
-passing, 4 skipped** under `SWAP_E2E_REQUIRE_SOLANA=1` (the `solana-e2e` job).
-The 4 skips are Mina's, and only Mina's. Before swap#160 it was 50 / 42 / 8 —
-the extra 8th..5th skips were the four Solana tests that had never once run.
+Whole-run totals, as a guard against `test:e2e:docker` quietly collecting
+fewer tests than it should (swap#106 found four suites silently collecting
+*zero* tests while reporting a pass): **34 collected, 30 passing, 4 skipped**
+under `SWAP_E2E_REQUIRE_SOLANA=1` (the `solana-e2e` job). The 4 skips are
+Mina's, and only Mina's. The `solana-e2e` CI job enforces the Solana row
+mechanically (it greps the vitest output for the exact collected count),
+because "green" has twice now meant "ran nothing".
 
 Run with:
 
@@ -106,9 +99,8 @@ regression, not an expected gap.
 
 ### The rolling sender
 
-A rolling sender is the same `ConnectorNode` the legacy suites build
-(`helpers/build-live-sender.ts`), with two additions the legacy path never
-needed:
+A rolling sender is a `ConnectorNode` (`helpers/build-live-sender.ts`), with
+two additions the now-deleted legacy suites never needed:
 
 - **its `nodeId` IS its ILP address.** The maker refuses to mint a session it
   cannot answer, and decides that by comparing the RFQ's `senderIlpAddress`
@@ -244,20 +236,16 @@ item 1 is the sender rewrite that has to come with them.
 
 ## A known, tracked gap
 
-The EVM suite exercises `streamSwap()` completion, kind:10032 discovery, and
-`buildSettlementTx()`'s structural output (`verifySignatures: false` — no
-client-side signature verification, no on-chain broadcast). swap#101 (v2
-EIP-712 balance-proof signing) and swap#102 (kind:10032 `verifyingContract`
-advertisement) have both since landed on `main`, and `peer-node.ts` wires
-peer1's `chainProviders` entry with the deployed `RollingSwapChannel`
-address (`channelAddress`, from the same vendored Anvil fixture the
-integration suite uses) so the swap node signs with the real v2 digest and
-advertises it — but this harness still does not exercise real client-side
-verification of that signature; AC-6's settlement assertions use
-`verifySignatures: false`. Wiring a real client-side verify step into AC-3
-(or a new AC) so a future v1/v2 regression fails here instead of silently
-passing both repos' CI (per toon-meta#394's original report) remains a
-follow-up.
+`docker-rolling-swap-evm-e2e.test.ts` exercises `buildSettlementTx()`'s
+structural output with `verifySignatures: false` — no client-side signature
+verification, no on-chain broadcast. `peer-node.ts` wires peer1's
+`chainProviders` entry with the deployed `RollingSwapChannel` address
+(`channelAddress`, from the same vendored Anvil fixture the integration suite
+uses) so the swap node signs with the real v2 digest and advertises it, but
+this harness still does not exercise real client-side verification of that
+signature. Wiring a real client-side verify step so a future v1/v2 regression
+fails here instead of silently passing both repos' CI (per toon-meta#394's
+original report) remains a follow-up.
 
 ## Identity
 

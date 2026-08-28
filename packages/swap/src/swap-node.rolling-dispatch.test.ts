@@ -2,14 +2,17 @@
  * Issue #47 — `startSwapNode()` rolling dispatch-matrix tests.
  *
  * Exercises the connector-facing packet handler (the `setPacketHandler`
- * callback) across the condition-class × payload-class matrix:
+ * callback) across the condition-class × payload-class matrix
+ * (swap#154, toon-meta#411 Stage 5 — the legacy claim-in-FULFILL row is gone):
  *
- *   - zero condition + TOON/gift-wrap  → LEGACY path, byte-for-byte
- *   - zero condition + rolling fill    → F99 condition_required
- *   - sender-chosen condition + fill   → rolling engine (coupled legs)
- *   - sender-chosen condition + legacy → F99 BEFORE any legacy dispatch
- *     (the legacy handler cannot mint the preimage; dispatching would debit
- *     inventory only for the connector to F99 the FULFILL — contract rule 3)
+ *   - zero condition + kind:20033 RFQ    → rolling RFQ intake (session)
+ *   - zero condition + anything else     → rfqIntake reject, terminal
+ *   - zero condition + rolling fill      → F99 condition_required
+ *   - sender-chosen condition + fill     → rolling engine (coupled legs)
+ *   - sender-chosen condition + anything → F01 malformed_fill (not a
+ *     distinct "legacy" case — the retired legacy path never set a
+ *     sender-chosen condition, and rolling fills are the only thing this
+ *     maker accepts under one)
  */
 import { describe, it, expect } from 'vitest';
 import { sha256 } from '@noble/hashes/sha2.js';
@@ -18,6 +21,7 @@ import { startSwapNode } from './swap-node.js';
 import type { SwapNodeConfig, SwapNodeInstance } from './swap-node.js';
 import { ROLLING_PROTOCOL, ROLLING_REJECT_REASONS } from './rolling-engine.js';
 import type { LegBPrepare, LegBResult } from './rolling-engine.js';
+import { ROLLING_RFQ_REJECT_REASONS } from './rolling-rfq.js';
 
 const VALID_MNEMONIC =
   'abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about';
@@ -142,7 +146,7 @@ function decodeReason(dataB64?: string): unknown {
 }
 
 describe('issue #47 — rolling dispatch matrix', () => {
-  it('zero condition + non-TOON payload → legacy F06 "Invalid TOON payload" (unchanged)', async () => {
+  it('zero condition + non-TOON payload → rfqIntake terminal reject (unreadable_request)', async () => {
     const { instance, handler } = await bootNode();
     try {
       const res = await handler()({
@@ -152,7 +156,9 @@ describe('issue #47 — rolling dispatch matrix', () => {
       });
       expect(res.accept).toBe(false);
       expect(res.code).toBe('F06');
-      expect(res.message).toBe('Invalid TOON payload');
+      expect(decodeReason(res.data)).toBe(
+        ROLLING_RFQ_REJECT_REASONS.UNREADABLE_REQUEST
+      );
     } finally {
       await instance.stop();
     }
@@ -195,20 +201,20 @@ describe('issue #47 — rolling dispatch matrix', () => {
     }
   });
 
-  it('sender-chosen condition + legacy payload → F99 BEFORE legacy dispatch; nothing debited', async () => {
+  it('sender-chosen condition + non-fill payload → F01 malformed_fill; nothing debited', async () => {
     const { instance, handler } = await bootNode();
     try {
       const before = instance.health().inventoryAvailable[`USDC:${CHAIN}`];
       const res = await handler()({
         amount: '1000',
         destination: 'g.toon.swap.x',
-        data: Buffer.from('any-legacy-payload', 'utf8').toString('base64'),
+        data: Buffer.from('not-a-rolling-fill', 'utf8').toString('base64'),
         executionCondition: mint().conditionB64,
       });
       expect(res.accept).toBe(false);
-      expect(res.code).toBe('F99');
+      expect(res.code).toBe('F01');
       expect(decodeReason(res.data)).toBe(
-        ROLLING_REJECT_REASONS.CONDITION_UNSUPPORTED_LEGACY
+        ROLLING_REJECT_REASONS.MALFORMED_FILL
       );
       expect(instance.health().inventoryAvailable[`USDC:${CHAIN}`]).toBe(
         before
@@ -322,11 +328,11 @@ describe('issue #47 — rolling dispatch matrix', () => {
     }
   });
 
-  it('legacy gift-wrap traffic still dispatches to the registry when no condition is present', async () => {
-    // A structurally-valid TOON payload is exercised end-to-end by the
-    // existing integration suite; here we pin the dispatch-order property:
-    // zero-condition traffic reaches the legacy TOON parser (F06 for junk),
-    // NOT any rolling-engine reject.
+  it('non-fill zero-condition traffic reaches the rfqIntake terminal reject, not a rolling-engine reject', async () => {
+    // Pins the dispatch-order property: zero-condition, non-rolling-fill
+    // traffic reaches `rfqIntake.handle()` (F06 unreadable_request for
+    // arbitrary JSON, since it does not even unwrap as a gift wrap), NOT any
+    // rolling-engine reject.
     const { instance, handler } = await bootNode();
     try {
       const res = await handler()({
@@ -338,8 +344,9 @@ describe('issue #47 — rolling dispatch matrix', () => {
       });
       expect(res.accept).toBe(false);
       expect(res.code).toBe('F06');
-      expect(res.message).toBe('Invalid TOON payload');
-      expect(res.data).toBeUndefined();
+      expect(decodeReason(res.data)).toBe(
+        ROLLING_RFQ_REJECT_REASONS.UNREADABLE_REQUEST
+      );
     } finally {
       await instance.stop();
     }

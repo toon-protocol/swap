@@ -567,8 +567,6 @@ export const ROLLING_REJECT_REASONS = {
   MALFORMED_FILL: 'malformed_fill',
   /** Dispatcher-level: rolling fill arrived without a sender-chosen condition. */
   CONDITION_REQUIRED: 'condition_required',
-  /** Dispatcher-level: sender-chosen condition on a non-rolling (legacy) payload. */
-  CONDITION_UNSUPPORTED_LEGACY: 'condition_unsupported_legacy',
 } as const;
 
 /** Build a structured engine reject (rejectReason set explicitly — see type). */

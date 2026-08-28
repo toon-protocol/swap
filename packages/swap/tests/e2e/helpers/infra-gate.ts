@@ -154,31 +154,14 @@ export const DOCKER_CHAIN_EVM_B = `${EVM_CHAIN_PREFIX}${CHAIN_B_ID}` as const;
 export const DOCKER_CHAIN_SOLANA = SOLANA_CHAIN;
 export const DOCKER_CHAIN_MINA = 'mina:devnet' as const;
 
-export const DOCKER_CHAINS = [
-  DOCKER_CHAIN_EVM,
-  DOCKER_CHAIN_SOLANA,
-  DOCKER_CHAIN_MINA,
-] as const;
-
-export type DockerChain = (typeof DOCKER_CHAINS)[number];
-
-/** All 9 ordered (source, target) pairs. AC-9 coverage target. */
-export const DOCKER_PAIR_MATRIX: readonly {
-  from: DockerChain;
-  to: DockerChain;
-}[] = Object.freeze(
-  DOCKER_CHAINS.flatMap((from) => DOCKER_CHAINS.map((to) => ({ from, to })))
-);
-
 // ---------------------------------------------------------------------------
 // The ROLLING matrix (swap#153)
 // ---------------------------------------------------------------------------
 
 /**
- * The rolling matrix adds the second EVM chain, so it is 4 chains and 16
- * ordered pairs rather than the legacy 3 and 9. That is deliberate: the extra
- * chain is the one pair in this harness that crosses a chain boundary WITHOUT
- * operator-supplied infra, so it is the one that actually executes in CI.
+ * 4 chains, 16 ordered pairs. The second EVM chain is the one pair in this
+ * harness that crosses a chain boundary WITHOUT operator-supplied infra, so
+ * it is the one that actually executes in CI.
  */
 export const ROLLING_CHAINS = [
   DOCKER_CHAIN_EVM,

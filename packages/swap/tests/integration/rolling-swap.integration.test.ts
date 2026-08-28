@@ -20,11 +20,10 @@
  *     preimage.
  *
  * Scenarios: multi-packet rolling swap (AC-1/AC-5 contract level), maker
- * stall / sender withhold mid-stream (AC-1/AC-2), legacy gift-wrap
- * coexistence on the same node (zero-condition path unchanged), and (issue
- * #103) three signature-verification guards: a tampered claim withholds the
- * reveal and unwinds, a claim verified under the wrong chain domain is
- * rejected, and a v1-style raw-packed signature fails v2 verification.
+ * stall / sender withhold mid-stream (AC-1/AC-2), and (issue #103) three
+ * signature-verification guards: a tampered claim withholds the reveal and
+ * unwinds, a claim verified under the wrong chain domain is rejected, and a
+ * v1-style raw-packed signature fails v2 verification.
  *
  * The guard is known to bite (issue #103 AC-6), not assumed to: reverting
  * `EvmPaymentChannelSigner.signBalanceProof` to the pre-#101 v1 digest fails
@@ -45,7 +44,11 @@ import {
   bigintToBytes32BE,
   concatBytes,
 } from '@toon-protocol/settlement-digest';
-import { startSwapNode, ROLLING_PROTOCOL } from '@toon-protocol/swap';
+import {
+  startSwapNode,
+  ROLLING_PROTOCOL,
+  ROLLING_RFQ_REJECT_REASONS,
+} from '@toon-protocol/swap';
 import type {
   LegBPrepare,
   LegBResult,
@@ -487,7 +490,13 @@ describe('swap#47 — rolling coupled-leg engine (integration)', () => {
     }
   });
 
-  it('legacy zero-condition gift-wrap flow still fills claim-in-FULFILL on the SAME node', async () => {
+  it('a legacy zero-condition gift-wrap is refused, terminally, on the SAME node (swap#154)', async () => {
+    // Was: "legacy zero-condition gift-wrap flow still fills claim-in-FULFILL
+    // on the SAME node" — proving the legacy and rolling dispatch paths
+    // coexisted safely on one node instance. swap#154 (toon-meta#411 Stage 5)
+    // deleted the legacy dispatch entirely, so the same zero-condition
+    // gift-wrap now proves the opposite: it is refused, and the rolling
+    // engine's own inventory/leg-B machinery is untouched by it.
     const daemon = makeSenderDaemon();
     const { instance, handler } = await bootRollingNode(daemon);
     try {
@@ -517,37 +526,24 @@ describe('swap#47 — rolling coupled-leg engine (integration)', () => {
         amount: '1000000', // 1 USDC
         destination: 'g.toon.swap.rolling-fixture',
         data: toonB64,
-        // NO executionCondition: legacy class, byte-for-byte pre-#309 path.
+        // NO executionCondition: the zero-condition seam the RFQ intake and
+        // the retired legacy path both shared.
       });
 
-      // Legacy shape: accept with the claim in the FULFILL data/metadata —
-      // and NO app-supplied fulfillment (the connector injects its NIP-59
-      // preimage on this class).
-      expect(res.accept).toBe(true);
-      expect(res.fulfillment).toBeUndefined();
-      const metadata = res.data
-        ? (JSON.parse(
-            Buffer.from(res.data, 'base64').toString('utf8')
-          ) as Record<string, unknown>)
-        : res.metadata!;
-      expect(metadata['claim']).toBeTypeOf('string');
-      expect((metadata['claim'] as string).length).toBeGreaterThan(0);
-      expect(metadata['recipient']).toBe(CHAIN_RECIPIENT);
-      // Quote tape (sdk 2.1.0, toon#82) still emitted on legacy accepts.
-      expect(metadata['rate']).toBe('0.0004');
-      expect(metadata['rateTimestamp']).toBeTypeOf('number');
+      expect(res.accept).toBe(false);
+      expect(res.code).toBe('F06');
+      // …and refused by NAME, not merely refused: the discriminator a legacy
+      // sender reads off the base64-JSON reject `data`.
+      expect(
+        JSON.parse(
+          Buffer.from(res.data ?? '', 'base64').toString('utf8')
+        ) as Record<string, unknown>
+      ).toMatchObject({
+        reason: ROLLING_RFQ_REJECT_REASONS.LEGACY_PROTOCOL_REFUSED,
+      });
 
-      // Issue #138 — the legacy fill books its 4e14 wei (1 USDC · 0.0004) as
-      // unsettled channel liability instead of permanently debiting
-      // `available`, exactly like the rolling path above: the capacity is
-      // spoken for (free shrinks) but the capital comes back when the chain
-      // shows the claim redeemed. Before #138 this was an unrecoverable debit.
+      // Nothing moved, and no leg-B traffic was generated for it.
       expect(instance.health().inventoryAvailable[INVENTORY_KEY]).toBe(before);
-      expect(instance.health().inventoryWindow[INVENTORY_KEY]).toMatchObject({
-        unsettled: (4n * 10n ** 14n).toString(),
-        free: (BigInt(before!) - 4n * 10n ** 14n).toString(),
-      });
-      // And no leg-B traffic was generated for it.
       expect(daemon.advances).toHaveLength(0);
     } finally {
       await instance.stop();
