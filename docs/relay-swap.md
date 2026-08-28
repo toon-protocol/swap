@@ -1,6 +1,7 @@
 # The swap is a relay-mediated client
 
-**Status:** decided and built in this repository (swap 3.0.0, 2026-08-28). Supersedes
+**Status:** decided and built in this repository (swap 3.0.0, 2026-08-28). New here? Read
+[How it works](./how-it-works.md) first, then the [guide](../packages/swap/README.md). Supersedes
 [`rust-connector-migration.md`](./rust-connector-migration.md) (the maker as an HTTP app behind a
 Rust connector), which never shipped.
 

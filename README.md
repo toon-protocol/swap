@@ -1,10 +1,22 @@
 # swap
 
-TOON Protocol multi-chain swap node — @toon-protocol/swap (issues signed target-chain payment-channel claims; EVM/Solana/Mina).
+`@toon-protocol/swap` — swap USDC across chains through a TOON relay, with no server in
+between. A maker publishes an order; a taker streams it small fills; each side verifies the
+other's signed payment-channel claim; the newest claim is redeemed on chain once.
 
-In the TOON stack this is both sides of a **relay-mediated rolling swap**. A maker publishes an order on a TOON relay; a taker accepts it and streams fills — each fill a NIP-59 gift wrap carrying the taker's cumulative leg-A payment-channel claim, answered by one carrying the maker's cumulative leg-B claim on the target chain. Each party verifies the other's claim itself; the relay's [Rust connector](https://github.com/toon-protocol/connector) only charges carriage for the writes. The wire is `rolling/3` — see [`docs/relay-swap.md`](docs/relay-swap.md) for the design, `toon-swap make|orders|take|resume|redeem` for the CLI, and [`packages/swap/tests/e2e`](packages/swap/tests/e2e) for the cross-chain proof through a real relay (EVM↔Solana, redeemed on chain). toon-meta [`docs/rolling-swap.md`](https://github.com/toon-protocol/toon-meta/blob/main/docs/rolling-swap.md) is the protocol's history (`rolling/1`).
+| Start here | |
+| --- | --- |
+| **Guide** — install, try it on the devnet, run a maker, the CLI | [packages/swap/README.md](packages/swap/README.md) |
+| **How it works** — the sequence, and the one number you turn (δ) | [docs/how-it-works.md](docs/how-it-works.md) |
+| Design record — why the swap is relay-mediated, what does not change | [docs/relay-swap.md](docs/relay-swap.md) |
+| Operator & config reference | [deploy/swap/README.md](deploy/swap/README.md) |
+| The proof — EVM↔Solana through a real relay, redeemed on chain | [packages/swap/tests/e2e](packages/swap/tests/e2e) |
+| History — `rolling/1`, the protocol's first shape | toon-meta [docs/rolling-swap.md](https://github.com/toon-protocol/toon-meta/blob/main/docs/rolling-swap.md) |
 
-> Extracted from the TOON monorepo with full git history preserved. npm publishing is done by CI (changesets + `pnpm`, authed by the org `NPM_TOKEN` secret).
+Published on npm as [`@toon-protocol/swap`](https://www.npmjs.com/package/@toon-protocol/swap)
+by CI (changesets + `pnpm`, authed by the org `NPM_TOKEN` secret). The relay's
+[Rust connector](https://github.com/toon-protocol/connector) charges for each write and never
+opens a message.
 
 ## Getting started with Devbox
 

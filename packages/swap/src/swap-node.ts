@@ -596,7 +596,8 @@ export function validateConfig(config: SwapNodeConfig): void {
         `SwapNodeConfig.chains missing family "${fam}" required by pair.to.chain=${chain}`
       );
     }
-    const chanList = config.channels[chain];
+    // A chain with no `channels` entry means "none pre-opened" — fine when `channelDeposit` opens them on demand.
+    const chanList = config.channels[chain] ?? [];
     const onDemand =
       (fam === 'evm' &&
         findChainProvider(config.chainProviders, 'evm', chain)
