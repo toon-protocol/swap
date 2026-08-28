@@ -212,7 +212,7 @@ jobs:
   # defect swap#106 found (four suites collecting zero tests, reporting a pass)
   # and the reason these suites needed rescuing in the first place.
   solana-e2e:
-    name: Cross-chain E2E (Rust connector, EVM↔Solana)
+    name: Cross-chain E2E (relay-mediated, EVM↔Solana)
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
@@ -280,14 +280,15 @@ jobs:
       # below are asserted afterwards because a *passing* run that collected
       # fewer tests than it should is the failure mode this repo has been bitten
       # by twice — a green tick is not evidence that anything ran.
-      # The maker is an app behind a Rust connector, so the e2e runs one: the
+      # Both swap parties pay the relay's Rust connector for every write, so
+      # the e2e runs one (fronting a real `@toon-protocol/relay`): the
       # published immutable build this repo pins (connector ADR 0068 — never
       # `rust-main` / `rust-release`). Bump deliberately, with the connector's
       # release notes in hand; tests/e2e/helpers/rust-connector.ts is what
       # runs it (`docker run --rm --network host`).
       - name: Pull the Rust connector image
         run: docker pull ghcr.io/toon-protocol/connector:rust-sha-5c1b222
-      - name: Cross-chain E2E through the Rust connector (EVM↔Solana, both ways)
+      - name: Cross-chain E2E through a real relay (EVM↔Solana, both ways)
         env:
           SWAP_E2E_CONNECTOR_IMAGE: ghcr.io/toon-protocol/connector:rust-sha-5c1b222
           NO_COLOR: '1'
@@ -326,7 +327,7 @@ jobs:
               fail=1
             fi
           }
-          check 'rust-connector-swap.e2e.test.ts' 9
+          check 'relay-swap.e2e.test.ts' 5
           check 'taker-toolkit.selfcheck.test.ts' 12
           [ "$fail" -eq 0 ] || exit 1
           echo "✓ both e2e suites collected and ran their full complement"

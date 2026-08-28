@@ -1,22 +1,21 @@
 /**
- * The maker engine — quotes a session and turns each **paid** fill into a
+ * The maker engine — quotes a session and turns each **verified** fill into a
  * cumulative leg-B balance proof.
  *
- * This is the app half of "the maker is an app behind a Rust connector's
- * route termination". The connector in front of it has already done
- * everything payment-shaped by the time {@link MakerEngine.fill} runs: it
- * verified the taker's leg-A claim against the chain, advanced the channel
- * watermark, and stated what it took as `X-TOON-Amount`. The engine never
- * sees a packet, a claim or a key that is not its own; it prices, reserves
+ * On the relay-mediated swap the engine is the app half of `swap-maker.ts`:
+ * by the time {@link MakerEngine.fill} runs, the maker has already unwrapped
+ * the taker's gift wrap, verified the taker's leg-A claim against the chain
+ * (`received-claim.ts`), advanced its inbound watermark, and stated what that
+ * claim was worth as a {@link PaymentAttribution}. The engine never sees a
+ * wrap, a signature or a key that is not its own; it prices, reserves
  * capital, signs, and answers. Refusing is cheap and safe — but not free for
- * the taker, whose fill was charged before the app was asked (PF-23), which
- * is why a refusal of a paid fill is remembered as **credit** and applied to
- * the session's next accepted fill.
+ * the taker, whose claim the maker now holds — which is why a refusal of a
+ * paid fill is remembered as **credit** and applied to the session's next
+ * accepted fill.
  *
- * What survived from `rolling/1`'s engine: the rate path (provider +
- * freshness guard), `applyRate`, the reservation → commit accounting on
- * `MultiChainClaimIssuer`, stream receipts. What did not: the coupled leg-B
- * PREPARE and its condition/preimage dance — see `docs/rust-connector-migration.md`.
+ * Sessions are exportable (`exportSessions`) and rehydratable (the
+ * constructor's `sessions`) so a maker that restarts answers a replayed fill
+ * with the same advance and continues a stream at `lastSeq + 1`.
  */
 
 import type { UnsignedEvent } from 'nostr-tools/pure';
@@ -35,25 +34,20 @@ import type {
 import { classifyClaimIssuerError } from './claim-refusal.js';
 import type { SwapInventory } from './inventory.js';
 import { StaleRateError, pairKey } from './rate-staleness.js';
-import type {
-  RateFreshnessGuard,
-  SwapRateProvider,
-} from './rate-staleness.js';
-import {
-  SWAP_REFUSAL_REASONS,
-  SWAP_REFUSAL_STATUS,
-  SWAP_WIRE_PROTOCOL,
-} from './wire.js';
+import type { RateFreshnessGuard, SwapRateProvider } from './rate-staleness.js';
+import type { PersistedMakerSession } from './state-store.js';
+import { SWAP_REFUSAL_REASONS, SWAP_WIRE_PROTOCOL } from './wire.js';
 import type {
   PaymentAttribution,
+  SwapAccept,
   SwapAdvance,
-  SwapFillRequest,
-  SwapLegBTerms,
+  SwapFill,
+  SwapLegTerms,
   SwapQuote,
   SwapRefusal,
   SwapRefusalReason,
-  SwapRfqRequest,
   SwapWireAsset,
+  SwapWirePair,
 } from './wire.js';
 
 export const DEFAULT_QUOTE_TTL_MS = 60_000;
@@ -65,15 +59,20 @@ export const SWAP_FILL_CONTEXT_KIND = 20_035;
 
 export interface MakerSession {
   streamNonce: string;
+  orderId: string;
+  /** The taker's Nostr pubkey — bound at accept; every later message must come from it. */
+  takerPubkey: string;
   pair: SwapPair;
   chainRecipient: string;
+  /** The taker's leg-A address on `pair.from.chain`, as declared at accept. */
+  payerAddress: string;
   /** Quote the session was opened on; every fill re-prices, this is the tape's origin. */
   quotedRate: string;
   quotedAt: number;
   quoteExpiresAt: number;
   createdAt: number;
   expiresAt: number;
-  /** The leg-A channel key bound at the first paid fill (`X-TOON-Payer`). */
+  /** The leg-A channel key bound at the first verified fill (`attribution.payer`). */
   payer: string | null;
   lastSeq: number;
   lastAdvance: SwapAdvance | null;
@@ -82,6 +81,7 @@ export interface MakerSession {
   /** Σ source units accepted, Σ target units issued — for health/admin. */
   sourceTotal: bigint;
   targetTotal: bigint;
+  lastFillEventId?: string;
 }
 
 export interface MakerEngineLogger {
@@ -95,10 +95,14 @@ export interface MakerEngineConfig {
   swapPairs: readonly SwapPair[];
   claimIssuer: MultiChainClaimIssuer;
   inventory: SwapInventory;
+  /** Leg-A facts for a source chain — where the taker pays this maker. */
+  legATerms: (chain: string) => SwapLegTerms;
   /** Leg-B facts for a target chain — signer, verifying contract / program, token. */
-  legBTerms: (chain: string) => SwapLegBTerms;
-  /** Where fills go and, if known, how big one is (the fill route's price). */
-  fill: { destination: string; amount?: bigint };
+  legBTerms: (chain: string) => SwapLegTerms;
+  /** Bounds on one fill's delta, source base units. */
+  fill: { min: bigint; max: bigint };
+  /** The order id this maker publishes for a pair; an accept naming another is refused. */
+  orderIdFor?: (pair: SwapPair) => string;
   rateProvider?: SwapRateProvider;
   stalenessGuard?: RateFreshnessGuard;
   /**
@@ -106,13 +110,15 @@ export interface MakerEngineConfig {
    * `recipient` from (derived from participants + mint, ADR 0059). Returning
    * `undefined` means "no preference" (EVM pools bind first-unbound).
    */
-  preferredChannelFor?: (chain: string, recipient: string) => string | undefined;
+  preferredChannelFor?: (
+    chain: string,
+    recipient: string
+  ) => string | undefined;
   /**
    * Make the preferred channel exist and hold enough to cover this fill —
-   * a Solana leg-B channel is opened and funded by the maker on demand (see
-   * `solana-leg-b-channel.ts`). Runs after the taker has paid, before the
-   * claim is issued; returns the channel id to serve from, or throws with a
-   * reason the taker is told (`no_channel_available`).
+   * a leg-B channel is opened and funded by the maker on demand. Runs after
+   * the taker has paid, before the claim is issued; returns the channel id
+   * to serve from, or throws with a reason the taker is told.
    */
   ensureChannel?: (
     pair: SwapPair,
@@ -126,20 +132,17 @@ export interface MakerEngineConfig {
   maxSessions?: number;
   receiptSecretKey?: Uint8Array;
   receiptSessions?: ReceiptSessionStoreLike;
+  /** Sessions persisted by a previous run, rehydrated as-is (expired ones are dropped). */
+  sessions?: readonly PersistedMakerSession[];
   logger?: MakerEngineLogger;
   now?: () => number;
-}
-
-export interface MakerAnswer<T> {
-  status: number;
-  body: T;
 }
 
 function assetKey(a: SwapWireAsset): string {
   return `${a.assetCode}:${a.assetScale}:${a.chain}`;
 }
 
-function chainFamily(chain: string): 'evm' | 'solana' | 'mina' | null {
+export function chainFamily(chain: string): 'evm' | 'solana' | 'mina' | null {
   if (chain.startsWith('evm:')) return 'evm';
   if (chain.startsWith('solana:')) return 'solana';
   if (chain.startsWith('mina:')) return 'mina';
@@ -167,12 +170,14 @@ export function defaultValidateRecipient(
   return recipient.length > 0 ? null : 'chainRecipient must be non-empty';
 }
 
-function refusal(
+export function makerRefusal(
   reason: SwapRefusalReason,
   message: string,
-  extra: Partial<Pick<SwapRefusal, 'streamNonce' | 'seq' | 'credited' | 'detail'>> = {},
+  extra: Partial<
+    Pick<SwapRefusal, 'streamNonce' | 'seq' | 'credited' | 'detail'>
+  > = {},
   retry?: boolean
-): MakerAnswer<SwapRefusal> {
+): SwapRefusal {
   const retryable =
     retry ??
     (reason === SWAP_REFUSAL_REASONS.STALE_RATE ||
@@ -180,17 +185,65 @@ function refusal(
       reason === SWAP_REFUSAL_REASONS.INSUFFICIENT_LIQUIDITY ||
       reason === SWAP_REFUSAL_REASONS.CHANNEL_UNREDEEMED ||
       reason === SWAP_REFUSAL_REASONS.PERSISTENCE_FAILED ||
+      reason === SWAP_REFUSAL_REASONS.CHAIN_READ_FAILED ||
       reason === SWAP_REFUSAL_REASONS.INTERNAL_ERROR);
   return {
-    status: SWAP_REFUSAL_STATUS[reason],
-    body: {
-      proto: SWAP_WIRE_PROTOCOL,
-      type: 'refusal',
-      reason,
-      message: `${reason}: ${message}`,
-      retry: retryable,
-      ...extra,
-    },
+    proto: SWAP_WIRE_PROTOCOL,
+    type: 'refusal',
+    reason,
+    message: `${reason}: ${message}`,
+    retry: retryable,
+    ...extra,
+  };
+}
+
+function sessionFromPersisted(p: PersistedMakerSession): MakerSession {
+  return {
+    streamNonce: p.streamNonce,
+    orderId: p.orderId,
+    takerPubkey: p.takerPubkey,
+    pair: p.pair as SwapPair,
+    chainRecipient: p.chainRecipient,
+    payerAddress: p.payerAddress,
+    quotedRate: p.quotedRate,
+    quotedAt: p.quotedAt,
+    quoteExpiresAt: p.quoteExpiresAt,
+    createdAt: p.createdAt,
+    expiresAt: p.expiresAt,
+    payer: p.payer,
+    lastSeq: p.lastSeq,
+    lastAdvance: (p.lastAdvance as SwapAdvance | null) ?? null,
+    credit: BigInt(p.credit),
+    sourceTotal: BigInt(p.sourceTotal),
+    targetTotal: BigInt(p.targetTotal),
+    ...(p.lastFillEventId !== undefined && {
+      lastFillEventId: p.lastFillEventId,
+    }),
+  };
+}
+
+function sessionToPersisted(s: MakerSession): PersistedMakerSession {
+  return {
+    streamNonce: s.streamNonce,
+    orderId: s.orderId,
+    takerPubkey: s.takerPubkey,
+    pair: s.pair,
+    chainRecipient: s.chainRecipient,
+    payerAddress: s.payerAddress,
+    quotedRate: s.quotedRate,
+    quotedAt: s.quotedAt,
+    quoteExpiresAt: s.quoteExpiresAt,
+    createdAt: s.createdAt,
+    expiresAt: s.expiresAt,
+    payer: s.payer,
+    lastSeq: s.lastSeq,
+    lastAdvance: s.lastAdvance,
+    credit: s.credit.toString(),
+    sourceTotal: s.sourceTotal.toString(),
+    targetTotal: s.targetTotal.toString(),
+    ...(s.lastFillEventId !== undefined && {
+      lastFillEventId: s.lastFillEventId,
+    }),
   };
 }
 
@@ -199,13 +252,21 @@ export class MakerEngine {
   readonly #pairs: readonly SwapPair[];
   readonly #claimIssuer: MultiChainClaimIssuer;
   readonly #inventory: SwapInventory;
-  readonly #legBTerms: (chain: string) => SwapLegBTerms;
-  readonly #fill: { destination: string; amount?: bigint };
+  readonly #legATerms: (chain: string) => SwapLegTerms;
+  readonly #legBTerms: (chain: string) => SwapLegTerms;
+  readonly #fill: { min: bigint; max: bigint };
+  readonly #orderIdFor?: (pair: SwapPair) => string;
   readonly #rateProvider?: SwapRateProvider;
   readonly #guard?: RateFreshnessGuard;
-  readonly #preferredChannelFor?: (chain: string, recipient: string) => string | undefined;
+  readonly #preferredChannelFor?: (
+    chain: string,
+    recipient: string
+  ) => string | undefined;
   readonly #ensureChannel?: MakerEngineConfig['ensureChannel'];
-  readonly #validateRecipient: (chain: string, recipient: string) => string | null;
+  readonly #validateRecipient: (
+    chain: string,
+    recipient: string
+  ) => string | null;
   readonly #quoteTtlMs: number;
   readonly #sessionTtlMs: number;
   readonly #maxSessions: number;
@@ -220,8 +281,13 @@ export class MakerEngine {
     this.#pairs = config.swapPairs;
     this.#claimIssuer = config.claimIssuer;
     this.#inventory = config.inventory;
+    this.#legATerms = config.legATerms;
     this.#legBTerms = config.legBTerms;
+    if (config.fill.min <= 0n || config.fill.max < config.fill.min) {
+      throw new Error('MakerEngineConfig.fill requires 0 < min <= max');
+    }
     this.#fill = config.fill;
+    if (config.orderIdFor) this.#orderIdFor = config.orderIdFor;
     if (config.rateProvider) this.#rateProvider = config.rateProvider;
     if (config.stalenessGuard) this.#guard = config.stalenessGuard;
     if (config.preferredChannelFor) {
@@ -248,20 +314,29 @@ export class MakerEngine {
       config.receiptSessions ?? new BoundedReceiptSessions();
     this.#logger = config.logger ?? {};
     this.#now = config.now ?? Date.now;
+    const now = this.#now();
+    for (const p of config.sessions ?? []) {
+      if (p.expiresAt <= now) continue;
+      const s = sessionFromPersisted(p);
+      this.#sessions.set(s.streamNonce, s);
+    }
   }
 
   // -------------------------------------------------------------------------
-  // RFQ
+  // Accept → quote
   // -------------------------------------------------------------------------
 
-  async quote(rfq: SwapRfqRequest): Promise<MakerAnswer<SwapQuote | SwapRefusal>> {
-    const pair = this.#findPair(rfq);
+  async quote(
+    accept: SwapAccept,
+    ctx: { takerPubkey: string }
+  ): Promise<SwapQuote | SwapRefusal> {
+    const pair = this.#findPair(accept.pair);
     if (!pair) {
-      return refusal(
+      return makerRefusal(
         SWAP_REFUSAL_REASONS.UNKNOWN_PAIR,
         'this maker does not quote that pair',
         {
-          streamNonce: rfq.streamNonce,
+          streamNonce: accept.streamNonce,
           detail: {
             pairs: this.#pairs.map((p) => ({ from: p.from, to: p.to })),
           },
@@ -269,107 +344,162 @@ export class MakerEngine {
         false
       );
     }
-    const recipientProblem = this.#validateRecipient(
-      pair.to.chain,
-      rfq.chainRecipient
-    );
-    if (recipientProblem) {
-      return refusal(
-        SWAP_REFUSAL_REASONS.INVALID_RECIPIENT,
-        recipientProblem,
-        { streamNonce: rfq.streamNonce },
+    if (this.#orderIdFor && this.#orderIdFor(pair) !== accept.orderId) {
+      return makerRefusal(
+        SWAP_REFUSAL_REASONS.UNKNOWN_ORDER,
+        'no live order with that id for this pair; re-read the order',
+        {
+          streamNonce: accept.streamNonce,
+          detail: { orderId: accept.orderId },
+        },
         false
       );
     }
-    const existing = this.#sessions.get(rfq.streamNonce);
-    if (existing && existing.payer !== null) {
-      return refusal(
+    const recipientProblem = this.#validateRecipient(
+      pair.to.chain,
+      accept.chainRecipient
+    );
+    if (recipientProblem) {
+      return makerRefusal(
+        SWAP_REFUSAL_REASONS.INVALID_RECIPIENT,
+        recipientProblem,
+        { streamNonce: accept.streamNonce },
+        false
+      );
+    }
+    const payerProblem =
+      accept.payer.chain !== pair.from.chain
+        ? `payer.chain must be ${pair.from.chain}`
+        : this.#validateRecipient(pair.from.chain, accept.payer.address);
+    if (payerProblem) {
+      return makerRefusal(
+        SWAP_REFUSAL_REASONS.MALFORMED_REQUEST,
+        payerProblem,
+        { streamNonce: accept.streamNonce },
+        false
+      );
+    }
+    const now = this.#now();
+    this.#evictExpired(now);
+    const existing = this.#sessions.get(accept.streamNonce);
+    if (existing && existing.takerPubkey !== ctx.takerPubkey) {
+      return makerRefusal(
         SWAP_REFUSAL_REASONS.SESSION_CONFLICT,
-        'a session with this streamNonce is already live; pick a fresh nonce',
-        { streamNonce: rfq.streamNonce },
+        'a session with this streamNonce belongs to another taker; pick a fresh nonce',
+        { streamNonce: accept.streamNonce },
         false
       );
     }
     const priced = await this.#priceNow(pair);
     if ('refusal' in priced) {
-      return {
-        ...priced.refusal,
-        body: { ...priced.refusal.body, streamNonce: rfq.streamNonce },
-      };
+      return { ...priced.refusal, streamNonce: accept.streamNonce };
     }
-    const now = this.#now();
-    this.#evictExpired(now);
     if (!existing && this.#sessions.size >= this.#maxSessions) {
       this.#evictOldestUnbound();
       if (this.#sessions.size >= this.#maxSessions) {
-        return refusal(
+        return makerRefusal(
           SWAP_REFUSAL_REASONS.INSUFFICIENT_LIQUIDITY,
           'maker session table is full; retry shortly',
-          { streamNonce: rfq.streamNonce }
+          { streamNonce: accept.streamNonce }
         );
       }
     }
-    const session: MakerSession = {
-      streamNonce: rfq.streamNonce,
-      pair,
-      chainRecipient: rfq.chainRecipient,
-      quotedRate: priced.rate,
-      quotedAt: priced.rateTimestamp,
-      quoteExpiresAt: now + this.#quoteTtlMs,
-      createdAt: now,
-      expiresAt: now + this.#sessionTtlMs,
-      payer: null,
-      lastSeq: 0,
-      lastAdvance: null,
-      credit: 0n,
-      sourceTotal: 0n,
-      targetTotal: 0n,
-    };
-    this.#sessions.set(session.streamNonce, session);
+    let session: MakerSession;
+    if (existing) {
+      // The same taker re-accepting (with or without `resume`) is a re-quote:
+      // fresh rate, fresh expiry, and `lastSeq` tells it where it stands.
+      existing.quotedRate = priced.rate;
+      existing.quotedAt = priced.rateTimestamp;
+      existing.quoteExpiresAt = now + this.#quoteTtlMs;
+      existing.expiresAt = now + this.#sessionTtlMs;
+      session = existing;
+    } else {
+      session = {
+        streamNonce: accept.streamNonce,
+        orderId: accept.orderId,
+        takerPubkey: ctx.takerPubkey,
+        pair,
+        chainRecipient: accept.chainRecipient,
+        payerAddress: accept.payer.address,
+        quotedRate: priced.rate,
+        quotedAt: priced.rateTimestamp,
+        quoteExpiresAt: now + this.#quoteTtlMs,
+        createdAt: now,
+        expiresAt: now + this.#sessionTtlMs,
+        payer: null,
+        lastSeq: 0,
+        lastAdvance: null,
+        credit: 0n,
+        sourceTotal: 0n,
+        targetTotal: 0n,
+      };
+      this.#sessions.set(session.streamNonce, session);
+    }
 
     const free = this.#freeCapacity(pair);
-    const legB = this.#legBTerms(pair.to.chain);
     const maxRateAgeMs = this.#guard?.resolveMaxRateAgeMs(pair);
     const quote: SwapQuote = {
       proto: SWAP_WIRE_PROTOCOL,
       type: 'quote',
       streamNonce: session.streamNonce,
+      orderId: session.orderId,
       rate: priced.rate,
       rateTimestamp: priced.rateTimestamp,
       expiresAt: session.quoteExpiresAt,
       fill: {
-        destination: this.#fill.destination,
-        ...(this.#fill.amount !== undefined && {
-          amount: this.#fill.amount.toString(),
-        }),
+        min: this.#fill.min.toString(),
+        max: this.#fill.max.toString(),
         chain: pair.from.chain,
       },
       ...(maxRateAgeMs !== undefined && { maxRateAgeMs }),
       ...(free !== null && { maxAmount: free.toString() }),
-      legB,
+      lastSeq: session.lastSeq,
+      legA: this.#legATerms(pair.from.chain),
+      legB: this.#legBTerms(pair.to.chain),
     };
-    this.#logger.info?.('swap.rfq.quoted', {
+    this.#logger.info?.('swap.accept.quoted', {
       streamNonce: session.streamNonce,
       pair: pairKey(pair),
       rate: priced.rate,
-      chainRecipient: rfq.chainRecipient,
+      chainRecipient: accept.chainRecipient,
+      resumed: existing !== undefined,
+      lastSeq: session.lastSeq,
       free: free?.toString() ?? null,
     });
-    return { status: 200, body: quote };
+    return quote;
   }
 
   // -------------------------------------------------------------------------
-  // Fill
+  // Fill → advance
   // -------------------------------------------------------------------------
 
+  /** The session a fill names, so the caller can decide replay/gap before verifying a claim. */
+  sessionFor(streamNonce: string): Readonly<MakerSession> | undefined {
+    const s = this.#sessions.get(streamNonce);
+    if (!s) return undefined;
+    if (this.#now() > s.expiresAt) {
+      this.#sessions.delete(streamNonce);
+      return undefined;
+    }
+    return s;
+  }
+
   async fill(input: {
-    fill: SwapFillRequest;
+    fill: SwapFill;
     attribution: PaymentAttribution | null;
-  }): Promise<MakerAnswer<SwapAdvance | SwapRefusal>> {
+    takerPubkey: string;
+    fillEventId?: string;
+  }): Promise<SwapAdvance | SwapRefusal> {
     const key = input.fill.streamNonce;
     const prev = this.#locks.get(key) ?? Promise.resolve();
-    const run = prev.then(() => this.#fillLocked(input), () => this.#fillLocked(input));
-    this.#locks.set(key, run.catch(() => undefined));
+    const run = prev.then(
+      () => this.#fillLocked(input),
+      () => this.#fillLocked(input)
+    );
+    this.#locks.set(
+      key,
+      run.catch(() => undefined)
+    );
     try {
       return await run;
     } finally {
@@ -378,43 +508,52 @@ export class MakerEngine {
   }
 
   async #fillLocked(input: {
-    fill: SwapFillRequest;
+    fill: SwapFill;
     attribution: PaymentAttribution | null;
-  }): Promise<MakerAnswer<SwapAdvance | SwapRefusal>> {
+    takerPubkey: string;
+    fillEventId?: string;
+  }): Promise<SwapAdvance | SwapRefusal> {
     const { fill, attribution } = input;
     const now = this.#now();
     const session = this.#sessions.get(fill.streamNonce);
     const ctx = { streamNonce: fill.streamNonce, seq: fill.seq };
 
     if (!session) {
-      return refusal(
+      return makerRefusal(
         SWAP_REFUSAL_REASONS.UNKNOWN_SESSION,
-        'no quote was issued for this streamNonce (or it expired); send an RFQ first',
+        'no quote was issued for this streamNonce (or it expired); send an accept first',
         ctx,
         false
       );
     }
     if (now > session.expiresAt) {
       this.#sessions.delete(session.streamNonce);
-      return refusal(
+      return makerRefusal(
         SWAP_REFUSAL_REASONS.SESSION_EXPIRED,
-        'this session is past its lifetime; send a fresh RFQ',
+        'this session is past its lifetime; send a fresh accept',
         ctx,
         false
       );
     }
+    if (session.takerPubkey !== input.takerPubkey) {
+      return makerRefusal(
+        SWAP_REFUSAL_REASONS.PAYER_MISMATCH,
+        'this session belongs to another taker',
+        ctx,
+        false
+      );
+    }
+    if (fill.seq === session.lastSeq && session.lastAdvance) {
+      // Retransmit of the last fill: the caller established it carries the
+      // same claim, so answer the same advance and let the taker recover
+      // the message it lost.
+      this.#logger.debug?.('swap.fill.replayed', ctx);
+      return session.lastAdvance;
+    }
     if (!attribution) {
-      // A priced route always arrives with attribution (ADR 0040). Missing it
-      // means the fill route is priced at 0 — an operator error that would
-      // otherwise hand out leg-B claims for free.
-      this.#logger.error?.('swap.fill.unpaid', {
-        ...ctx,
-        reason:
-          'no X-TOON-* attribution on a fill: the connector route in front of /swap/fill must carry a non-zero price',
-      });
-      return refusal(
+      return makerRefusal(
         SWAP_REFUSAL_REASONS.UNPAID,
-        'this fill arrived without a verified payment; the maker issues nothing for free',
+        'this fill carried no verified claim; the maker issues nothing for free',
         ctx,
         false
       );
@@ -426,7 +565,7 @@ export class MakerEngine {
       message: string,
       detail?: Record<string, unknown>,
       retry?: boolean
-    ): MakerAnswer<SwapRefusal> => {
+    ): SwapRefusal => {
       session.credit += attribution.amount;
       this.#logger.warn?.('swap.fill.refused_paid', {
         ...ctx,
@@ -435,7 +574,7 @@ export class MakerEngine {
         credit: session.credit.toString(),
         ...detail,
       });
-      return refusal(
+      return makerRefusal(
         reason,
         message,
         { ...ctx, credited: credited(), ...(detail && { detail }) },
@@ -447,7 +586,7 @@ export class MakerEngine {
     if (fromFamily !== attribution.chain) {
       return creditAndRefuse(
         SWAP_REFUSAL_REASONS.CHAIN_MISMATCH,
-        `this pair is paid on ${session.pair.from.chain}, but the connector was paid on ${attribution.chain}`,
+        `this pair is paid on ${session.pair.from.chain}, but the claim was on ${attribution.chain}`,
         { expected: session.pair.from.chain, paidOn: attribution.chain },
         false
       );
@@ -455,21 +594,12 @@ export class MakerEngine {
     if (session.payer === null) {
       session.payer = attribution.payer;
     } else if (session.payer !== attribution.payer) {
-      // Somebody else paid for this session's seq. Their money is the
-      // connector's; the session's owner is not credited for it.
-      return refusal(
+      return creditAndRefuse(
         SWAP_REFUSAL_REASONS.PAYER_MISMATCH,
         'this session is bound to a different leg-A channel',
-        { ...ctx, detail: { bound: session.payer, paid: attribution.payer } },
+        { bound: session.payer, paid: attribution.payer },
         false
       );
-    }
-    if (fill.seq === session.lastSeq && session.lastAdvance) {
-      // Retransmit of the last fill: the connector treats a byte-identical
-      // claim as idempotent, so the taker was not charged twice. Answer the
-      // same advance so it can recover the response it lost.
-      this.#logger.debug?.('swap.fill.replayed', ctx);
-      return { status: 200, body: session.lastAdvance };
     }
     if (fill.seq !== session.lastSeq + 1) {
       return creditAndRefuse(
@@ -482,7 +612,7 @@ export class MakerEngine {
     if (session.lastSeq === 0 && now > session.quoteExpiresAt) {
       return creditAndRefuse(
         SWAP_REFUSAL_REASONS.QUOTE_EXPIRED,
-        'the quote lapsed before the first fill; send a fresh RFQ',
+        'the quote lapsed before the first fill; send a fresh accept',
         { quoteExpiresAt: session.quoteExpiresAt },
         false
       );
@@ -491,9 +621,9 @@ export class MakerEngine {
     const priced = await this.#priceNow(session.pair);
     if ('refusal' in priced) {
       return creditAndRefuse(
-        priced.refusal.body.reason,
-        priced.refusal.body.message.replace(/^[a-z_]+: /, ''),
-        priced.refusal.body.detail
+        priced.refusal.reason,
+        priced.refusal.message.replace(/^[a-z_]+: /, ''),
+        priced.refusal.detail
       );
     }
     const creditApplied = session.credit;
@@ -589,14 +719,6 @@ export class MakerEngine {
       );
     }
 
-    // The taker has paid; the claim is out. Commit the reservation to
-    // unsettled liability now — there is no leg-B outcome to wait for.
-    this.#claimIssuer.commitRollingClaim({
-      reservationId: issued.reservationId,
-      pair: session.pair,
-      targetAmount,
-    });
-
     let receipt: unknown;
     if (this.#receiptSecretKey) {
       try {
@@ -622,13 +744,16 @@ export class MakerEngine {
       type: 'advance',
       streamNonce: session.streamNonce,
       seq: fill.seq,
-      claim: Buffer.from(issued.claim).toString('base64'),
+      claim: {
+        chain: session.pair.to.chain,
+        channelId: issued.channelId ?? '',
+        nonce: (issued.nonce ?? 0n).toString(),
+        cumulativeAmount: (issued.cumulativeAmount ?? 0n).toString(),
+        signature: Buffer.from(issued.claim).toString('base64'),
+        signer: issued.swapSignerAddress ?? legB.swapSignerAddress,
+      },
       ...(issued.claimId !== undefined && { claimId: issued.claimId }),
-      channelId: issued.channelId ?? '',
-      nonce: (issued.nonce ?? 0n).toString(),
-      cumulativeAmount: (issued.cumulativeAmount ?? 0n).toString(),
       recipient: issued.recipient ?? session.chainRecipient,
-      swapSignerAddress: issued.swapSignerAddress ?? legB.swapSignerAddress,
       rate: priced.rate,
       rateTimestamp: priced.rateTimestamp,
       sourceAmount: sourceAmount.toString(),
@@ -637,31 +762,47 @@ export class MakerEngine {
       legB,
       ...(receipt !== undefined && { receipt }),
     };
+    // Mutate the session BEFORE the commit persists, so one snapshot carries
+    // both the leg-B watermark and the session that will retransmit it.
     session.credit = 0n;
     session.lastSeq = fill.seq;
     session.lastAdvance = advance;
     session.sourceTotal += sourceAmount;
     session.targetTotal += targetAmount;
+    if (input.fillEventId !== undefined)
+      session.lastFillEventId = input.fillEventId;
+
+    // The taker has paid; the claim is out. Commit the reservation to
+    // unsettled liability now — there is no leg-B outcome to wait for.
+    this.#claimIssuer.commitRollingClaim({
+      reservationId: issued.reservationId,
+      pair: session.pair,
+      targetAmount,
+    });
+
     this.#logger.info?.('swap.fill.accepted', {
       ...ctx,
       payer: session.payer,
       sourceAmount: sourceAmount.toString(),
       targetAmount: targetAmount.toString(),
       rate: priced.rate,
-      channelId: advance.channelId,
-      nonce: advance.nonce,
-      cumulativeAmount: advance.cumulativeAmount,
+      channelId: advance.claim.channelId,
+      nonce: advance.claim.nonce,
+      cumulativeAmount: advance.claim.cumulativeAmount,
       ...(creditApplied > 0n && { creditApplied: creditApplied.toString() }),
     });
-    return { status: 200, body: advance };
+    return advance;
   }
 
   // -------------------------------------------------------------------------
-  // Introspection
+  // Introspection / persistence
   // -------------------------------------------------------------------------
 
   sessionsSnapshot(): readonly Readonly<
-    Omit<MakerSession, 'lastAdvance' | 'credit' | 'sourceTotal' | 'targetTotal'> & {
+    Omit<
+      MakerSession,
+      'lastAdvance' | 'credit' | 'sourceTotal' | 'targetTotal'
+    > & {
       credit: string;
       sourceTotal: string;
       targetTotal: string;
@@ -679,17 +820,31 @@ export class MakerEngine {
     });
   }
 
+  /** Every live session, in the persisted shape. */
+  exportSessions(): Record<string, PersistedMakerSession> {
+    this.#evictExpired(this.#now());
+    const out: Record<string, PersistedMakerSession> = {};
+    for (const s of this.#sessions.values())
+      out[s.streamNonce] = sessionToPersisted(s);
+    return out;
+  }
+
   get sessionCount(): number {
     return this.#sessions.size;
+  }
+
+  /** The fill bounds this engine enforces. */
+  get fillBounds(): { min: bigint; max: bigint } {
+    return { ...this.#fill };
   }
 
   // -------------------------------------------------------------------------
   // Internals
   // -------------------------------------------------------------------------
 
-  #findPair(rfq: SwapRfqRequest): SwapPair | null {
-    const from = assetKey(rfq.pair.from);
-    const to = assetKey(rfq.pair.to);
+  #findPair(wanted: SwapWirePair): SwapPair | null {
+    const from = assetKey(wanted.from);
+    const to = assetKey(wanted.to);
     return (
       this.#pairs.find(
         (p) => assetKey(p.from) === from && assetKey(p.to) === to
@@ -700,15 +855,14 @@ export class MakerEngine {
   async #priceNow(
     pair: SwapPair
   ): Promise<
-    | { rate: string; rateTimestamp: number }
-    | { refusal: MakerAnswer<SwapRefusal> }
+    { rate: string; rateTimestamp: number } | { refusal: SwapRefusal }
   > {
     if (this.#guard) {
       const verdict = await this.#guard.check(pair);
       if (verdict.stale) {
         this.#logger.info?.('swap.stale_rate', verdict.data);
         return {
-          refusal: refusal(
+          refusal: makerRefusal(
             SWAP_REFUSAL_REASONS.STALE_RATE,
             'the maker rate feed is stale; re-quote and retry',
             { detail: { ...verdict.data } }
@@ -748,7 +902,7 @@ export class MakerEngine {
     } catch (err) {
       if (err instanceof StaleRateError) {
         return {
-          refusal: refusal(
+          refusal: makerRefusal(
             SWAP_REFUSAL_REASONS.STALE_RATE,
             'the maker rate feed is stale; re-quote and retry',
             { detail: { ...err.data } }
@@ -760,12 +914,26 @@ export class MakerEngine {
         err: err instanceof Error ? err.message : String(err),
       });
       return {
-        refusal: refusal(
+        refusal: makerRefusal(
           SWAP_REFUSAL_REASONS.RATE_UNAVAILABLE,
           'rate provider error'
         ),
       };
     }
+  }
+
+  /** Price a pair now — what an order advertises. */
+  async priceForOrder(
+    pair: SwapPair
+  ): Promise<
+    { rate: string; rateTimestamp: number } | { refusal: SwapRefusal }
+  > {
+    return this.#priceNow(pair);
+  }
+
+  /** Target-unit capacity the maker can issue against, if known. */
+  freeCapacity(pair: SwapPair): bigint | null {
+    return this.#freeCapacity(pair);
   }
 
   #freeCapacity(pair: SwapPair): bigint | null {
@@ -792,14 +960,17 @@ export class MakerEngine {
     if (oldest) this.#sessions.delete(oldest.streamNonce);
   }
 
-  #syntheticRumor(session: MakerSession, fill: SwapFillRequest): UnsignedEvent {
+  #syntheticRumor(session: MakerSession, fill: SwapFill): UnsignedEvent {
     return {
       kind: SWAP_FILL_CONTEXT_KIND,
-      pubkey: '0'.repeat(64),
+      pubkey: session.takerPubkey,
       created_at: Math.floor(this.#now() / 1000),
       content: '',
       tags: [
-        ['swap-from', `${session.pair.from.assetCode}:${session.pair.from.chain}`],
+        [
+          'swap-from',
+          `${session.pair.from.assetCode}:${session.pair.from.chain}`,
+        ],
         ['swap-to', `${session.pair.to.assetCode}:${session.pair.to.chain}`],
         ['chain-recipient', session.chainRecipient],
         ['stream-nonce', session.streamNonce],

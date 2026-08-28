@@ -1,13 +1,16 @@
-import { describe, it, expect } from 'vitest';
+import { describe, expect, it } from 'vitest';
 
 import {
+  SWAP_ORDER_KIND,
+  SWAP_RUMOR_KIND,
   SWAP_WIRE_PROTOCOL,
-  SWAP_REFUSAL_REASONS,
-  SWAP_REFUSAL_STATUS,
-  parseSwapFillRequest,
-  parseSwapRfqRequest,
+  attributionPayerKey,
+  parseSwapAccept,
+  parseSwapClaim,
+  parseSwapFill,
+  parseSwapOrder,
+  parseSwapTakerMessage,
   parseSwapWireAnswer,
-  readPaymentAttribution,
 } from './wire.js';
 
 const NONCE = 'ab'.repeat(16);
@@ -15,149 +18,199 @@ const PAIR = {
   from: { assetCode: 'USDC', assetScale: 6, chain: 'evm:84532' },
   to: { assetCode: 'USDC', assetScale: 6, chain: 'solana:devnet' },
 };
+const LEG_A = {
+  chain: 'evm:84532',
+  swapSignerAddress: '0x' + 'ab'.repeat(20),
+  verifyingContract: '0x' + 'cd'.repeat(20),
+  token: '0x' + 'ef'.repeat(20),
+};
+const LEG_B = {
+  chain: 'solana:devnet',
+  swapSignerAddress: 'So11111111111111111111111111111111111111112',
+  programId: 'So11111111111111111111111111111111111111112',
+};
+const CLAIM = {
+  chain: 'evm:84532',
+  channelId: '0x' + '11'.repeat(32),
+  nonce: '1',
+  cumulativeAmount: '1000',
+  signature: Buffer.alloc(65).toString('base64'),
+  signer: '0x' + '22'.repeat(20),
+};
 
-describe('parseSwapRfqRequest', () => {
-  it('accepts a well-formed RFQ and normalizes the nonce to lowercase', () => {
-    const r = parseSwapRfqRequest({
-      proto: SWAP_WIRE_PROTOCOL,
-      type: 'rfq',
-      streamNonce: NONCE.toUpperCase(),
-      pair: PAIR,
-      chainRecipient: 'So11111111111111111111111111111111111111112',
-      sizeHint: '5000000',
-    });
-    expect(r.ok).toBe(true);
-    if (!r.ok) return;
-    expect(r.value.streamNonce).toBe(NONCE);
-    expect(r.value.sizeHint).toBe('5000000');
-  });
-
-  it.each([
-    [{}, /proto/],
-    [{ proto: SWAP_WIRE_PROTOCOL, type: 'fill' }, /type/],
-    [{ proto: SWAP_WIRE_PROTOCOL, type: 'rfq', streamNonce: 'zz' }, /16 bytes/],
-    [
-      { proto: SWAP_WIRE_PROTOCOL, type: 'rfq', streamNonce: NONCE, pair: {} },
-      /pair/,
-    ],
-    [
-      {
-        proto: SWAP_WIRE_PROTOCOL,
-        type: 'rfq',
-        streamNonce: NONCE,
-        pair: PAIR,
-        chainRecipient: '',
-      },
-      /chainRecipient/,
-    ],
-    ['nope', /object/],
-  ])('refuses %j', (raw, re) => {
-    const r = parseSwapRfqRequest(raw);
-    expect(r.ok).toBe(false);
-    if (r.ok) return;
-    expect(r.error).toMatch(re);
+describe('kinds', () => {
+  it('order is addressable, rumor is ephemeral-range', () => {
+    expect(SWAP_ORDER_KIND).toBeGreaterThanOrEqual(30000);
+    expect(SWAP_ORDER_KIND).toBeLessThan(40000);
+    expect(SWAP_RUMOR_KIND).toBeGreaterThanOrEqual(20000);
+    expect(SWAP_RUMOR_KIND).toBeLessThan(30000);
   });
 });
 
-describe('parseSwapFillRequest', () => {
-  it('accepts seq >= 1', () => {
-    const r = parseSwapFillRequest({
+describe('parseSwapOrder', () => {
+  const order = {
+    proto: SWAP_WIRE_PROTOCOL,
+    type: 'order',
+    orderId: 'USDC:evm:84532>USDC:solana:devnet',
+    pair: PAIR,
+    rate: '0.99',
+    rateTimestamp: 1,
+    fill: { min: '1000', max: '100000' },
+    maxAmount: '5000000',
+    legA: LEG_A,
+    legB: LEG_B,
+    expiresAt: 2,
+  };
+  it('accepts a well-formed order', () => {
+    const r = parseSwapOrder(order);
+    expect(r.ok).toBe(true);
+    if (r.ok) expect(r.value.fill).toEqual({ min: '1000', max: '100000' });
+  });
+  it.each([
+    [{ ...order, fill: { min: '0', max: '1' } }, /positive/],
+    [{ ...order, fill: { min: '10', max: '1' } }, /max/],
+    [{ ...order, rate: '-1' }, /rate/],
+    [{ ...order, legA: { chain: 'x' } }, /legA/],
+    [{ ...order, proto: 'rolling/2' }, /proto/],
+  ])('refuses %j', (raw, re) => {
+    const r = parseSwapOrder(raw);
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.error).toMatch(re);
+  });
+});
+
+describe('parseSwapAccept', () => {
+  const accept = {
+    proto: SWAP_WIRE_PROTOCOL,
+    type: 'accept',
+    orderId: 'o1',
+    streamNonce: NONCE.toUpperCase(),
+    pair: PAIR,
+    chainRecipient: 'So11111111111111111111111111111111111111112',
+    payer: { chain: 'evm:84532', address: '0x' + '22'.repeat(20) },
+    sizeHint: '5000000',
+    resume: true,
+  };
+  it('accepts and normalizes the nonce', () => {
+    const r = parseSwapAccept(accept);
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.streamNonce).toBe(NONCE);
+    expect(r.value.resume).toBe(true);
+    expect(r.value.payer.address).toBe('0x' + '22'.repeat(20));
+  });
+  it.each([
+    [{ ...accept, streamNonce: 'zz' }, /16 bytes/],
+    [{ ...accept, payer: {} }, /payer/],
+    [{ ...accept, chainRecipient: '' }, /chainRecipient/],
+    [{ ...accept, resume: 'yes' }, /resume/],
+  ])('refuses %j', (raw, re) => {
+    const r = parseSwapAccept(raw);
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.error).toMatch(re);
+  });
+});
+
+describe('parseSwapFill / parseSwapClaim', () => {
+  it('accepts a fill with a shaped claim', () => {
+    const r = parseSwapFill({
       proto: SWAP_WIRE_PROTOCOL,
       type: 'fill',
       streamNonce: NONCE,
       seq: 3,
+      claim: CLAIM,
     });
     expect(r.ok && r.value.seq).toBe(3);
+    expect(r.ok && r.value.claim.cumulativeAmount).toBe('1000');
   });
-  it('refuses seq 0, negative, fractional or string', () => {
-    for (const seq of [0, -1, 1.5, '1']) {
-      const r = parseSwapFillRequest({
+  it('refuses seq 0 and a claim with a non-decimal cumulative', () => {
+    expect(
+      parseSwapFill({
         proto: SWAP_WIRE_PROTOCOL,
         type: 'fill',
         streamNonce: NONCE,
-        seq,
-      });
-      expect(r.ok).toBe(false);
-    }
+        seq: 0,
+        claim: CLAIM,
+      }).ok
+    ).toBe(false);
+    const bad = parseSwapClaim({ ...CLAIM, cumulativeAmount: '1e3' });
+    expect(!bad.ok && bad.error).toMatch(/cumulativeAmount/);
+  });
+});
+
+describe('parseSwapTakerMessage', () => {
+  it('dispatches on type', () => {
+    expect(
+      parseSwapTakerMessage({
+        proto: SWAP_WIRE_PROTOCOL,
+        type: 'done',
+        streamNonce: NONCE,
+        lastSeq: 4,
+      }).ok
+    ).toBe(true);
+    expect(
+      parseSwapTakerMessage({ proto: SWAP_WIRE_PROTOCOL, type: 'quote' }).ok
+    ).toBe(false);
   });
 });
 
 describe('parseSwapWireAnswer', () => {
-  it('passes quotes, advances and refusals through', () => {
-    for (const type of ['quote', 'advance', 'refusal']) {
-      const r = parseSwapWireAnswer({ proto: SWAP_WIRE_PROTOCOL, type });
-      expect(r.ok).toBe(true);
-    }
-    expect(parseSwapWireAnswer({ proto: SWAP_WIRE_PROTOCOL, type: 'x' }).ok).toBe(
-      false
-    );
-  });
-});
-
-describe('readPaymentAttribution', () => {
-  const headers = (h: Record<string, string>) => (name: string) => h[name];
-
-  it('reads the connector triple for an EVM payer', () => {
-    const a = readPaymentAttribution(
-      headers({
-        'x-toon-payer': `evm:0x${'ab'.repeat(32)}`,
-        'x-toon-amount': '1000000',
-        'x-toon-chain': 'evm',
-      })
-    );
-    expect(a).toEqual({
-      payer: `evm:0x${'ab'.repeat(32)}`,
-      amount: 1_000_000n,
-      chain: 'evm',
+  it('checks a quote and an advance, passes a refusal', () => {
+    const quote = parseSwapWireAnswer({
+      proto: SWAP_WIRE_PROTOCOL,
+      type: 'quote',
+      streamNonce: NONCE,
+      orderId: 'o1',
+      rate: '1',
+      rateTimestamp: 1,
+      expiresAt: 2,
+      fill: { min: '1', max: '2', chain: 'evm:84532' },
+      lastSeq: 0,
+      legA: LEG_A,
+      legB: LEG_B,
     });
-  });
-
-  it('reads a Solana payer', () => {
-    const a = readPaymentAttribution(
-      headers({
-        'x-toon-payer': 'solana:G5mXQzfZb4tXWX7cQvXP9ZJnDBcUo6irWTmGGtX3xpzL',
-        'x-toon-amount': '7',
-        'x-toon-chain': 'solana',
-      })
-    );
-    expect(a?.chain).toBe('solana');
-    expect(a?.amount).toBe(7n);
-  });
-
-  it('is all-or-nothing: a partial or malformed triple reads as absent', () => {
-    expect(readPaymentAttribution(headers({}))).toBeNull();
+    expect(quote.ok).toBe(true);
+    const advance = parseSwapWireAnswer({
+      proto: SWAP_WIRE_PROTOCOL,
+      type: 'advance',
+      streamNonce: NONCE,
+      seq: 1,
+      claim: CLAIM,
+      recipient: 'x',
+      rate: '1',
+      rateTimestamp: 1,
+      sourceAmount: '1000',
+      targetAmount: '990',
+      legB: LEG_B,
+    });
+    expect(advance.ok).toBe(true);
+    const noClaim = parseSwapWireAnswer({
+      proto: SWAP_WIRE_PROTOCOL,
+      type: 'advance',
+      streamNonce: NONCE,
+      seq: 1,
+      sourceAmount: '1',
+      targetAmount: '1',
+    });
+    expect(!noClaim.ok && noClaim.error).toMatch(/advance\.claim/);
     expect(
-      readPaymentAttribution(
-        headers({ 'x-toon-payer': 'evm:0xab', 'x-toon-amount': '1' })
-      )
-    ).toBeNull();
+      parseSwapWireAnswer({
+        proto: SWAP_WIRE_PROTOCOL,
+        type: 'refusal',
+        reason: 'seq_gap',
+        message: 'm',
+        retry: false,
+      }).ok
+    ).toBe(true);
     expect(
-      readPaymentAttribution(
-        headers({
-          'x-toon-payer': `solana:${'1'.repeat(40)}`,
-          'x-toon-amount': '1',
-          'x-toon-chain': 'evm', // namespace disagrees with chain
-        })
-      )
-    ).toBeNull();
-    expect(
-      readPaymentAttribution(
-        headers({
-          'x-toon-payer': `evm:0x${'ab'.repeat(32)}`,
-          'x-toon-amount': '1.5',
-          'x-toon-chain': 'evm',
-        })
-      )
-    ).toBeNull();
+      parseSwapWireAnswer({ proto: SWAP_WIRE_PROTOCOL, type: 'x' }).ok
+    ).toBe(false);
   });
 });
 
-describe('refusal status table', () => {
-  it('maps every reason to an HTTP status outside 2xx', () => {
-    for (const reason of Object.values(SWAP_REFUSAL_REASONS)) {
-      const status = SWAP_REFUSAL_STATUS[reason];
-      expect(status).toBeGreaterThanOrEqual(400);
-      expect(status).toBeLessThan(600);
-    }
+describe('attributionPayerKey', () => {
+  it('lowercases EVM channel ids and leaves Solana PDAs alone', () => {
+    expect(attributionPayerKey('evm', '0xAB')).toBe('evm:0xab');
+    expect(attributionPayerKey('solana', 'GLg')).toBe('solana:GLg');
   });
 });

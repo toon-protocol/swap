@@ -1,4 +1,4 @@
-# End-to-end: the maker behind a real Rust connector
+# End-to-end: the swap through a real relay
 
 ```sh
 pnpm --filter @toon-protocol/swap test:e2e
@@ -8,26 +8,28 @@ Two suites, each booting its own infra in `beforeAll` (no global setup):
 
 | suite | what it proves |
 | --- | --- |
-| `rust-connector-swap.e2e.test.ts` (9) | **The swap.** anvil + `solana-test-validator` + the `connector` binary/image settling with the **maker's own keys** (one key) + `startSwapNode()` in-process. A taker opens one channel per chain to the maker, RFQs, pays 3 fills on chain A through the connector's client edge; the maker deposits its side of that same channel on demand (and tops up for fill 3); the taker verifies each cumulative leg-B claim and redeems on chain B (`claimFromChannel` on the `TokenNetwork`, +3 USDC; `ClaimFromChannel` recorded on the Solana PDA) — **EVM→Solana and Solana→EVM**. Also: an unpaid fill is HTTP 402 at the edge, a replayed leg-A claim is refused before the maker is asked, and the maker recycles capacity from chain truth after the redemption. |
-| `taker-toolkit.selfcheck.test.ts` (12) | The taker toolkit against the connector alone: wire-vector replays, sealed requests (free / EVM claim / Solana claim / replay / unpaid), and leg-B settlement on both chains. |
+| `relay-swap.e2e.test.ts` (5) | **The swap.** anvil + `solana-test-validator` + a real relay (`@toon-protocol/relay`) + the `connector` binary/image fronting it (`g.toon.relay`, price 1, settling on anvil) + `startSwapNode()` and `createTakerRuntime()` in-process. The maker publishes one order per pair; a taker reads them, accepts, streams fills (each leg-A claim verified by the maker, each leg-B advance verified by the taker), the maker deposits its side of the pair channel on demand, and the taker is paid **on chain** — Solana `ClaimFromChannel` → `CloseChannel` → `SettleChannel` (+2.97 USDC to its ATA), EVM `claimFromChannel` (+2 USDC). Also: a taker that stops before reading an answer resumes from disk through the relay's history, and a maker restarted from its state file continues the stream at the right leg-B nonce. |
+| `taker-toolkit.selfcheck.test.ts` (12) | The ILP taker toolkit against the connector alone: wire-vector replays, sealed requests (free / EVM claim / Solana claim / replay / unpaid), and settlement on both chains. |
 
 ## Requirements
 
 - `anvil` (foundry), `solana-test-validator`, `solana`, `spl-token`, `solana-keygen` on PATH.
+- The relay: `@toon-protocol/relay` (a devDependency; `better-sqlite3` ships prebuilt binaries),
+  or `SWAP_E2E_RELAY_BIN` pointing at a built `relay` cli.
 - A Rust connector, one of:
   - `SWAP_E2E_CONNECTOR_BIN` — a built binary (default `/home/jonathan/Documents/connector/target/debug/connector` if present);
   - `SWAP_E2E_CONNECTOR_IMAGE` — a published `ghcr.io/toon-protocol/connector:rust-sha-…` tag, run with `docker run --rm --network host` (what CI does).
 
-Ports are fixed in `helpers/topology.ts` (anvil 18545, validator 18899, connector client edge
-18300, maker app 18310). `helpers/rust-connector.ts` refuses to start when 18300 already answers
-`GET /ilp/identity` — a stale container from an aborted run is the usual cause.
+Ports are fixed in `helpers/topology.ts` (anvil 18545, validator 18899, relay ws 18901 / write
+18903, relay connector 18300, maker health 18310). `helpers/rust-connector.ts` refuses to start
+when 18300 already answers `GET /ilp/identity` — a stale container from an aborted run is the
+usual cause; `helpers/relay.ts` does the same for 18903.
 
-## The taker (`helpers/`)
+## Against the devnet
 
-What `toon-client` will do, written against the connector's normative wire vectors
-(`fixtures/connector-vectors/wire-vectors.json`). See `helpers/README-taker-toolkit.md` for each
-module and every gotcha met getting it green (Solana `ClaimFromChannel` moves no tokens — payout is
-close → settle; the "claimer" is the payer; unpaid → HTTP 402 not `F06`; …).
+The same code runs against TOON's live devnet — `wss://relay-ws.devnet.toonprotocol.dev` and
+`https://proxy.relay.devnet.toonprotocol.dev/ilp` — with `toon-swap make` / `toon-swap take`;
+that is the dev loop, not a CI job (it needs funded keys on Base Sepolia and Solana devnet).
 
 ## Fixtures
 

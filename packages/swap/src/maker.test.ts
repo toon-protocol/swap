@@ -1,443 +1,546 @@
 /**
- * The maker as an app behind a Rust connector — exercised over plain HTTP
- * exactly the way the connector delivers to it: a free `POST /swap/rfq`,
- * then `POST /swap/fill` requests carrying the ADR 0040 attribution headers
- * the connector states after it verified the taker's leg-A claim.
+ * The relay-mediated swap, end to end in one process: a maker booted by
+ * `startSwapNode` and a `SwapTaker`, talking through an in-memory relay.
+ * Chains are faked at the read seam only — every claim is REALLY signed
+ * (TokenNetwork EIP-712 on leg A, TOON-BALPROOF-V2 on leg B) and REALLY
+ * verified by the counterparty.
  */
-
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
-import { ed25519 } from '@noble/curves/ed25519.js';
-import { recoverTypedDataAddress, type Hex } from 'viem';
+import type { NostrEvent } from 'nostr-tools/pure';
 import { base58Encode } from '@toon-protocol/sdk';
 
-import { startSwapNode } from './swap-node.js';
-import type { SwapNodeInstance } from './swap-node.js';
+import { deriveEvmChannelId } from './evm-leg-b-channel.js';
+import { unwrapGiftWrap, wrapGiftWrap } from './nip59.js';
+import { deriveNostrIdentity } from './nostr-keys.js';
+import { MemoryRelay } from './memory-relay.test-support.js';
+import type { ChannelSlotReader } from './received-claim.js';
 import { deriveSolanaChannelPda } from './solana-pda.js';
+import { startSwapNode } from './swap-node.js';
+import type { SwapNodeConfig, SwapNodeInstance } from './swap-node.js';
+import { SwapTaker } from './swap-taker.js';
+import type { ChannelFunder } from './swap-taker.js';
+import { InMemoryTakerStateStore } from './taker-state.js';
+import type { PersistedSwapState, SwapStateStore } from './state-store.js';
 import { deriveSwapNodeKeys } from './wallet.js';
-import { solanaBalanceProofMessage } from './payment-channel-signer.js';
-import { SWAP_WIRE_PROTOCOL } from './wire.js';
-import { TOKEN_NETWORK_BALANCE_PROOF_TYPES } from './payment-channel-signer.js';
-import type { SwapAdvance, SwapQuote, SwapRefusal } from './wire.js';
+import { SWAP_RUMOR_KIND, SWAP_WIRE_PROTOCOL } from './wire.js';
+import type { SwapAdvance, SwapFill } from './wire.js';
 
-const MNEMONIC =
+const MAKER_MNEMONIC =
   'abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about';
-const EVM_TARGET = 'evm:31337';
-const SOL_TARGET = 'solana:localnet';
-const PROGRAM_ID = 'HY4AYFNe5Vg5BkEwAURNsGY3uFAvGMNpAQPRtgoasJiR';
-const MINT = 'H8HSreUF2s8r8hem4qMttE3bWYCpFuh71jbuos5bA77H';
-const TOKEN_NETWORK = '0x' + 'd3'.repeat(20);
-const EVM_CHANNEL_ID = '0x' + '01'.repeat(32);
-const EVM_RECIPIENT = '0x' + 'ab'.repeat(20);
-const SOL_RECIPIENT = base58Encode(new Uint8Array(32).fill(5));
-const PAYER_EVM = `evm:0x${'aa'.repeat(32)}`;
-const PAYER_SOL = 'solana:G5mXQzfZb4tXWX7cQvXP9ZJnDBcUo6irWTmGGtX3xpzL';
+const TAKER_MNEMONIC =
+  'legal winner thank year wave sausage worth useful legal winner thank yellow';
+const EVM_CHAIN = 'evm:8453';
+const SOL_CHAIN = 'solana:devnet';
+const TOKEN_NETWORK = '0x' + '44'.repeat(20);
+const USDC_EVM = '0x' + '22'.repeat(20);
+const PROGRAM_ID = base58Encode(
+  Uint8Array.from(Buffer.from('55'.repeat(32), 'hex'))
+);
+const MINT = base58Encode(Uint8Array.from(Buffer.from('66'.repeat(32), 'hex')));
+const FILL = 1_000_000n;
 
-let instance: SwapNodeInstance;
-let makerSolanaPubkey: string;
-let solLegBChannel: string;
-let base: string;
-
-function nonce(seed: number): string {
-  return seed.toString(16).padStart(32, '0');
+class MemoryStateStore implements SwapStateStore {
+  state: PersistedSwapState | null = null;
+  load() {
+    return this.state
+      ? (JSON.parse(JSON.stringify(this.state)) as PersistedSwapState)
+      : null;
+  }
+  save(s: PersistedSwapState) {
+    this.state = JSON.parse(JSON.stringify(s)) as PersistedSwapState;
+  }
 }
 
-async function post(
-  path: string,
-  body: unknown,
-  headers: Record<string, string> = {}
-): Promise<{ status: number; json: SwapQuote | SwapAdvance | SwapRefusal }> {
-  const res = await fetch(`${base}${path}`, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json', ...headers },
-    body: JSON.stringify(body),
-  });
-  return { status: res.status, json: (await res.json()) as never };
+/** A chain where every channel is open and richly funded. */
+function fakeSlotReader(): ChannelSlotReader {
+  return {
+    async evmEpoch() {
+      return 0n;
+    },
+    async evmSlot() {
+      return {
+        state: 'opened',
+        deposit: 1_000_000_000n,
+        nonce: 0n,
+        transferredAmount: 0n,
+      };
+    },
+    async solanaChannel(facts) {
+      return {
+        participantA: facts.counterparty,
+        participantB: facts.self,
+        tokenMint: facts.mint,
+        depositA: 1_000_000_000n,
+        depositB: 1_000_000_000n,
+        transferredAmountA: 0n,
+        transferredAmountB: 0n,
+        nonceA: 0n,
+        nonceB: 0n,
+        challengeDuration: 3600n,
+        state: 0,
+      };
+    },
+  };
 }
 
-const paid = (payer: string, amount: bigint, chain: 'evm' | 'solana') => ({
-  'x-toon-payer': payer,
-  'x-toon-amount': amount.toString(),
-  'x-toon-chain': chain,
-});
+async function sleepUntil(cond: () => boolean, ms = 3000): Promise<void> {
+  const deadline = Date.now() + ms;
+  while (!cond()) {
+    if (Date.now() > deadline) throw new Error('condition not met in time');
+    await new Promise((r) => setTimeout(r, 10));
+  }
+}
 
-beforeAll(async () => {
-  const keys = await deriveSwapNodeKeys({ mnemonic: MNEMONIC, chains: ['solana'] });
-  makerSolanaPubkey = base58Encode(
-    (keys.solana as NonNullable<typeof keys.solana>).publicKey
-  );
-  solLegBChannel = deriveSolanaChannelPda({
-    participantA: makerSolanaPubkey,
-    participantB: SOL_RECIPIENT,
-    mint: MINT,
-    programId: PROGRAM_ID,
-  });
-  instance = await startSwapNode({
-    mnemonic: MNEMONIC,
-    ilpAddress: 'g.test.maker',
-    fillAmount: 1_000_000n,
-    swapPairs: [
-      {
-        from: { assetCode: 'USDC', assetScale: 6, chain: 'solana:localnet' },
-        to: { assetCode: 'USDC', assetScale: 6, chain: EVM_TARGET },
-        rate: '2.0',
+describe('maker ↔ taker over the relay (EVM leg A → Solana leg B)', () => {
+  const relay = new MemoryRelay();
+  const makerStore = new MemoryStateStore();
+  /** When set, the maker's next publish is refused (its answer is lost), the taker's writes are not. */
+  let dropNextMakerWrite = false;
+  /** When set, the maker's rate feed fails once (a retryable, credited refusal). */
+  let failRateOnce = false;
+  const makerWriter = () => {
+    const inner = relay.writer();
+    return {
+      destination: inner.destination,
+      publish: async (e: NostrEvent) => {
+        if (dropNextMakerWrite) {
+          dropNextMakerWrite = false;
+          return {
+            ok: false as const,
+            eventId: e.id,
+            refusedBy: 'path' as const,
+            code: 'T04',
+            message: 'dropped by test',
+            retry: true,
+          };
+        }
+        return inner.publish(e);
       },
-      {
-        from: { assetCode: 'USDC', assetScale: 6, chain: EVM_TARGET },
-        to: { assetCode: 'USDC', assetScale: 6, chain: SOL_TARGET },
-        rate: '0.5',
-      },
-    ],
-    chains: ['evm', 'solana'],
-    channels: {
-      [EVM_TARGET]: [
-        { channelId: EVM_CHANNEL_ID, cumulativeAmount: 0n, nonce: 0n, updatedAt: 0 },
-      ],
-      [SOL_TARGET]: [
-        { channelId: solLegBChannel, cumulativeAmount: 0n, nonce: 0n, updatedAt: 0 },
-        // A decoy: first in pool order, but not the recipient's PDA.
+    };
+  };
+  /** The taker's disk — one identity, one channel per maker, shared by every session. */
+  const takerStore = new InMemoryTakerStateStore();
+  let maker: SwapNodeInstance;
+  let makerKeys: Awaited<ReturnType<typeof deriveSwapNodeKeys>>;
+  let takerKeys: Awaited<ReturnType<typeof deriveSwapNodeKeys>>;
+  let evmChannelId: string;
+  let solPda: string;
+
+  function makerConfig(store: SwapStateStore): SwapNodeConfig {
+    return {
+      mnemonic: MAKER_MNEMONIC,
+      chains: ['evm', 'solana'],
+      swapPairs: [
         {
-          channelId: base58Encode(new Uint8Array(32).fill(77)),
-          cumulativeAmount: 0n,
-          nonce: 0n,
-          updatedAt: 0,
+          from: { assetCode: 'USDC', assetScale: 6, chain: EVM_CHAIN },
+          to: { assetCode: 'USDC', assetScale: 6, chain: SOL_CHAIN },
+          rate: '0.99',
         },
       ],
-    },
-    inventory: { [EVM_TARGET]: 10_000_000n, [SOL_TARGET]: 3_000_000n },
-    chainProviders: [
-      {
-        chainType: 'evm',
-        chainId: EVM_TARGET,
-        rpcUrl: 'http://127.0.0.1:1',
-        registryAddress: '0x' + '11'.repeat(20),
-        tokenAddress: '0x' + '22'.repeat(20),
-        tokenNetworkAddress: TOKEN_NETWORK,
+      channels: {
+        [SOL_CHAIN]: [
+          { channelId: solPda, cumulativeAmount: 0n, nonce: 0n, updatedAt: 0 },
+        ],
       },
-      {
-        chainType: 'solana',
-        chainId: SOL_TARGET,
-        rpcUrl: 'http://127.0.0.1:1',
-        programId: PROGRAM_ID,
-        tokenMint: MINT,
+      inventory: { [SOL_CHAIN]: 100_000_000n },
+      chainProviders: [
+        {
+          chainType: 'evm',
+          chainId: EVM_CHAIN,
+          rpcUrl: 'http://127.0.0.1:1',
+          registryAddress: '0x' + '11'.repeat(20),
+          tokenAddress: USDC_EVM,
+          tokenNetworkAddress: TOKEN_NETWORK,
+        },
+        {
+          chainType: 'solana',
+          chainId: SOL_CHAIN,
+          rpcUrl: 'http://127.0.0.1:1',
+          programId: PROGRAM_ID,
+          tokenMint: MINT,
+        },
+      ],
+      order: { fill: { min: FILL, max: 5n * FILL }, ttlMs: 600_000 },
+      quote: { sessionTtlMs: 600_000 },
+      rateProvider: async (pair) => {
+        if (failRateOnce) {
+          failRateOnce = false;
+          throw new Error('rate feed down (test)');
+        }
+        return pair.rate;
       },
-    ],
-    reconcileIntervalMs: 0,
-    appPort: 0,
-  });
-  base = `http://127.0.0.1:${instance.appPort}`;
-});
-
-afterAll(async () => {
-  await instance.stop();
-});
-
-describe('health', () => {
-  it('names the routes to put in front of it and the leg-B terms', async () => {
-    const res = await fetch(`${base}/health`);
-    const h = (await res.json()) as {
-      status: string;
-      rfqDestination: string;
-      fillDestination: string;
-      legB: Record<string, { verifyingContract?: string; programId?: string }>;
-      sessions: number;
+      stateStore: store,
+      reconcileIntervalMs: 0,
+      appPort: 0,
+      ...(process.env['SWAP_TEST_LOG'] && {
+        logger: {
+          debug: (...a: unknown[]) =>
+            console.log('[maker:debug]', ...a.map((x) => JSON.stringify(x))),
+          info: (...a: unknown[]) =>
+            console.log('[maker]', ...a.map((x) => JSON.stringify(x))),
+          warn: (...a: unknown[]) =>
+            console.log('[maker:warn]', ...a.map((x) => JSON.stringify(x))),
+          error: (...a: unknown[]) =>
+            console.log('[maker:error]', ...a.map((x) => JSON.stringify(x))),
+        },
+      }),
+      __testHooks: {
+        relayTransport: (handler) => ({
+          reader: relay.reader((_id, e) => handler(e)),
+          writer: makerWriter(),
+        }),
+        slotReader: fakeSlotReader(),
+      },
     };
-    expect(h.status).toBe('ok');
-    expect(h.rfqDestination).toBe('g.test.maker.rfq');
-    expect(h.fillDestination).toBe('g.test.maker');
-    expect(h.legB[EVM_TARGET]?.verifyingContract).toBe(TOKEN_NETWORK);
-    expect(h.legB[SOL_TARGET]?.programId).toBe(PROGRAM_ID);
-    expect(instance.ilpAddress).toBe('g.test.maker');
-  });
-});
+  }
 
-describe('RFQ', () => {
-  it('quotes a known pair with the fill route and leg-B facts', async () => {
-    const { status, json } = await post('/swap/rfq', {
-      proto: SWAP_WIRE_PROTOCOL,
-      type: 'rfq',
-      streamNonce: nonce(1),
-      pair: {
-        from: { assetCode: 'USDC', assetScale: 6, chain: 'solana:localnet' },
-        to: { assetCode: 'USDC', assetScale: 6, chain: EVM_TARGET },
+  function makeTaker(
+    store = takerStore,
+    opts: { answerTimeoutMs?: number; maxResends?: number } = {}
+  ) {
+    let onEvent: (e: NostrEvent) => void = () => undefined;
+    const reader = relay.reader((_id, e) => onEvent(e));
+    const funder: ChannelFunder = {
+      async channelFor() {
+        return evmChannelId;
       },
-      chainRecipient: EVM_RECIPIENT,
-    });
-    expect(status).toBe(200);
-    const q = json as SwapQuote;
-    expect(q.type).toBe('quote');
-    expect(q.rate).toBe('2.0');
-    expect(q.fill).toEqual({
-      destination: 'g.test.maker',
-      amount: '1000000',
-      chain: 'solana:localnet',
-    });
-    expect(q.legB.verifyingContract).toBe(TOKEN_NETWORK);
-    expect(q.legB.swapSignerAddress).toMatch(/^0x[0-9a-f]{40}$/);
-    expect(q.maxAmount).toBe('10000000');
-    expect(q.expiresAt).toBeGreaterThan(Date.now());
-  });
-
-  it('refuses an unknown pair (404) and a malformed recipient (400)', async () => {
-    const unknown = await post('/swap/rfq', {
-      proto: SWAP_WIRE_PROTOCOL,
-      type: 'rfq',
-      streamNonce: nonce(2),
-      pair: {
-        from: { assetCode: 'ETH', assetScale: 18, chain: EVM_TARGET },
-        to: { assetCode: 'USDC', assetScale: 6, chain: EVM_TARGET },
+      async ensure() {
+        return { channelId: evmChannelId, nonce: 0n, transferredAmount: 0n };
       },
-      chainRecipient: EVM_RECIPIENT,
+    };
+    const taker = new SwapTaker({
+      nostr: deriveNostrIdentity({ mnemonic: TAKER_MNEMONIC }),
+      keys: takerKeys,
+      reader,
+      writer: relay.writer(),
+      slotReader: fakeSlotReader(),
+      chainProviders: makerConfig(makerStore).chainProviders ?? [],
+      store,
+      channelFunder: funder,
+      answerTimeoutMs: opts.answerTimeoutMs ?? 2000,
+      maxResends: opts.maxResends ?? 2,
     });
-    expect(unknown.status).toBe(404);
-    expect((unknown.json as SwapRefusal).reason).toBe('unknown_pair');
-    const bad = await post('/swap/rfq', {
-      proto: SWAP_WIRE_PROTOCOL,
-      type: 'rfq',
-      streamNonce: nonce(3),
-      pair: {
-        from: { assetCode: 'USDC', assetScale: 6, chain: 'solana:localnet' },
-        to: { assetCode: 'USDC', assetScale: 6, chain: EVM_TARGET },
-      },
-      chainRecipient: 'not-an-address',
-    });
-    expect(bad.status).toBe(400);
-    expect((bad.json as SwapRefusal).reason).toBe('invalid_recipient');
-  });
+    onEvent = (e) => void taker.handleEvent(e);
+    return { taker, store };
+  }
 
-  it('answers garbage with a 400 refusal, never a crash', async () => {
-    const res = await fetch(`${base}/swap/rfq`, {
-      method: 'POST',
-      body: '{not json',
-    });
-    expect(res.status).toBe(400);
-    const get = await fetch(`${base}/swap/fill`);
-    expect(get.status).toBe(400);
-  });
-});
-
-describe('fill → EVM leg B', () => {
-  const N = nonce(10);
   beforeAll(async () => {
-    const r = await post('/swap/rfq', {
-      proto: SWAP_WIRE_PROTOCOL,
-      type: 'rfq',
-      streamNonce: N,
-      pair: {
-        from: { assetCode: 'USDC', assetScale: 6, chain: 'solana:localnet' },
-        to: { assetCode: 'USDC', assetScale: 6, chain: EVM_TARGET },
-      },
-      chainRecipient: EVM_RECIPIENT,
+    makerKeys = await deriveSwapNodeKeys({
+      mnemonic: MAKER_MNEMONIC,
+      chains: ['evm', 'solana'],
     });
-    expect(r.status).toBe(200);
+    takerKeys = await deriveSwapNodeKeys({
+      mnemonic: TAKER_MNEMONIC,
+      chains: ['evm', 'solana'],
+    });
+    evmChannelId = deriveEvmChannelId(
+      takerKeys.evm!.address,
+      makerKeys.evm!.address,
+      0n
+    );
+    solPda = deriveSolanaChannelPda({
+      participantA: base58Encode(makerKeys.solana!.publicKey),
+      participantB: base58Encode(takerKeys.solana!.publicKey),
+      mint: MINT,
+      programId: PROGRAM_ID,
+    });
+    maker = await startSwapNode(makerConfig(makerStore));
   });
 
-  it('refuses an unpaid fill with 402 and issues nothing', async () => {
-    const { status, json } = await post('/swap/fill', {
+  afterAll(async () => {
+    await maker.stop();
+  });
+
+  it('publishes one addressable order per pair with both legs’ facts', async () => {
+    const { taker } = makeTaker();
+    taker.start();
+    taker.listOrders();
+    await sleepUntil(
+      () => taker.ordersReady() && taker.listOrders().length === 1
+    );
+    const [listing] = taker.listOrders();
+    expect(listing?.makerPubkey).toBe(maker.nostr.pubkey);
+    const order = listing!.order;
+    expect(order.proto).toBe(SWAP_WIRE_PROTOCOL);
+    expect(order.fill).toEqual({
+      min: FILL.toString(),
+      max: (5n * FILL).toString(),
+    });
+    expect(order.legA).toEqual({
+      chain: EVM_CHAIN,
+      swapSignerAddress: makerKeys.evm!.address.toLowerCase(),
+      verifyingContract: TOKEN_NETWORK,
+      token: USDC_EVM,
+    });
+    expect(order.legB.programId).toBe(PROGRAM_ID);
+    expect(order.legB.swapSignerAddress).toBe(
+      base58Encode(makerKeys.solana!.publicKey)
+    );
+    expect(order.maxAmount).toBe('100000000');
+    taker.stop();
+  });
+
+  it('streams three fills: each leg-A claim is verified, each advance is a verified leg-B claim', async () => {
+    const { taker } = makeTaker();
+    taker.start();
+    taker.listOrders();
+    await sleepUntil(() => taker.listOrders().length === 1);
+    const [listing] = taker.listOrders();
+    const session = await taker.accept(listing!, {
+      size: 3n * FILL,
+      delta: FILL,
+    });
+    expect(session.quote?.lastSeq).toBe(0);
+    expect(session.quote?.rate).toBe('0.99');
+
+    const advances: SwapAdvance[] = [];
+    const done = await taker.run(session.streamNonce, {
+      onFill: (a) => {
+        advances.push(a);
+      },
+    });
+    expect(done.status).toBe('done');
+    expect(advances.map((a) => a.seq)).toEqual([1, 2, 3]);
+    expect(advances.map((a) => a.claim.nonce)).toEqual(['1', '2', '3']);
+    expect(advances.map((a) => a.claim.cumulativeAmount)).toEqual([
+      '990000',
+      '1980000',
+      '2970000',
+    ]);
+    expect(advances[0]?.claim.channelId).toBe(solPda);
+    expect(done.received?.cumulative).toBe('2970000');
+    expect(done.legA).toMatchObject({
+      channelId: evmChannelId,
+      nonce: '3',
+      cumulative: '3000000',
+    });
+    expect(taker.channels()[`${EVM_CHAIN}:${evmChannelId}`]).toMatchObject({
+      nonce: '3',
+      cumulative: '3000000',
+    });
+
+    // The maker's side of the same stream.
+    const ms = maker.engine.sessionFor(session.streamNonce);
+    expect(ms?.lastSeq).toBe(3);
+    expect(ms?.payer).toBe(`evm:${evmChannelId.toLowerCase()}`);
+    expect(ms?.takerPubkey).toBe(taker.nostrPubkey);
+    const inbound =
+      maker.maker!.health().inbound[`${EVM_CHAIN}:${evmChannelId}`];
+    expect(inbound).toMatchObject({
+      nonce: '3',
+      cumulative: '3000000',
+      seq: 3,
+    });
+    expect(maker.health().inventoryWindow[`USDC:${SOL_CHAIN}`]?.unsettled).toBe(
+      '2970000'
+    );
+    taker.stop();
+  });
+
+  it('answers a retransmitted fill with the same advance, and refuses a tampered one uncredited', async () => {
+    const { taker } = makeTaker();
+    taker.start();
+    taker.listOrders();
+    await sleepUntil(() => taker.listOrders().length === 1);
+    const session = await taker.accept(taker.listOrders()[0]!, {
+      size: FILL,
+      delta: FILL,
+    });
+    await taker.run(session.streamNonce);
+    const last = taker.session(session.streamNonce)!;
+    const takerNostr = deriveNostrIdentity({ mnemonic: TAKER_MNEMONIC });
+
+    const before = relay.published.length;
+    const replay: SwapFill = {
       proto: SWAP_WIRE_PROTOCOL,
       type: 'fill',
-      streamNonce: N,
+      streamNonce: session.streamNonce,
       seq: 1,
+      claim: last.lastFill!.claim,
+    };
+    const { wrap } = wrapGiftWrap({
+      rumor: { kind: SWAP_RUMOR_KIND, content: JSON.stringify(replay) },
+      senderSecretKey: takerNostr.secretKey,
+      recipientPubkey: maker.nostr.pubkey,
     });
-    expect(status).toBe(402);
-    expect((json as SwapRefusal).reason).toBe('unpaid');
-  });
-
-  it('refuses a fill paid on the wrong chain family, crediting the payment', async () => {
-    const { status, json } = await post(
-      '/swap/fill',
-      { proto: SWAP_WIRE_PROTOCOL, type: 'fill', streamNonce: N, seq: 1 },
-      paid(PAYER_EVM, 1_000_000n, 'evm')
+    await maker.maker!.handleWrap(wrap);
+    await sleepUntil(() => relay.published.length === before + 1);
+    const answer = unwrapGiftWrap(
+      takerNostr.secretKey,
+      takerNostr.pubkey,
+      relay.published.at(-1)!
     );
-    expect(status).toBe(422);
-    const r = json as SwapRefusal;
-    expect(r.reason).toBe('chain_mismatch');
-    expect(r.credited).toBe('1000000');
-  });
+    expect(JSON.parse(answer.rumor.content)).toEqual(last.lastAdvance!.advance);
 
-  it('turns a paid fill into a recoverable v2 balance proof, applying the credit', async () => {
-    const { status, json } = await post(
-      '/swap/fill',
-      { proto: SWAP_WIRE_PROTOCOL, type: 'fill', streamNonce: N, seq: 1 },
-      paid(PAYER_SOL, 1_000_000n, 'solana')
-    );
-    expect(status).toBe(200);
-    const a = json as SwapAdvance;
-    expect(a.type).toBe('advance');
-    expect(a.seq).toBe(1);
-    expect(a.credited).toBe('1000000');
-    expect(a.sourceAmount).toBe('2000000'); // charge + credit
-    expect(a.targetAmount).toBe('4000000'); // × 2.0
-    expect(a.channelId).toBe(EVM_CHANNEL_ID);
-    expect(a.nonce).toBe('1');
-    expect(a.cumulativeAmount).toBe('4000000');
-    expect(a.recipient).toBe(EVM_RECIPIENT);
-    // The claim is the fleet's ordinary TokenNetwork balance proof — the
-    // same message a taker signs to pay leg A — recoverable under the
-    // TokenNetwork/1 domain of the advertised verifyingContract.
-    const recovered = await recoverTypedDataAddress({
-      domain: {
-        name: 'TokenNetwork',
-        version: '1',
-        chainId: 31337n,
-        verifyingContract: a.legB.verifyingContract as Hex,
-      },
-      types: TOKEN_NETWORK_BALANCE_PROOF_TYPES,
-      primaryType: 'BalanceProof',
-      message: {
-        channelId: a.channelId as Hex,
-        nonce: BigInt(a.nonce),
-        transferredAmount: BigInt(a.cumulativeAmount),
-        lockedAmount: 0n,
-        locksRoot: `0x${'00'.repeat(32)}` as Hex,
-      },
-      signature: `0x${Buffer.from(a.claim, 'base64').toString('hex')}` as Hex,
+    const tampered: SwapFill = {
+      ...replay,
+      seq: 2,
+      claim: { ...replay.claim, nonce: '2', cumulativeAmount: '2000000' },
+    };
+    const t = wrapGiftWrap({
+      rumor: { kind: SWAP_RUMOR_KIND, content: JSON.stringify(tampered) },
+      senderSecretKey: takerNostr.secretKey,
+      recipientPubkey: maker.nostr.pubkey,
     });
-    expect(recovered.toLowerCase()).toBe(a.swapSignerAddress.toLowerCase());
-    expect(a.receipt).toBeDefined();
+    await maker.maker!.handleWrap(t.wrap);
+    await sleepUntil(() => relay.published.length === before + 2);
+    const refusal = JSON.parse(
+      unwrapGiftWrap(
+        takerNostr.secretKey,
+        takerNostr.pubkey,
+        relay.published.at(-1)!
+      ).rumor.content
+    );
+    expect(refusal).toMatchObject({
+      type: 'refusal',
+      reason: 'claim_invalid',
+      seq: 2,
+      detail: { code: 'SIGNATURE_INVALID' },
+    });
+    expect(refusal.credited).toBeUndefined();
+    expect(maker.engine.sessionFor(session.streamNonce)?.lastSeq).toBe(1);
+    taker.stop();
   });
 
-  it('answers a retransmitted seq with the same advance, and a gap with 409', async () => {
-    const again = await post(
-      '/swap/fill',
-      { proto: SWAP_WIRE_PROTOCOL, type: 'fill', streamNonce: N, seq: 1 },
-      paid(PAYER_SOL, 1_000_000n, 'solana')
+  it('a taker that loses an answer resumes from disk and finishes with no new nonce for the old seq', async () => {
+    const store = takerStore;
+    const first = makeTaker(store, { answerTimeoutMs: 150, maxResends: 1 });
+    first.taker.start();
+    first.taker.listOrders();
+    await sleepUntil(() => first.taker.listOrders().length === 1);
+    const session = await first.taker.accept(first.taker.listOrders()[0]!, {
+      size: 3n * FILL,
+      delta: FILL,
+    });
+
+    // Let two fills through, then make the maker's third answer vanish.
+    let fills = 0;
+    let threw: unknown;
+    try {
+      await first.taker.run(session.streamNonce, {
+        onFill: () => {
+          fills += 1;
+          if (fills === 2) dropNextMakerWrite = true; // the maker's answer to fill 3 is lost
+        },
+      });
+    } catch (err) {
+      threw = err;
+    }
+    expect(fills).toBe(2);
+    expect(String(threw)).toMatch(/no_answer/);
+    first.taker.stop();
+    const persisted = store.load()!.sessions[session.streamNonce]!;
+    expect(persisted.lastFill?.seq).toBe(3);
+    expect(persisted.lastAdvance?.seq).toBe(2);
+    expect(maker.engine.sessionFor(session.streamNonce)?.lastSeq).toBe(3);
+
+    const second = makeTaker(store);
+    second.taker.start();
+    const resumed = await second.taker.resume(session.streamNonce);
+    expect(resumed.status).toBe('done');
+    expect(resumed.lastAdvance?.seq).toBe(3);
+    // The same claim was resent — the channel watermark did not move for seq 3.
+    expect(resumed.legA.nonce).toBe(resumed.lastFill?.claim.nonce);
+    expect(persisted.lastFill?.claim.nonce).toBe(resumed.lastFill?.claim.nonce);
+    // The leg-B channel is shared by every session on it: the watermark is
+    // the channel's cumulative, and this session's last advance sits on it.
+    expect(resumed.received?.cumulative).toBe(
+      resumed.lastAdvance?.advance.claim.cumulativeAmount
     );
-    expect(again.status).toBe(200);
-    expect((again.json as SwapAdvance).cumulativeAmount).toBe('4000000');
-    const gap = await post(
-      '/swap/fill',
-      { proto: SWAP_WIRE_PROTOCOL, type: 'fill', streamNonce: N, seq: 3 },
-      paid(PAYER_SOL, 1_000_000n, 'solana')
-    );
-    expect(gap.status).toBe(409);
-    expect((gap.json as SwapRefusal).reason).toBe('seq_gap');
-    expect((gap.json as SwapRefusal).credited).toBe('1000000');
+    expect(resumed.lastAdvance?.advance.targetAmount).toBe('990000');
+    second.taker.stop();
   });
 
-  it('binds the session to the first payer; another payer is refused uncredited', async () => {
-    const other = await post(
-      '/swap/fill',
-      { proto: SWAP_WIRE_PROTOCOL, type: 'fill', streamNonce: N, seq: 2 },
-      paid('solana:11111111111111111111111111111111', 1_000_000n, 'solana')
+  it('a taker that lost its state file resyncs its watermark from the maker’s refusal and continues', async () => {
+    const before = BigInt(
+      maker.maker!.health().inbound[`${EVM_CHAIN}:${evmChannelId}`]?.nonce ??
+        '0'
     );
-    expect(other.status).toBe(403);
-    expect((other.json as SwapRefusal).reason).toBe('payer_mismatch');
-    expect((other.json as SwapRefusal).credited).toBeUndefined();
+    const { taker } = makeTaker(new InMemoryTakerStateStore()); // fresh disk, used channel
+    taker.start();
+    taker.listOrders();
+    await sleepUntil(() => taker.listOrders().length === 1);
+    const session = await taker.accept(taker.listOrders()[0]!, {
+      size: 2n * FILL,
+      delta: FILL,
+    });
+    const advances: SwapAdvance[] = [];
+    const done = await taker.run(session.streamNonce, {
+      onFill: (a) => {
+        advances.push(a);
+      },
+    });
+    expect(done.status).toBe('done');
+    expect(advances).toHaveLength(2);
+    const makerInbound =
+      maker.maker!.health().inbound[`${EVM_CHAIN}:${evmChannelId}`]!;
+    // The fresh taker continued from the maker's watermark (two fills past it), not from nonce 1.
+    expect(done.legA.nonce).toBe(makerInbound.nonce);
+    expect(BigInt(done.legA.nonce)).toBe(before + 2n);
+    expect(done.legA.acceptedCumulative).toBe(makerInbound.cumulative);
+    taker.stop();
   });
 
-  it('advances the cumulative on seq 2 with the earlier credit applied', async () => {
-    const { status, json } = await post(
-      '/swap/fill',
-      { proto: SWAP_WIRE_PROTOCOL, type: 'fill', streamNonce: N, seq: 2 },
-      paid(PAYER_SOL, 1_000_000n, 'solana')
-    );
-    expect(status).toBe(200);
-    const a = json as SwapAdvance;
-    expect(a.credited).toBe('1000000');
-    expect(a.nonce).toBe('2');
-    expect(a.cumulativeAmount).toBe('8000000');
-    const h = instance.health();
-    expect(h.inventoryWindow[`USDC:${EVM_TARGET}`]?.unsettled).toBe('8000000');
+  it('a fill refused after verification is credited once, and the retry of the same claim is priced on that credit', async () => {
+    const { taker } = makeTaker();
+    taker.start();
+    taker.listOrders();
+    await sleepUntil(() => taker.listOrders().length === 1);
+    const session = await taker.accept(taker.listOrders()[0]!, {
+      size: 2n * FILL,
+      delta: FILL,
+    });
+    const advances: SwapAdvance[] = [];
+    failRateOnce = true; // fill 1: verified, refused rate_unavailable, credited; the taker resends it
+    const done = await taker.run(session.streamNonce, {
+      onFill: (a) => {
+        advances.push(a);
+      },
+    });
+    expect(done.status).toBe('done');
+    expect(advances.map((a) => a.seq)).toEqual([1, 2]);
+    // The retried claim was worth ONE fill: the credit, and nothing on top of it.
+    expect(advances[0]).toMatchObject({
+      credited: FILL.toString(),
+      sourceAmount: FILL.toString(),
+      targetAmount: '990000',
+    });
+    expect(advances[1]?.credited).toBeUndefined();
+    expect(advances[1]?.sourceAmount).toBe(FILL.toString());
+    expect(maker.engine.sessionFor(session.streamNonce)?.credit).toBe(0n);
+    taker.stop();
   });
 
-  it('refuses a fill for an unknown session with 404', async () => {
-    const { status, json } = await post(
-      '/swap/fill',
-      { proto: SWAP_WIRE_PROTOCOL, type: 'fill', streamNonce: nonce(99), seq: 1 },
-      paid(PAYER_SOL, 1_000_000n, 'solana')
+  it('a maker restarted from its persisted state continues a stream at the right leg-B nonce', async () => {
+    const { taker } = makeTaker();
+    taker.start();
+    taker.listOrders();
+    await sleepUntil(() => taker.listOrders().length === 1);
+    const session = await taker.accept(taker.listOrders()[0]!, {
+      size: 3n * FILL,
+      delta: FILL,
+    });
+    const advances: SwapAdvance[] = [];
+    let restarted = false;
+    await taker.run(session.streamNonce, {
+      onFill: async (a) => {
+        advances.push(a);
+        if (a.seq === 1 && !restarted) {
+          restarted = true;
+          await maker.stop();
+          maker = await startSwapNode(makerConfig(makerStore));
+        }
+      },
+    });
+    expect(advances.map((a) => a.seq)).toEqual([1, 2, 3]);
+    // Leg-B nonces keep counting across the restart on the same channel.
+    const nonces = advances.map((a) => BigInt(a.claim.nonce));
+    expect(nonces[1]! > nonces[0]! && nonces[2]! > nonces[1]!).toBe(true);
+    expect(new Set(advances.map((a) => a.claim.channelId))).toEqual(
+      new Set([solPda])
     );
-    expect(status).toBe(404);
-    expect((json as SwapRefusal).reason).toBe('unknown_session');
+    const ms = maker.engine.sessionFor(session.streamNonce);
+    expect(ms?.lastSeq).toBe(3);
+    taker.stop();
   });
 });
-
-describe('fill → Solana leg B', () => {
-  const N = nonce(20);
-  it('serves the recipient from the PDA the participants derive, not the first pool channel', async () => {
-    const q = await post('/swap/rfq', {
-      proto: SWAP_WIRE_PROTOCOL,
-      type: 'rfq',
-      streamNonce: N,
-      pair: {
-        from: { assetCode: 'USDC', assetScale: 6, chain: EVM_TARGET },
-        to: { assetCode: 'USDC', assetScale: 6, chain: SOL_TARGET },
-      },
-      chainRecipient: SOL_RECIPIENT,
-    });
-    expect(q.status).toBe(200);
-    expect((q.json as SwapQuote).legB.programId).toBe(PROGRAM_ID);
-    expect((q.json as SwapQuote).legB.swapSignerAddress).toBe(makerSolanaPubkey);
-
-    const { status, json } = await post(
-      '/swap/fill',
-      { proto: SWAP_WIRE_PROTOCOL, type: 'fill', streamNonce: N, seq: 1 },
-      paid(PAYER_EVM, 1_000_000n, 'evm')
-    );
-    expect(status).toBe(200);
-    const a = json as SwapAdvance;
-    expect(a.channelId).toBe(solLegBChannel);
-    expect(a.targetAmount).toBe('500000');
-    const msg = solanaBalanceProofMessage(
-      PROGRAM_ID,
-      a.channelId,
-      BigInt(a.nonce),
-      BigInt(a.cumulativeAmount)
-    );
-    const ok = ed25519.verify(
-      Uint8Array.from(Buffer.from(a.claim, 'base64')),
-      msg,
-      Uint8Array.from(Buffer.from(base58DecodeLocal(makerSolanaPubkey)))
-    );
-    expect(ok).toBe(true);
-  });
-
-  it('refuses a recipient whose PDA is not provisioned, naming the channel to open', async () => {
-    const N2 = nonce(21);
-    const stranger = base58Encode(new Uint8Array(32).fill(6));
-    await post('/swap/rfq', {
-      proto: SWAP_WIRE_PROTOCOL,
-      type: 'rfq',
-      streamNonce: N2,
-      pair: {
-        from: { assetCode: 'USDC', assetScale: 6, chain: EVM_TARGET },
-        to: { assetCode: 'USDC', assetScale: 6, chain: SOL_TARGET },
-      },
-      chainRecipient: stranger,
-    });
-    const { status, json } = await post(
-      '/swap/fill',
-      { proto: SWAP_WIRE_PROTOCOL, type: 'fill', streamNonce: N2, seq: 1 },
-      paid(`evm:0x${'bb'.repeat(32)}`, 1_000_000n, 'evm')
-    );
-    console.log('DEBUG stranger fill', status, JSON.stringify(json));
-    expect(status).toBe(503);
-    const r = json as SwapRefusal;
-    expect(r.reason).toBe('no_channel_available');
-    expect(r.detail?.['preferredChannelId']).toBe(
-      deriveSolanaChannelPda({
-        participantA: makerSolanaPubkey,
-        participantB: stranger,
-        mint: MINT,
-        programId: PROGRAM_ID,
-      })
-    );
-    expect(r.credited).toBe('1000000');
-  });
-});
-
-function base58DecodeLocal(s: string): Uint8Array {
-  const ALPHABET =
-    '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz';
-  let n = 0n;
-  for (const ch of s) n = n * 58n + BigInt(ALPHABET.indexOf(ch));
-  const bytes: number[] = [];
-  while (n > 0n) {
-    bytes.unshift(Number(n & 0xffn));
-    n >>= 8n;
-  }
-  for (const ch of s) {
-    if (ch !== '1') break;
-    bytes.unshift(0);
-  }
-  return Uint8Array.from(bytes);
-}

@@ -17,7 +17,6 @@
 
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { createServer, type Server } from 'node:http';
-import { Hono } from 'hono';
 
 import { SwapInventory } from './inventory.js';
 import { SwapChannelState, channelFundedTotal } from './channel-state.js';
@@ -26,7 +25,8 @@ import type {
   ChannelOnChainReader,
 } from './channel-state.js';
 import { SwapInventoryReconciler } from './inventory-reconciler.js';
-import { registerAdminRoutes } from './admin-surface.js';
+import { adminTestApp } from './admin-surface.test-support.js';
+import type { AdminTestApp } from './admin-surface.test-support.js';
 import { createEvmChannelOnChainReader } from './evm-channel-reader.js';
 import { composeChannelOnChainReaders } from './channel-reader.js';
 
@@ -131,13 +131,11 @@ function makeAdminApp(p: {
   reconciler: SwapInventoryReconciler;
   adminToken?: string;
 }) {
-  const app = new Hono();
-  registerAdminRoutes(app, {
+  return adminTestApp({
     inventory: p.inventory,
     reconciler: p.reconciler,
     ...(p.adminToken !== undefined && { adminToken: p.adminToken }),
   });
-  return app;
 }
 
 /** The live devnet maker's shape: one channel, 15 000 000 of configured capital. */
@@ -177,7 +175,7 @@ function setup(p: {
 }
 
 async function post(
-  app: Hono,
+  app: AdminTestApp,
   body: unknown,
   token: string | null = TOKEN
 ): Promise<Response> {

@@ -63,7 +63,11 @@ afterEach(() => {
 
 function sampleState(): PersistedSwapState {
   return {
-    version: 2,
+    version: 3,
+    inbound: {},
+    sessions: {},
+    relayCursor: 0,
+    orders: {},
     inventory: {
       'ETH:evm:base:8453': {
         available: '9007199254740993', // > MAX_SAFE_INTEGER (precision guard)
@@ -84,7 +88,7 @@ function sampleState(): PersistedSwapState {
     bindings: {
       [`ETH:evm:base:8453:${SENDER_PUBKEY}`]: 'ETH:evm:base:8453:0xchan',
     },
-    seenPacketIds: ['pkt-1', 'pkt-2'],
+    seenEventIds: ['pkt-1', 'pkt-2'],
     // Issue #49 — in-flight window reservations + settled watermarks.
     reservations: {
       'rsv-1': {
@@ -253,7 +257,7 @@ describe('JsonFileSwapStateStore', () => {
     writeFileSync(path, JSON.stringify(sampleV1State()), 'utf-8');
     const store = new JsonFileSwapStateStore(path);
     const loaded = store.load()!;
-    expect(loaded.version).toBe(2);
+    expect(loaded.version).toBe(3);
     expect(loaded.reservations).toEqual({});
     expect(loaded.settledWatermarks).toEqual({});
     expect(loaded.inventory['ETH:evm:base:8453']!.available).toBe(
@@ -410,7 +414,7 @@ describe('SwapStatePersister', () => {
     expect(loaded.bindings[`ETH:evm:base:8453:${SENDER_PUBKEY}`]).toBe(
       'ETH:evm:base:8453:chan-a'
     );
-    expect(loaded.seenPacketIds).toEqual(['pkt-9']);
+    expect(loaded.seenEventIds).toEqual(['pkt-9']);
     expect(persister).toBeDefined();
   });
 

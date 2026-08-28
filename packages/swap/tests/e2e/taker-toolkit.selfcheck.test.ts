@@ -52,7 +52,10 @@ import {
   type FreshAnvil,
   type TakerEvmChannel,
 } from './helpers/evm-chain.js';
-import { startRustConnector, type RustConnectorInstance } from './helpers/rust-connector.js';
+import {
+  startRustConnector,
+  type RustConnectorInstance,
+} from './helpers/rust-connector.js';
 import {
   airdropSol,
   associatedTokenAddress,
@@ -89,16 +92,25 @@ import {
   ANVIL_PORT,
   MAKER_APP_PORT,
   MAKER_APP_URL,
-  MAKER_CONNECTOR_CLIENT_EDGE_PORT,
+  RELAY_CONNECTOR_PORT,
 } from './helpers/topology.js';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const VECTORS = JSON.parse(
-  readFileSync(join(HERE, 'fixtures', 'connector-vectors', 'wire-vectors.json'), 'utf8')
+  readFileSync(
+    join(HERE, 'fixtures', 'connector-vectors', 'wire-vectors.json'),
+    'utf8'
+  )
 ) as {
   peer_carriage: {
     prepare: {
-      prepare: { amount: number; expires_at: string; execution_condition_hex: string; destination: string; data_hex: string };
+      prepare: {
+        amount: number;
+        expires_at: string;
+        execution_condition_hex: string;
+        destination: string;
+        data_hex: string;
+      };
       http_body_hex: string;
     };
     claim_evm: { json: string };
@@ -129,7 +141,9 @@ interface RecordedRequest {
   body: Buffer;
 }
 
-function startRecordingApp(port: number): Promise<{ server: Server; requests: RecordedRequest[] }> {
+function startRecordingApp(
+  port: number
+): Promise<{ server: Server; requests: RecordedRequest[] }> {
   const requests: RecordedRequest[] = [];
   const server = createServer((req, res) => {
     const chunks: Buffer[] = [];
@@ -141,14 +155,22 @@ function startRecordingApp(port: number): Promise<{ server: Server; requests: Re
         else if (Array.isArray(v)) headers[k.toLowerCase()] = v.join(', ');
       }
       const body = Buffer.concat(chunks);
-      requests.push({ method: req.method ?? '', url: req.url ?? '', headers, body });
+      requests.push({
+        method: req.method ?? '',
+        url: req.url ?? '',
+        headers,
+        body,
+      });
       const answer = JSON.stringify({
         ok: true,
         path: req.url,
         echo: body.toString('utf8'),
         payer: headers['x-toon-payer'] ?? null,
       });
-      res.writeHead(200, { 'content-type': 'application/json', 'x-app': 'taker-toolkit' });
+      res.writeHead(200, {
+        'content-type': 'application/json',
+        'x-app': 'taker-toolkit',
+      });
       res.end(answer);
     });
   });
@@ -171,7 +193,7 @@ let connector: RustConnectorInstance;
 let stateDir: string;
 
 const connectorSignerKey = randomBytes(32);
-const connectorEvmKey = (`0x${randomBytes(32).toString('hex')}`) as Hex;
+const connectorEvmKey = `0x${randomBytes(32).toString('hex')}` as Hex;
 const connectorSolanaSeed = new Uint8Array(randomBytes(32));
 let connectorEvmAddress: Address;
 let connectorSolanaPubkey: PublicKey;
@@ -192,7 +214,9 @@ beforeAll(async () => {
   anvil = await startFreshAnvil({ port: ANVIL_PORT, chainId: ANVIL_CHAIN_ID });
   cleanups.push(() => anvil.stop());
   evm = await deployEvmContracts(anvil.rpcUrl);
-  log(`evm deployed: usdc=${evm.usdc} registry=${evm.registry} tokenNetwork=${evm.tokenNetwork} rolling=${evm.rollingSwapChannel}`);
+  log(
+    `evm deployed: usdc=${evm.usdc} registry=${evm.registry} tokenNetwork=${evm.tokenNetwork} rolling=${evm.rollingSwapChannel}`
+  );
 
   log('booting solana-test-validator');
   validator = await startSolanaValidator();
@@ -201,7 +225,9 @@ beforeAll(async () => {
   cleanups.push(() => sol.dispose());
   takerSol = sol.openers[0]!;
   makerSol = sol.openers[1]!;
-  log(`solana mint=${sol.mint} taker=${takerSol.pubkey} makerB=${makerSol.pubkey}`);
+  log(
+    `solana mint=${sol.mint} taker=${takerSol.pubkey} makerB=${makerSol.pubkey}`
+  );
 
   // 2. The connector's keys, funded on both chains BEFORE it boots.
   connectorEvmAddress = evmAddressOf(connectorEvmKey);
@@ -209,7 +235,9 @@ beforeAll(async () => {
   await fundEth(anvil.rpcUrl, connectorEvmAddress, 10n * 10n ** 18n);
   await mintUsdc(anvil.rpcUrl, evm.usdc, connectorEvmAddress, 1000n * USDC);
   await airdropSol(validator.rpcUrl, connectorSolanaPubkey, 10);
-  log(`connector evm=${connectorEvmAddress} solana=${connectorSolanaPubkey.toBase58()}`);
+  log(
+    `connector evm=${connectorEvmAddress} solana=${connectorSolanaPubkey.toBase58()}`
+  );
 
   // 3. The app, then the connector in front of it.
   app = await startRecordingApp(MAKER_APP_PORT);
@@ -218,7 +246,7 @@ beforeAll(async () => {
   stateDir = mkdtempSync(join(tmpdir(), 'swap-e2e-connector-state-'));
   cleanups.push(() => rmSync(stateDir, { recursive: true, force: true }));
   connector = await startRustConnector({
-    clientEdgePort: MAKER_CONNECTOR_CLIENT_EDGE_PORT,
+    clientEdgePort: RELAY_CONNECTOR_PORT,
     stateDir,
     signerKeyHex: connectorSignerKey.toString('hex'),
     evm: {
@@ -234,7 +262,11 @@ beforeAll(async () => {
       settlementSeedHex: seedToHex(connectorSolanaSeed),
     },
     routes: [
-      { prefix: PAID_ROUTE, handlerUrl: `${MAKER_APP_URL}/paid/`, price: ROUTE_PRICE },
+      {
+        prefix: PAID_ROUTE,
+        handlerUrl: `${MAKER_APP_URL}/paid/`,
+        price: ROUTE_PRICE,
+      },
       { prefix: FREE_ROUTE, handlerUrl: `${MAKER_APP_URL}/free/`, price: 0 },
     ],
   });
@@ -251,7 +283,9 @@ beforeAll(async () => {
     counterparty: connectorEvmAddress,
     deposit: 5n * USDC,
   });
-  log(`taker evm channel ${takerEvmChannel.channelId} deposit=${takerEvmChannel.deposit}`);
+  log(
+    `taker evm channel ${takerEvmChannel.channelId} deposit=${takerEvmChannel.deposit}`
+  );
 
   takerSolChannel = await openSolanaChannelAsDepositor({
     rpcUrl: validator.rpcUrl,
@@ -261,7 +295,9 @@ beforeAll(async () => {
     counterparty: connectorSolanaPubkey,
     amount: 5n * USDC,
   });
-  log(`taker solana channel ${takerSolChannel.channelAccount.toBase58()} deposit=${takerSolChannel.deposit}`);
+  log(
+    `taker solana channel ${takerSolChannel.channelAccount.toBase58()} deposit=${takerSolChannel.deposit}`
+  );
 }, 240_000);
 
 afterAll(async () => {
@@ -313,7 +349,9 @@ describe('wire vectors (connector vectors/wire-vectors.json)', () => {
     const bytes = encodeIlpPrepare({
       amount: BigInt(v.prepare.amount),
       expiresAt: new Date(v.prepare.expires_at),
-      executionCondition: Uint8Array.from(Buffer.from(v.prepare.execution_condition_hex, 'hex')),
+      executionCondition: Uint8Array.from(
+        Buffer.from(v.prepare.execution_condition_hex, 'hex')
+      ),
       destination: v.prepare.destination,
       data: Uint8Array.from(Buffer.from(v.prepare.data_hex, 'hex')),
     });
@@ -325,8 +363,13 @@ describe('wire vectors (connector vectors/wire-vectors.json)', () => {
 
   it('EVM claim digest reproduces claim_digest_hex and recovers signerAddress', async () => {
     const c = JSON.parse(VECTORS.peer_carriage.claim_evm.json) as {
-      chainId: number; tokenNetworkAddress: Address; channelId: Hex; nonce: number;
-      transferredAmount: string; signature: Hex; signerAddress: Address;
+      chainId: number;
+      tokenNetworkAddress: Address;
+      channelId: Hex;
+      nonce: number;
+      transferredAmount: string;
+      signature: Hex;
+      signerAddress: Address;
     };
     const fields = {
       chainId: c.chainId,
@@ -335,17 +378,25 @@ describe('wire vectors (connector vectors/wire-vectors.json)', () => {
       nonce: BigInt(c.nonce),
       transferredAmount: BigInt(c.transferredAmount),
     };
-    expect(evmClientClaimDigest(fields).slice(2)).toBe(VECTORS.peer_carriage.claim_digest_hex);
+    expect(evmClientClaimDigest(fields).slice(2)).toBe(
+      VECTORS.peer_carriage.claim_digest_hex
+    );
     // The vector's `v` is libsecp256k1's raw {0,1}; viem wants {27,28}.
     const raw = Buffer.from(c.signature.slice(2), 'hex');
     if (raw[64]! < 27) raw[64] = raw[64]! + 27;
-    const signer = await recoverEvmClientClaimSigner(fields, `0x${raw.toString('hex')}` as Hex);
+    const signer = await recoverEvmClientClaimSigner(
+      fields,
+      `0x${raw.toString('hex')}` as Hex
+    );
     expect(signer.toLowerCase()).toBe(c.signerAddress.toLowerCase());
   });
 
   it('Solana 96-byte balance proof reproduces claim_solana.signed_message_hex', () => {
     const c = JSON.parse(VECTORS.peer_carriage.claim_solana.json) as {
-      programId: string; channelAccount: string; nonce: number; transferredAmount: string;
+      programId: string;
+      channelAccount: string;
+      nonce: number;
+      transferredAmount: string;
     };
     const msg = solanaBalanceProofMessage96({
       programId: c.programId,
@@ -353,7 +404,9 @@ describe('wire vectors (connector vectors/wire-vectors.json)', () => {
       nonce: c.nonce,
       transferredAmount: BigInt(c.transferredAmount),
     });
-    expect(hex(msg)).toBe(VECTORS.peer_carriage.claim_solana.signed_message_hex);
+    expect(hex(msg)).toBe(
+      VECTORS.peer_carriage.claim_solana.signed_message_hex
+    );
   });
 });
 
@@ -376,11 +429,17 @@ describe('leg A: sealed requests to the Rust connector client edge', () => {
     expect(out.kind, JSON.stringify(out)).toBe('fulfill');
     if (out.kind !== 'fulfill') return;
     expect(out.response.status).toBe(200);
-    const json = JSON.parse(fulfillBodyText(out)) as { ok: boolean; path: string; echo: string };
+    const json = JSON.parse(fulfillBodyText(out)) as {
+      ok: boolean;
+      path: string;
+      echo: string;
+    };
     expect(json.ok).toBe(true);
     expect(json.echo).toBe('hello free');
     expect(json.path).toBe('/free/');
-    expect(out.response.headers.some(([k]) => k.toLowerCase() === 'x-app')).toBe(true);
+    expect(
+      out.response.headers.some(([k]) => k.toLowerCase() === 'x-app')
+    ).toBe(true);
     expect(app.requests.length).toBe(before + 1);
     const seen = appHeaders(app.requests[before]!);
     expect(seen.payer).toBeUndefined();
@@ -401,9 +460,16 @@ describe('leg A: sealed requests to the Rust connector client edge', () => {
       tokenAddress: evm.usdc,
     });
     const out = await send(PAID_ROUTE, 'paid evm 1', claim);
-    expect(out.kind, JSON.stringify(out, (_k, v) => (typeof v === 'bigint' ? v.toString() : v))).toBe('fulfill');
+    expect(
+      out.kind,
+      JSON.stringify(out, (_k, v) => (typeof v === 'bigint' ? v.toString() : v))
+    ).toBe('fulfill');
     if (out.kind !== 'fulfill') return;
-    const json = JSON.parse(fulfillBodyText(out)) as { echo: string; path: string; payer: string };
+    const json = JSON.parse(fulfillBodyText(out)) as {
+      echo: string;
+      path: string;
+      payer: string;
+    };
     expect(json.echo).toBe('paid evm 1');
     expect(json.path).toBe('/paid/');
     expect(app.requests.length).toBe(before + 1);
@@ -425,7 +491,10 @@ describe('leg A: sealed requests to the Rust connector client edge', () => {
       transferredAmount: 2n * ROUTE_PRICE,
     });
     const out = await send(PAID_ROUTE, 'paid evm 2', claim);
-    expect(out.kind, JSON.stringify(out, (_k, v) => (typeof v === 'bigint' ? v.toString() : v))).toBe('fulfill');
+    expect(
+      out.kind,
+      JSON.stringify(out, (_k, v) => (typeof v === 'bigint' ? v.toString() : v))
+    ).toBe('fulfill');
     expect(app.requests.length).toBe(before + 1);
     const seen = appHeaders(app.requests[before]!);
     expect(seen.payer).toBe(`evm:${takerEvmChannel.channelId.toLowerCase()}`);
@@ -448,7 +517,9 @@ describe('leg A: sealed requests to the Rust connector client edge', () => {
     if (out.kind !== 'reject') return;
     expect(out.code.startsWith('F')).toBe(true);
     expect(app.requests.length).toBe(before);
-    log(`(c2) replayed nonce → REJECT ${out.code} "${out.message}" origin=${out.origin} cost=${String(out.accumulatedCost)}`);
+    log(
+      `(c2) replayed nonce → REJECT ${out.code} "${out.message}" origin=${out.origin} cost=${String(out.accumulatedCost)}`
+    );
   });
 
   it('(d) paid Solana claim: FULFILL with X-TOON-Chain solana', async () => {
@@ -461,12 +532,17 @@ describe('leg A: sealed requests to the Rust connector client edge', () => {
       transferredAmount: ROUTE_PRICE,
     });
     const out = await send(PAID_ROUTE, 'paid solana 1', claim);
-    expect(out.kind, JSON.stringify(out, (_k, v) => (typeof v === 'bigint' ? v.toString() : v))).toBe('fulfill');
+    expect(
+      out.kind,
+      JSON.stringify(out, (_k, v) => (typeof v === 'bigint' ? v.toString() : v))
+    ).toBe('fulfill');
     if (out.kind !== 'fulfill') return;
     expect(JSON.parse(fulfillBodyText(out)).echo).toBe('paid solana 1');
     expect(app.requests.length).toBe(before + 1);
     const seen = appHeaders(app.requests[before]!);
-    expect(seen.payer).toBe(`solana:${takerSolChannel.channelAccount.toBase58()}`);
+    expect(seen.payer).toBe(
+      `solana:${takerSolChannel.channelAccount.toBase58()}`
+    );
     expect(seen.amount).toBe(ROUTE_PRICE.toString());
     expect(seen.chain).toBe('solana');
     log(`(d) solana nonce 1 fulfilled; X-TOON-Payer=${seen.payer}`);
@@ -477,7 +553,10 @@ describe('leg A: sealed requests to the Rust connector client edge', () => {
     const out = await send(PAID_ROUTE, 'unpaid');
     expect(out.kind).toBe('payment-required');
     if (out.kind !== 'payment-required') return;
-    const terms = out.terms as { x402Version: number; accepts: { amount: string; scheme: string }[] };
+    const terms = out.terms as {
+      x402Version: number;
+      accepts: { amount: string; scheme: string }[];
+    };
     expect(terms.x402Version).toBe(2);
     expect(terms.accepts[0]?.scheme).toBe('toon-channel');
     expect(terms.accepts[0]?.amount).toBe(ROUTE_PRICE.toString());
@@ -545,7 +624,9 @@ describe('leg B: the maker pays the taker on the target chain', () => {
     const after = await erc20Balance(anvil.rpcUrl, evm.usdc, takerEvmAddress);
     expect(after - before).toBe(cumulativeAmount);
     expect(settled.recipient.toLowerCase()).toBe(takerEvmAddress.toLowerCase());
-    log(`(f) rolling updateBalance ${settled.txHash}: taker USDC +${after - before}`);
+    log(
+      `(f) rolling updateBalance ${settled.txHash}: taker USDC +${after - before}`
+    );
   });
 
   it('(g) Solana: maker-signed 96-byte proof, ClaimFromChannel by the taker, payout at settlement', async () => {
@@ -593,11 +674,15 @@ describe('leg B: the maker pays the taker on the target chain', () => {
     const state = await readSolanaChannel(validator.rpcUrl, ch.channelAccount);
     expect(state).not.toBeNull();
     const makerIsA = state!.participantA.equals(maker);
-    expect(makerIsA ? state!.transferredAmountA : state!.transferredAmountB).toBe(amount);
+    expect(
+      makerIsA ? state!.transferredAmountA : state!.transferredAmountB
+    ).toBe(amount);
     expect(makerIsA ? state!.nonceA : state!.nonceB).toBe(1n);
     // ClaimFromChannel records; it does not move tokens (see solana-chain.ts).
     expect(await splBalance(validator.rpcUrl, takerAta)).toBe(before);
-    log(`(g) ClaimFromChannel ${claimSig}: recorded nonce=1 amount=${amount} on the maker's slot`);
+    log(
+      `(g) ClaimFromChannel ${claimSig}: recorded nonce=1 amount=${amount} on the maker's slot`
+    );
 
     await closeSolanaChannel({
       rpcUrl: validator.rpcUrl,
@@ -613,7 +698,9 @@ describe('leg B: the maker pays the taker on the target chain', () => {
     });
     const after = await splBalance(validator.rpcUrl, takerAta);
     expect(after - before).toBe(amount);
-    expect(await readSolanaChannel(validator.rpcUrl, ch.channelAccount)).toBeNull();
+    expect(
+      await readSolanaChannel(validator.rpcUrl, ch.channelAccount)
+    ).toBeNull();
     log(`(g) settle ${settleSig}: taker USDC ATA +${after - before}`);
   });
 });

@@ -79,7 +79,8 @@ function multiAssetConfig() {
       ],
     },
     inventory: { 'evm:8453': 1_000_000n },
-    chainProviders: [evmChainProvider('evm:8453')],
+    // Leg A is paid on evm:1, leg B on evm:8453 — the maker needs both.
+    chainProviders: [evmChainProvider('evm:8453'), evmChainProvider('evm:1')],
     blsPort: 0,
   };
 }

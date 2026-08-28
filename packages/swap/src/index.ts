@@ -41,12 +41,19 @@ export type {
   ChannelFundingObservation,
   PoolFundingReading,
 } from './inventory-reconciler.js';
-export { buildInventoryReport, registerAdminRoutes } from './admin-surface.js';
+export {
+  buildInventoryReport,
+  handleAdminRequest,
+  isAdminPath,
+  ADMIN_PATHS,
+} from './admin-surface.js';
 export type {
   AdminInventoryReport,
   AdminPoolView,
   AdminChannelView,
   AdminSurfaceDeps,
+  AdminRequest,
+  AdminResponse,
 } from './admin-surface.js';
 
 // Payment-channel signing (Story 12.4)
@@ -104,6 +111,7 @@ export {
   JsonFileSwapStateStore,
   SwapStatePersister,
   PersistentSeenPacketIds,
+  PersistentSeenEventIds,
   SwapStateStoreError,
   DEFAULT_PERSISTED_SEEN_IDS_CAP,
 } from './state-store.js';
@@ -111,10 +119,14 @@ export type {
   SwapStateStore,
   SwapStateStoreErrorCode,
   SwapStatePersisterInit,
+  SwapStateExtras,
   PersistedSwapState,
   PersistedInventoryEntry,
   PersistedChannelEntry,
   PersistedReservationEntry,
+  PersistedMakerSession,
+  PersistedInboundEntry,
+  PersistedOrderEntry,
 } from './state-store.js';
 
 // Errors (Story 12.4)
@@ -163,11 +175,14 @@ export type {
   SwapNodeEvmChainProvider,
   SwapNodeSolanaChainProvider,
   SwapNodeMinaChainProvider,
+  SwapNodeRelayConfig,
 } from './swap-node.js';
 export {
   validateConfig as validateSwapNodeConfig,
   buildSignerAddresses,
   parseEvmChainId,
+  DEFAULT_RELAY_DESTINATION,
+  DEFAULT_ORDER_FILL,
 } from './swap-node.js';
 export { SwapNodeStartError } from './errors.js';
 export type { SwapNodeStartErrorCode } from './errors.js';
@@ -197,37 +212,46 @@ export type {
 } from './rate-staleness.js';
 
 // ---------------------------------------------------------------------------
-// The rolling/2 wire — what a taker speaks to a maker behind a Rust connector
+// The rolling/3 wire — what a taker and a maker say to each other through a relay
 // ---------------------------------------------------------------------------
 export {
   SWAP_WIRE_PROTOCOL,
+  SWAP_ORDER_KIND,
+  SWAP_RUMOR_KIND,
   SWAP_REFUSAL_REASONS,
-  SWAP_REFUSAL_STATUS,
-  PAYMENT_HEADER_PAYER,
-  PAYMENT_HEADER_AMOUNT,
-  PAYMENT_HEADER_CHAIN,
   isValidStreamNonce,
-  parseSwapRfqRequest,
-  parseSwapFillRequest,
+  parseSwapOrder,
+  parseSwapAccept,
+  parseSwapFill,
+  parseSwapDone,
+  parseSwapClaim,
+  parseSwapTakerMessage,
   parseSwapWireAnswer,
-  readPaymentAttribution,
+  attributionPayerKey,
 } from './wire.js';
 export type {
   SwapWireAsset,
   SwapWirePair,
-  SwapRfqRequest,
+  SwapLegTerms,
   SwapLegBTerms,
+  SwapClaim,
+  SwapOrder,
+  SwapAccept,
   SwapQuote,
-  SwapFillRequest,
+  SwapFill,
   SwapAdvance,
+  SwapDone,
   SwapRefusal,
   SwapRefusalReason,
   SwapWireAnswer,
+  SwapTakerMessage,
   SwapWireParse,
   PaymentAttribution,
 } from './wire.js';
 export {
   MakerEngine,
+  makerRefusal,
+  chainFamily,
   defaultValidateRecipient,
   DEFAULT_QUOTE_TTL_MS,
   DEFAULT_SESSION_TTL_MS,
@@ -238,14 +262,128 @@ export type {
   MakerEngineConfig,
   MakerEngineLogger,
   MakerSession,
-  MakerAnswer,
 } from './maker-engine.js';
+
+// The relay plane: identity, gift wraps, reads, paid writes, the maker loop
 export {
-  registerMakerRoutes,
-  MAKER_RFQ_PATH,
-  MAKER_FILL_PATH,
-} from './maker-app.js';
-export type { MakerAppDeps, MakerAppLogger } from './maker-app.js';
+  deriveNostrIdentity,
+  nostrIdentityFromSecret,
+  NOSTR_COIN_TYPE,
+} from './nostr-keys.js';
+export type { NostrIdentity, DeriveNostrIdentityInput } from './nostr-keys.js';
+export {
+  wrapGiftWrap,
+  unwrapGiftWrap,
+  eventExpiration,
+  GiftWrapAddressError,
+  GiftWrapDecryptError,
+  GIFT_WRAP_KIND,
+  SEAL_KIND,
+} from './nip59.js';
+export type {
+  UnwrappedGiftWrap,
+  WrapGiftWrapInput,
+  WrappedGiftWrap,
+  Rumor,
+} from './nip59.js';
+export { RelaySubscription } from './relay-subscription.js';
+export type {
+  NostrFilter,
+  RelaySubscriptionOptions,
+  MinimalWebSocket,
+  WebSocketFactory,
+  DrainResult,
+} from './relay-subscription.js';
+export { createRelayWriter, createRelayClient } from './relay-writer.js';
+export type {
+  RelayWriter,
+  RelayWriterConfig,
+  RelayWriteResult,
+  RelayWriteAccepted,
+  RelayWriteRefused,
+  RelayClientConfig,
+  RelayClient,
+  PaidSender,
+} from './relay-writer.js';
+export {
+  verifyInboundClaim,
+  createReadBudgets,
+  createRpcChannelSlotReader,
+} from './received-claim.js';
+export type {
+  InboundClaim,
+  ChannelFacts,
+  InboundWatermark,
+  CounterpartySlot,
+  ChannelSlotReader,
+  ReadBudget,
+  VerifyInboundClaimInput,
+  VerifyInboundClaimResult,
+  InboundClaimRejectionCode,
+} from './received-claim.js';
+export {
+  SwapMakerLoop,
+  DEFAULT_ORDER_TTL_MS,
+  DEFAULT_ORDER_REFRESH_MS,
+  DEFAULT_MAX_CHAIN_READS_PER_MIN,
+  INBOX_SUB_ID,
+} from './swap-maker.js';
+export type {
+  SwapMakerLoopConfig,
+  SwapMakerLoopHealth,
+  RelayReader,
+  SwapMakerLoopLogger,
+} from './swap-maker.js';
+export {
+  SwapTaker,
+  SwapTakerError,
+  defaultChannelFunder,
+  DEFAULT_ANSWER_TIMEOUT_MS,
+  DEFAULT_MAX_RESENDS,
+  DEFAULT_TAKER_SESSION_TTL_MS,
+  ORDERS_SUB_ID,
+  TAKER_INBOX_SUB_ID,
+} from './swap-taker.js';
+export type {
+  SwapTakerConfig,
+  SwapTakerLogger,
+  SwapOrderListing,
+  ChannelFunder,
+  Redeemer,
+} from './swap-taker.js';
+export {
+  JsonFileTakerStateStore,
+  InMemoryTakerStateStore,
+  emptyTakerState,
+  validateTakerState,
+} from './taker-state.js';
+export {
+  createRedeemer,
+  ed25519VerifyIx,
+  claimFromChannelIx,
+  closeChannelIx,
+  settleChannelIx,
+} from './redeem.js';
+export type { RedeemerConfig, SolanaSettler } from './redeem.js';
+export {
+  createGasStationRedeemer,
+  GasStationRefusal,
+  DEFAULT_GAS_STATION_DESTINATION,
+  SOLANA_GAS_STATION_KIND,
+  EVM_GAS_STATION_KIND,
+} from './gas-station-redeem.js';
+export type {
+  GasStationRedeemerConfig,
+  ForwarderDomain,
+} from './gas-station-redeem.js';
+export { createTakerRuntime } from './taker-runtime.js';
+export type { TakerRuntime, TakerRuntimeConfig } from './taker-runtime.js';
+export type {
+  TakerStateStore,
+  PersistedTakerState,
+  TakerSessionState,
+  TakerChannelWatermark,
+} from './taker-state.js';
 export { deriveSolanaChannelPda, findProgramAddress } from './solana-pda.js';
 export {
   createSolanaLegBChannelProvisioner,

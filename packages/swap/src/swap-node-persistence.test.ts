@@ -162,7 +162,11 @@ describe('issue #46 — startSwapNode state persistence', () => {
         },
       },
       bindings: {},
-      seenPacketIds: [],
+      seenEventIds: [],
+      inbound: {},
+      sessions: {},
+      relayCursor: 0,
+      orders: {},
     });
     const instance = await startSwapNode(validConfig(statePath));
     await instance.stop();
@@ -220,7 +224,7 @@ describe('issue #49 — startSwapNode window state', () => {
     const statePath = join(makeTmpDir(), 'swap-state.json');
     const farFuture = Date.now() + 3_600_000;
     new JsonFileSwapStateStore(statePath).save({
-      version: 2,
+      version: 3,
       inventory: {
         'USDC:evm:8453': {
           available: '1000000',
@@ -239,7 +243,11 @@ describe('issue #49 — startSwapNode window state', () => {
         },
       },
       bindings: {},
-      seenPacketIds: [],
+      seenEventIds: [],
+      inbound: {},
+      sessions: {},
+      relayCursor: 0,
+      orders: {},
       reservations: {
         'rsv-live': {
           key: 'USDC:evm:8453',
@@ -279,7 +287,7 @@ describe('issue #49 — startSwapNode window state', () => {
   it('[P0] recordSettlement resolves the pool by channelId, shrinks liability monotonically, and persists', async () => {
     const statePath = join(makeTmpDir(), 'swap-state.json');
     new JsonFileSwapStateStore(statePath).save({
-      version: 2,
+      version: 3,
       inventory: {
         'USDC:evm:8453': {
           available: '1000000',
@@ -297,7 +305,11 @@ describe('issue #49 — startSwapNode window state', () => {
         },
       },
       bindings: {},
-      seenPacketIds: [],
+      seenEventIds: [],
+      inbound: {},
+      sessions: {},
+      relayCursor: 0,
+      orders: {},
       reservations: {},
       settledWatermarks: {},
     });

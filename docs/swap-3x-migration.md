@@ -4,26 +4,31 @@
 (`issue-101`, `issue-133`, `issue-136`, `issue-164`, `issue-155`, `rust-connector-maker`). **Read this before
 upgrading a running maker, and before pointing a released client at a 3.0.0 maker.**
 
-> **§0 supersedes much of what follows.** The maker no longer embeds a connector at all: it is an
-> HTTP app behind a Rust connector's route termination, speaking the `rolling/2` wire. See
-> [`rust-connector-migration.md`](./rust-connector-migration.md) for the decision and the wire.
-> The sections below still describe real 2.x → 3.0.0 breaks on the chain side (§1, §3) and the
-> announce (§2) — but there is no announce any more, and a released `toon-client` does not speak
-> `rolling/2` yet.
+> **§0 supersedes much of what follows.** The maker no longer embeds a connector, and is not
+> behind one either: it is a **relay-mediated swap client** speaking the `rolling/3` wire. See
+> [`relay-swap.md`](./relay-swap.md) for the decision and the wire. The sections below still
+> describe real 2.x → 3.0.0 breaks on the chain side (§1, §3) and the announce (§2) — but there
+> is no announce any more (the order on the relay is the discovery), and a released
+> `toon-client` speaks neither `rolling/2` nor `rolling/3`; this package's own `SwapTaker` /
+> `toon-swap take` is the taker.
 
-## 0. The maker is an app behind a Rust connector
+## 0. The swap is a relay-mediated client
 
 - `@toon-protocol/connector` is no longer a dependency; `ConnectorNode`, the BTP listener, the
-  kind:1059/kind:20033 intake and the kind:10032 publish are gone.
-- Leg A is verified by the **connector in front of the maker**, from its own `[settlement.*]`;
-  the maker reads `X-TOON-Payer` / `X-TOON-Amount` / `X-TOON-Chain`. Leg B rides in the paid
-  response. Refusals are HTTP statuses inside the sealed FULFILL.
-- Config keys that configured the embedded connector or the announce (`btpServerPort`,
-  `btpEndpoint`, `relayUrls`, `connectorUrl`, `parent*`, `nodeId`, `peerInfo*`, `rolling.*`,
-  `settlementPrivateKey`, `knownPeers`, `transport`, `advertisedAsset`) are **accepted and ignored
-  with a boot warning**, so the fleet's committed 2.x config still boots. New: `fillAmount`,
-  `quote.{ttlMs,sessionTtlMs,maxSessions}`, `appPort` (alias of `blsPort`), and Solana
-  `chainProviders[]` now require `programId` **and** `tokenMint`.
+  kind:1059/kind:20033 intake and the kind:10032 publish are gone. `@toon-protocol/client` 2.1.0
+  is a runtime dependency — for paid relay writes only.
+- The maker publishes a public order (kind `30032`) and answers gift-wrapped accepts/fills
+  (kind `20036` rumors) from its inbox. **It verifies the taker's leg-A claim itself**
+  (`verifyInboundClaim`) — no connector states `X-TOON-*` to it any more. Leg B rides in the
+  wrapped advance. Refusals are messages, not HTTP statuses.
+- Config: `relay.{readUrl, connectorUrl}` (aliases: `relayUrls[0]`, `connectorUrl`),
+  `order.fill.{min,max}` (alias: `fillAmount` → min), `maxChainReadsPerMin`;
+  `chainProviders[]` must cover every `from.chain` too. `ilpAddress` and the other embedded
+  connector / announce keys (`btpServerPort`, `btpEndpoint`, `parent*`, `nodeId`, `peerInfo*`,
+  `rolling.*`, `settlementPrivateKey`, `knownPeers`, `transport`, `advertisedAsset`) are
+  **accepted and ignored with a boot warning**. A config with `relayUrls` but no connector URL
+  boots **offline**. `quote.{ttlMs,sessionTtlMs,maxSessions}` and `appPort` (alias `blsPort`)
+  stay; Solana `chainProviders[]` require `programId` **and** `tokenMint`.
 - The Solana balance proof is the 96-byte `TOON-BALPROOF-V2` message (connector ADR 0053), not
   the 48 bytes §3 below describes — §3's Solana paragraph is itself superseded.
 - A configured inventory `total` above the persisted snapshot now raises the pool (swap#130).

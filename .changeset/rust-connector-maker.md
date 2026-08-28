@@ -2,59 +2,52 @@
 '@toon-protocol/swap': major
 ---
 
-**The maker is an app behind a Rust connector.** `@toon-protocol/swap` no longer embeds,
-dials or configures a connector; the retired `@toon-protocol/connector` 3.x `ConnectorNode`
-dependency is gone. A Rust connector terminates two routes at the maker — a free
-`<ilpAddress>.rfq` → `POST /swap/rfq` and a priced `<ilpAddress>` → `POST /swap/fill` — verifies
-the taker's leg-A claim itself, and delivers the fill with `X-TOON-Payer` / `X-TOON-Amount` /
-`X-TOON-Chain` (connector ADR 0040). The maker's cumulative leg-B balance proof rides back in
-the HTTP response, sealed into the FULFILL. This is the `rolling/2` wire (`src/wire.ts`,
-exported); `rolling/1`'s gift-wrapped RFQ and condition-coupled leg-B PREPARE cannot exist on
-the Rust connector (PF-01, ADR 0019, no parent/child peering) and are removed along with
-`RollingSwapEngine`, `createRollingRfqIntake`, `createLegBReturnRouteBinder`,
-`createConnectorLegBSender`, `withMaxRateAge`, the `createSwapHandler` re-export and the
-`Publisher`/kind:10032 publish. See `docs/rust-connector-migration.md`.
+**The swap is a relay-mediated client.** `@toon-protocol/swap` no longer embeds, dials, or sits
+behind a connector at all. Both parties are plain TOON clients: the maker publishes a public
+**order** (kind `30032`) on the relay; accept, quote, fill, advance, refusal and done are NIP-59
+gift-wrapped rumors (kind `20036`) each carrying one side's **cumulative** payment-channel claim.
+The relay stores them, so either party can go offline and resume from the last `seq`. Every
+write is an ordinary paid packet to the relay's connector (`g.toon.relay`); the connector never
+opens a wrap. This is the `rolling/3` wire (`src/wire.ts`). `rolling/1`'s coupled legs and
+`rolling/2`'s HTTP route terminations are gone; see `docs/relay-swap.md`.
 
-- **Config:** connector/announce keys (`btpServerPort`, `btpEndpoint`, `relayUrls`,
-  `connectorUrl`, `parentPeerId`, `parentAuthToken`, `parentEvmAddress`, `nodeId`,
-  `knownPeers`, `transport`, `advertisedAsset`, `peerInfo*`, `rolling.*`, `settlementPrivateKey`)
-  are accepted and ignored with a boot warning, so a committed 2.x config boots. New:
-  `fillAmount`, `quote.{ttlMs,sessionTtlMs,maxSessions}`, `appPort` (alias `blsPort`, default
-  8080), env `SWAP_APP_PORT` / `SWAP_ILP_ADDRESS` / `SWAP_FILL_AMOUNT`. Solana
-  `chainProviders[]` entries now require `programId` and `tokenMint`; EVM entries no longer
-  require `tokenNetworkAddress`. `relayUrls` is no longer required.
-- **Leg B rides the normal channels, one per taker, opened by the maker on demand.** The
-  `RollingSwapChannel` is no longer used: its single per-channel watermark with a
-  recipient-per-claim let a maker void a taker's claim by redeeming a later one to another
-  address. Leg B now signs the fleet's `TokenNetwork`/`1` `BalanceProof`
-  (`TokenNetworkBalanceProofSigner`) on the (maker, taker) `TokenNetwork` channel, and the
-  Solana program's proof on the (maker, taker, mint) PDA; both have per-participant watermarks
-  and on-chain collateral checks. With `chainProviders[].channelDeposit` set, the maker opens
-  the channel (if the taker has not) and deposits its side at the taker's first paid fill, tops
-  up when a claim would exceed the deposit, and seeds its watermark from chain
-  (`createEvmLegBChannelProvisioner`, `createSolanaLegBChannelProvisioner`,
-  `MakerEngineConfig.ensureChannel`). The maker's connector should settle with the maker's
-  index-2 keys so one channel per taker per chain carries both legs. EVM `chainProviders[]`
-  require `tokenNetworkAddress` again; `channelAddress` is accepted and ignored; `channels`
-  may be empty when `channelDeposit` is set. The EVM chain-truth reader now reads
-  `TokenNetwork.participants(channelId, maker)` (`EvmChannelReaderProvider` takes
-  `tokenNetworkAddress` + `makerAddress`). `viem` and `@solana/web3.js` become runtime
-  dependencies.
-- **Solana claims** sign the 96-byte `TOON-BALPROOF-V2` message that binds the program id
-  (connector ADR 0053) — `SolanaPaymentChannelSigner` takes `programId`,
-  `solanaBalanceProofMessage(programId, channelId, nonce, amount)`. The 48-byte form 2.x signed
-  is not a prefix of it and is unredeemable on the current program.
-- **Solana leg-B channels** are resolved by the participants' PDA (ADR 0059) rather than
-  "first unbound": `ReserveParams.preferredChannelId` / `IssueRollingClaimParams.preferredChannelId`,
-  `deriveSolanaChannelPda`. An unprovisioned PDA is refused `no_channel_available` naming it.
-- **Inventory** (swap#130): a configured pool `total` above the persisted snapshot raises the
-  pool instead of being silently ignored.
-- **API:** `SwapNodeInstance` gains `appPort`, `ilpAddress`, `rfqDestination`,
-  `fillDestination`, `engine`; loses `connector`, `registerRollingSession`, `_rollingEngine`.
-  `SwapNodeHealthResponse` gains `ilpAddress`, `rfqDestination`, `fillDestination`, `legB`,
-  `sessions`. New exports: `MakerEngine`, `registerMakerRoutes`, the `rolling/2` types and
-  parsers, `readPaymentAttribution`, `deriveSolanaChannelPda`.
-- **Tests:** the connector-era Docker/integration suites are replaced by
-  `tests/e2e/rust-connector-swap.e2e.test.ts`, which drives EVM→Solana and Solana→EVM swaps
-  through a real Rust connector against anvil + `solana-test-validator` and redeems every
-  leg-B claim on chain; `tests/e2e/helpers` is the reference `rolling/2` taker.
+- **Each party verifies the other's claim itself** (`verifyInboundClaim`, `src/received-claim.ts`):
+  signature before any chain read, channel id re-derived from the participants (ADR 0059),
+  monotonic against a persisted inbound watermark seeded from chain, delta within the order's
+  `fill: {min, max}`, on-chain deposit cover. Chain reads are cached and budgeted per
+  counterparty (`maxChainReadsPerMin`).
+- **A swap is a stream of micro-claims.** δ is taker-chosen per fill within the order's bounds;
+  the maker prices the delta that arrived. One on-chain redeem per stream.
+- **Maker:** `startSwapNode()` now takes `relay: { readUrl, connectorUrl, payChain?, deposit?, … }`,
+  `order: { fill: {min, max}, ttlMs?, refreshMs? }`, `maxChainReadsPerMin?`; `chainProviders`
+  must cover every `from.chain` as well as every `to.chain` (leg A needs the maker's facts there).
+  `ilpAddress`, `fillAmount` and the `/swap/*` HTTP routes are gone; `GET /health` and `/admin/*`
+  stay, on `node:http` (`hono` is no longer a dependency). Health gains `nostrPubkey`, `legA`,
+  `relay`. Without `relay` the maker boots **offline** (engine, health, admin) and warns.
+- **Taker:** new — `SwapTaker` (`listOrders`, `accept`, `run`, `resume`, `redeem`),
+  `createTakerRuntime`, `JsonFileTakerStateStore`, `createRedeemer` (EVM `claimFromChannel`;
+  Solana claim/close/settle), and the CLI subcommands `toon-swap orders|take|resume|redeem|close|settle|sessions`.
+- **Relay plane:** `deriveNostrIdentity` (NIP-06 at the swap's account index), `wrapGiftWrap` /
+  `unwrapGiftWrap` (NIP-59 with NIP-40 expiration and a real `created_at` on the wrap),
+  `RelaySubscription` (NIP-01 reads with EOSE), `createRelayWriter` / `createRelayClient`
+  (paid writes via `@toon-protocol/client` 2.1.0, now a runtime dependency).
+- **State:** schema v3 adds `sessions`, `inbound`, `relayCursor`, `orders` and renames
+  `seenPacketIds` → `seenEventIds`; v1/v2 snapshots load.
+- **Config aliases so a committed fleet config boots:** `relayUrls[0]` → `relay.readUrl`,
+  `connectorUrl` → `relay.connectorUrl`, `fillAmount` → `order.fill.min`. Remaining 2.x keys are
+  accepted and ignored with a warning; `ilpAddress` joins them. New env:
+  `SWAP_RELAY_READ_URL`, `SWAP_RELAY_CONNECTOR_URL`, `SWAP_RELAY_DESTINATION`,
+  `SWAP_RELAY_PAY_CHAIN`, `SWAP_FILL_MIN` / `SWAP_FILL_MAX` (`SWAP_FILL_AMOUNT` → min).
+- **Chain side, unchanged from the previous 3.0.0 changesets:** leg B on the fleet's
+  `TokenNetwork` / Solana program channel opened by the maker on demand; the 96-byte
+  `TOON-BALPROOF-V2` Solana proof; PDA-resolved Solana channels; inventory raised from config.
+- **API removed:** `registerMakerRoutes`, `MAKER_RFQ_PATH`, `MAKER_FILL_PATH`, `MakerAnswer`,
+  `SwapRfqRequest`, `SwapFillRequest`, `parseSwapRfqRequest`, `parseSwapFillRequest`,
+  `readPaymentAttribution`, `SWAP_REFUSAL_STATUS`, `PAYMENT_HEADER_*`, `registerAdminRoutes`
+  (→ `handleAdminRequest`), `SwapNodeInstance.ilpAddress/rfqDestination/fillDestination`.
+- **Tests:** `tests/e2e/relay-swap.e2e.test.ts` drives EVM→Solana and Solana→EVM swaps through a
+  real relay, its Rust connector, anvil and `solana-test-validator`, redeems every leg-B claim on
+  chain, and proves taker resume and maker restart; `src/maker.test.ts` does the same over an
+  in-memory relay.
+- **Gasless redemption is not available yet** — the gas station excludes claims
+  (toon-protocol/gas-station#18).

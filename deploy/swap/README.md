@@ -3,10 +3,11 @@
 Runtime container for the rolling-swap **maker**. Built from `deploy/swap/Dockerfile`
 (repo-root build context); entrypoint is the `toon-swap` CLI (`packages/swap/src/cli.ts`).
 
-The maker is an **HTTP app behind a Rust connector's route termination** — it embeds no
-connector, opens no BTP listener and publishes no kind:10032. Read
-[`docs/rust-connector-migration.md`](../../docs/rust-connector-migration.md) first; this file is
-the config-surface reference.
+The maker is a **relay-mediated swap client** — it embeds no connector, sits behind none, opens
+no listener a taker could reach, and publishes no kind:10032. It publishes an **order** on the
+relay and answers gift-wrapped fills from its inbox, paying the relay's connector for every write.
+Read [`docs/relay-swap.md`](../../docs/relay-swap.md) first; this file is the config-surface
+reference.
 
 ```
 docker build -f deploy/swap/Dockerfile -t swap .
@@ -16,25 +17,27 @@ docker run --rm -p 127.0.0.1:8080:8080 \
   swap
 ```
 
-## The connector in front of it
+## The relay it trades on
 
-A Rust connector (the maker operator's own) terminates two routes at this container, and holds
-the `[settlement.*]` backends leg A is paid on. Its route price **is** the fill size:
+Two URLs: the relay's free NIP-01 read endpoint and the relay connector's client edge, where
+writes are paid (`g.toon.relay`, 1 µUSDC on the devnet). The maker opens (or adopts) its own
+channel with that connector on `relay.payChain` from its index-2 key — so that key needs native
+gas and the settlement token there.
 
-```toml
-[[routes]]
-prefix      = "<ilpAddress>.rfq"
-handler_url = "http://swap-node:8080/swap/rfq"
-price       = 0
-[[routes]]
-prefix      = "<ilpAddress>"
-handler_url = "http://swap-node:8080/swap/fill"
-price       = 1000000            # = the maker's fillAmount
+```json
+"relay": {
+  "readUrl": "wss://relay-ws.devnet.toonprotocol.dev",
+  "connectorUrl": "https://proxy.relay.devnet.toonprotocol.dev/ilp",
+  "payChain": "evm",
+  "deposit": "1000000"
+}
 ```
 
-`GET /health` prints both destinations. Never publish the app port to the internet: the
-connector is the only thing that should reach `/swap/*` (the fleet's box nginx already 404s
-`/admin`).
+Without `relay.connectorUrl` the maker boots **offline** — `/health` and `/admin` answer, no
+order is published, no fill is answered — and logs `swap.config.relay_offline`. A committed
+fleet config that predates this key therefore still boots (CLAUDE.md › "Config first, code
+second"); add the key to make it trade. `GET /health` reports `relay: { connected, eose, cursor }`,
+the published orders and the inbound watermarks.
 
 ## Config file (`/app/config/swap.config.json` by default)
 
@@ -43,23 +46,25 @@ consumes:
 
 | Field | Required | Notes |
 | --- | --- | --- |
-| `swapPairs` | yes | Non-empty array of `{ from, to, rate }` (`{ assetCode, assetScale, chain }` legs). `from.chain` must be `evm:*` or `solana:*` — what a Rust connector can be paid on. |
-| `chains` | yes | Families the maker derives leg-B keys for: `["evm", "solana", "mina"]` subset, covering every `to.chain`. |
+| `swapPairs` | yes | Non-empty array of `{ from, to, rate }` (`{ assetCode, assetScale, chain }` legs). `from.chain` must be `evm:*` or `solana:*`. |
+| `chains` | yes | Families the maker derives keys for: `["evm", "solana", "mina"]` subset, covering every `from.chain` **and** every `to.chain` (the maker is paid on `from.chain` and needs its address there). |
 | `channels` | no, when `channelDeposit` is set | Per `to.chain`: pre-opened leg-B channels `[{ channelId, cumulativeAmount, nonce, updatedAt }]` — the (maker, taker) `TokenNetwork` channel id on EVM, the (maker, taker, mint) PDA on Solana. Leave empty and set `chainProviders[].channelDeposit` to let the maker open and fund them on demand. |
 | `inventory` | yes | Per `to.chain`: leg-B capital in base units. A value **above** the persisted snapshot raises the pool on boot (new capital); below is left alone. |
 | `windowBudget` | no | Per `to.chain`: in-flight ceiling. |
-| `chainProviders` | yes | EVM: `{ chainType:"evm", chainId, rpcUrl, registryAddress, tokenAddress, tokenNetworkAddress, channelDeposit?, settlementTimeoutSeconds? }` — `tokenNetworkAddress` is the fleet's `TokenNetwork`, where leg-B channels live and the EIP-712 `verifyingContract` (`channelAddress`, the 2.x `RollingSwapChannel`, is accepted and ignored). Solana: `{ chainType:"solana", chainId, rpcUrl, programId, tokenMint, channelDeposit?, challengeDurationSeconds? }` — `programId` and `tokenMint` required (the claim message binds `programId`; PDAs derive from `tokenMint`). `channelDeposit` (base units) enables on-demand leg-B channels: at a taker's first paid fill the maker deposits this much of its own into the (maker, taker) channel from its index-2 key and tops it up whenever a claim would exceed what it holds. Mina: `{ chainType:"mina", chainId, graphqlUrl, zkAppAddress }`. |
-| `ilpAddress` | no | The fill route's ILP destination (default `g.toon.swap.<pubkey16>`); `<ilpAddress>.rfq` is the RFQ route. Quotes name both. |
-| `fillAmount` | no | The fill route's price, base units — informational, echoed in quotes. `X-TOON-Amount` is the truth. |
+| `chainProviders` | yes | One entry per chain any pair touches. EVM: `{ chainType:"evm", chainId, rpcUrl, registryAddress, tokenAddress, tokenNetworkAddress, channelDeposit?, settlementTimeoutSeconds? }` — `tokenNetworkAddress` is the fleet's `TokenNetwork`, where channels live and the EIP-712 `verifyingContract` (`channelAddress`, the 2.x `RollingSwapChannel`, is accepted and ignored). Solana: `{ chainType:"solana", chainId, rpcUrl, programId, tokenMint, channelDeposit?, challengeDurationSeconds? }` — `programId` and `tokenMint` required. `channelDeposit` (base units) enables on-demand leg-B channels: at a taker's first verified fill the maker deposits this much into the (maker, taker) channel from its index-2 key and tops it up whenever a claim would exceed what it holds. The `rpcUrl` is also what the maker verifies a taker's leg-A claim against. Mina: `{ chainType:"mina", chainId, graphqlUrl, zkAppAddress }` (leg B only). |
+| `relay` | for trading | `{ readUrl, connectorUrl, destination? ("g.toon.relay"), payChain? ("evm"\|"solana"), rpcUrl?, deposit?, channelStorePath?, transport? }`. Aliases from 2.x: `relayUrls[0]` → `readUrl`, top-level `connectorUrl` → `connectorUrl`. |
+| `order` | no | `{ fill: { min, max }, ttlMs (10 min), refreshMs (8 min) }` — the per-fill delta bounds a taker may pick (source base units; default 1–100 USDC). Alias: `fillAmount` → `fill.min`. |
+| `maxChainReadsPerMin` | no | Chain reads one taker may cause per minute while its claims are verified (default 30). |
+| `gasStation` | no | `{ destination? ("g.toon.relay.gas"), connectorUrl? }` — for `toon-swap redeem --via gas-station`; `connectorUrl` is the station's own connector, whose key the job is sealed to (the relay route is forwarded). |
 | `quote` | no | `{ ttlMs (60s), sessionTtlMs (1h), maxSessions (1024) }`. |
-| `appPort` | no | Port for `/swap/*`, `/health`, `/admin/*` (default 8080; `blsPort` is an alias). |
-| `statePath` | no | Snapshot file (inventory, channel watermarks, bindings) — write-ahead of every claim. |
+| `appPort` | no | Port for `/health` and `/admin/*` (default 8080; `blsPort` is an alias). |
+| `statePath` | no | Snapshot file (inventory, channel watermarks, bindings, sessions, inbound watermarks, relay cursor, orders) — write-ahead of every claim. The taker subcommands keep theirs at `<statePath>.taker.json`. |
 | `maxRateAge` | no | Staleness bound on the rate feed; needs `SWAP_RATE_URL`. |
 | `adminToken`, `reconcileIntervalMs`, `identityAutogen` | no | See below. |
-| `mnemonic` / `secretKey` | one | Identity — or `identityAutogen` / `SWAP_AUTOGEN_IDENTITY`. The BIP-44 index-2 keys derived from the mnemonic sign leg B and fund leg-B channels, and are the keys the maker's **connector** must settle with (`[settlement.*.key]`) so one channel per taker carries both legs. A mnemonic is required. |
+| `mnemonic` / `secretKey` | one | Identity — or `identityAutogen` / `SWAP_AUTOGEN_IDENTITY`. The BIP-44 index-2 keys derived from the mnemonic are the maker's addresses on both chains (they receive leg A, sign and fund leg B, and pay the relay's connector); the Nostr key at the same index signs orders and seals wraps. A mnemonic is required. |
 
 **Retired (2.x) keys are accepted and ignored with a `swap.config.retired_key_ignored` warning:**
-`btpServerPort`, `btpEndpoint`, `relayUrls`, `knownPeers`, `transport`, `connectorUrl`,
+`ilpAddress`, `btpServerPort`, `btpEndpoint`, `knownPeers`, `transport`,
 `parentPeerId`, `parentAuthToken`, `parentEvmAddress`, `nodeId`, `advertisedAsset`,
 `peerInfoIlpDestination`, `peerInfoPricePerByte`, `peerInfoTtlSeconds`,
 `peerInfoRefreshIntervalMs`, `rolling`, `rollingLegBSender`, `settlementPrivateKey`,
@@ -72,8 +77,9 @@ consumes:
 | `SWAP_MNEMONIC` | BIP-39 mnemonic (wins over the file). |
 | `SWAP_SECRET_KEY_HEX` | 64-char hex secret key, alternative to a mnemonic (the maker still needs a mnemonic to derive leg-B keys). |
 | `SWAP_APP_PORT` (alias `SWAP_BLS_PORT`) | Overrides `appPort`. |
-| `SWAP_ILP_ADDRESS` | Overrides `ilpAddress`. |
-| `SWAP_FILL_AMOUNT` | Overrides `fillAmount`. |
+| `SWAP_RELAY_READ_URL`, `SWAP_RELAY_CONNECTOR_URL` | Override `relay.readUrl` / `relay.connectorUrl`. |
+| `SWAP_RELAY_DESTINATION`, `SWAP_RELAY_PAY_CHAIN` | Override `relay.destination` / `relay.payChain`. |
+| `SWAP_FILL_MIN` (alias `SWAP_FILL_AMOUNT`), `SWAP_FILL_MAX` | Override `order.fill`. |
 | `SWAP_STATE_PATH` | Overrides `statePath`. |
 | `SWAP_MAX_RATE_AGE_MS`, `SWAP_MAX_RATE_AGE` | Maker staleness bound(s) — require `SWAP_RATE_URL`. |
 | `SWAP_RATE_URL`, `SWAP_RATE_TIMEOUT_MS` | HTTP JSON rate feed. |
@@ -89,8 +95,8 @@ Refusals show up in `docker logs` as one JSON object per line — `swap.fill.ref
 
 ## Ports
 
-- `appPort` (default `8080`): `/swap/rfq` + `/swap/fill` (the connector's handler URLs),
-  `/health`, `/admin/inventory*`. Loopback / private network only.
+- `appPort` (default `8080`): `/health`, `/admin/inventory*`. Loopback / private network only —
+  nothing a taker needs is here; takers talk to the relay.
 
 ## Inventory recycling & the operator surface (issue #138)
 

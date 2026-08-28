@@ -1,27 +1,28 @@
 /**
  * `startSwapNode()` — programmatic entrypoint for a TOON swap **maker**.
  *
- * The maker is an app behind a Rust connector's route termination
- * (`docs/rust-connector-migration.md`). This process:
+ * The maker is a relay-mediated swap client (`docs/relay-swap.md`): a plain
+ * toon client that publishes an order, reads its gift-wrapped inbox, verifies
+ * each taker's leg-A claim itself, and answers with its leg-B claim. This
+ * process:
  *
- *   - derives its identity and per-chain signing keys from one mnemonic
- *     (`deriveSwapNodeKeys`, BIP-44 account index 2 per D12-011),
+ *   - derives its Nostr identity and per-chain signing keys from one
+ *     mnemonic (`nostr-keys.ts`, `deriveSwapNodeKeys`; BIP-44 account 2),
  *   - holds the leg-B capital: `SwapInventory` (the rolling window),
  *     `SwapChannelState` (per-channel nonce/cumulative watermarks) and the
  *     `MultiChainClaimIssuer` that signs leg-B balance proofs,
- *   - serves the `rolling/2` wire on plain HTTP (`/swap/rfq`, `/swap/fill`)
- *     for the connector in front of it to deliver to, plus `GET /health`
- *     and the admin surface,
- *   - persists its state and reconciles it against the chains.
+ *   - runs the relay loop (`swap-maker.ts`) when `relay` is configured —
+ *     paid writes through the relay's connector, free reads over NIP-01,
+ *   - serves `GET /health` and the admin surface on `node:http`,
+ *   - persists its state (schema v3) and reconciles it against the chains.
  *
- * It does NOT embed, dial, or configure a connector, announce itself, or
- * send a single packet. Leg-A verification, channel resolution, and payment
- * attribution are the connector's (ADR 0040/0042); the maker reads three
- * headers and trusts the process it was deployed behind.
+ * It embeds no connector, terminates no route, and is reachable by nobody:
+ * a taker finds it by its order and talks to it through the relay.
  */
 
-import { serve, type ServerType } from '@hono/node-server';
-import { Hono, type Context } from 'hono';
+import { createServer } from 'node:http';
+import type { IncomingMessage, Server, ServerResponse } from 'node:http';
+import type { NostrEvent } from 'nostr-tools/pure';
 import { fromMnemonic, base58Encode } from '@toon-protocol/sdk';
 import type { NodeIdentity } from '@toon-protocol/sdk';
 import { VERSION } from '@toon-protocol/core';
@@ -40,7 +41,17 @@ import {
   SwapInventoryReconciler,
 } from './inventory-reconciler.js';
 import type { ReconcileResult } from './inventory-reconciler.js';
-import { registerAdminRoutes } from './admin-surface.js';
+import { handleAdminRequest, isAdminPath } from './admin-surface.js';
+import type { AdminRequest } from './admin-surface.js';
+import { deriveNostrIdentity } from './nostr-keys.js';
+import type { NostrIdentity } from './nostr-keys.js';
+import { createRpcChannelSlotReader } from './received-claim.js';
+import type { ChannelFacts, ChannelSlotReader } from './received-claim.js';
+import { RelaySubscription } from './relay-subscription.js';
+import { createRelayClient, createRelayWriter } from './relay-writer.js';
+import type { RelayWriter } from './relay-writer.js';
+import { SwapMakerLoop } from './swap-maker.js';
+import type { RelayReader, SwapMakerLoopHealth } from './swap-maker.js';
 import {
   MinaPaymentChannelSigner,
   SolanaPaymentChannelSigner,
@@ -51,19 +62,24 @@ import { MultiChainClaimIssuer } from './claim-issuer.js';
 import { SwapNodeStartError } from './errors.js';
 import {
   JsonFileSwapStateStore,
+  PersistentSeenPacketIds,
   SwapStatePersister,
 } from './state-store.js';
 import type { SwapStateStore, PersistedSwapState } from './state-store.js';
-import { RateFreshnessGuard, validateMaxRateAgeConfig } from './rate-staleness.js';
+import {
+  RateFreshnessGuard,
+  validateMaxRateAgeConfig,
+} from './rate-staleness.js';
 import type { MaxRateAgeConfig, SwapRateProvider } from './rate-staleness.js';
-import { MakerEngine } from './maker-engine.js';
-import { registerMakerRoutes } from './maker-app.js';
+import { DEFAULT_SESSION_TTL_MS, MakerEngine } from './maker-engine.js';
+import type { MakerSession } from './maker-engine.js';
+import { pairKey } from './rate-staleness.js';
 import { deriveSolanaChannelPda } from './solana-pda.js';
 import { createSolanaLegBChannelProvisioner } from './solana-leg-b-channel.js';
 import type { SolanaLegBChannelProvisioner } from './solana-leg-b-channel.js';
 import { createEvmLegBChannelProvisioner } from './evm-leg-b-channel.js';
 import type { EvmLegBChannelProvisioner } from './evm-leg-b-channel.js';
-import type { SwapLegBTerms } from './wire.js';
+import type { SwapLegTerms } from './wire.js';
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -171,16 +187,24 @@ export interface SwapNodeConfig {
     maxSessions?: number;
   };
 
-  // --- The wire in front of us ---
+  // --- The relay ---
   /**
-   * The ILP address the connector terminates at this maker's `/swap/fill`.
-   * `<ilpAddress>.rfq` is the free RFQ route. Default
-   * `g.toon.swap.<pubkey16>`; every quote names it.
+   * The relay this maker publishes to and reads from. Without it the maker
+   * boots "offline": engine, health and admin work, nothing is published or
+   * read — a unit-test and dry-run shape, warned about loudly.
    */
-  ilpAddress?: string;
-  /** The fill route's price (one fill, source base units), if known. Informational. */
-  fillAmount?: bigint;
-  /** Port for `/swap/*`, `/health` and `/admin/*` (default 8080; 0 = ephemeral). */
+  relay?: SwapNodeRelayConfig;
+  /** Bounds on one fill's delta (source base units) and how orders are refreshed. */
+  order?: {
+    fill?: { min: bigint; max: bigint };
+    ttlMs?: number;
+    refreshMs?: number;
+  };
+  /** Bound on chain reads one taker can cause per minute (default 30). */
+  maxChainReadsPerMin?: number;
+  /** The gas station a taker redeems through (`toon-swap redeem --via gas-station`). */
+  gasStation?: { destination?: string; connectorUrl?: string };
+  /** Port for `/health` and `/admin/*` (default 8080; 0 = ephemeral). */
   appPort?: number;
   /** @deprecated alias of `appPort`. */
   blsPort?: number;
@@ -196,19 +220,58 @@ export interface SwapNodeConfig {
     onChannelStateBuilt?: (channelState: SwapChannelState) => void;
     onClaimIssuerBuilt?: (claimIssuer: MultiChainClaimIssuer) => void;
     onEngineBuilt?: (engine: MakerEngine) => void;
+    /** Inject the relay transport (an in-memory relay) instead of dialing `relay`. */
+    relayTransport?: (loopHandler: (event: NostrEvent) => void) => {
+      reader: RelayReader;
+      writer: RelayWriter;
+      close?: () => Promise<void>;
+    };
+    /** Inject the chain reader the inbound verifier uses. */
+    slotReader?: ChannelSlotReader;
   };
 }
 
+export interface SwapNodeRelayConfig {
+  /** Free NIP-01 reads, e.g. `wss://relay-ws.devnet.toonprotocol.dev`. */
+  readUrl: string;
+  /** The relay connector's client edge, e.g. `https://proxy.relay.devnet.toonprotocol.dev/ilp`. */
+  connectorUrl: string;
+  /** The route that terminates at the relay's `POST /write` (default `g.toon.relay`). */
+  destination?: string;
+  /** Which chain this maker pays relay writes on (default: the first of `chains` that is evm/solana). */
+  payChain?: 'evm' | 'solana';
+  /** RPC for the pay chain, if not the one in `chainProviders`. */
+  rpcUrl?: string;
+  /** Deposit for the channel with the relay's connector, base units. */
+  deposit?: bigint;
+  /** Path of the client's channel-watermark file (default beside `statePath`). */
+  channelStorePath?: string;
+  transport?: 'http' | 'btp';
+}
+
+export const DEFAULT_RELAY_DESTINATION = 'g.toon.relay';
+
+/** `Omit` that distributes over the `ChannelFacts` union. */
+type DistributiveOmit<T, K extends PropertyKey> = T extends unknown
+  ? Omit<T, K>
+  : never;
+type LegAFacts = DistributiveOmit<ChannelFacts, 'counterparty'>;
+export const DEFAULT_ORDER_FILL = {
+  min: 1_000_000n,
+  max: 100_000_000n,
+} as const;
+
 export interface SwapNodeInstance {
   readonly identity: NodeIdentity;
+  /** The Nostr identity orders are signed with and wraps are addressed to. */
+  readonly nostr: NostrIdentity;
   readonly appPort: number;
   /** @deprecated alias of `appPort`. */
   readonly blsPort: number;
   readonly swapNodeKeys: SwapNodeKeys;
-  readonly ilpAddress: string;
-  readonly rfqDestination: string;
-  readonly fillDestination: string;
   readonly engine: MakerEngine;
+  /** The relay loop, when `relay` (or a test transport) is configured. */
+  readonly maker: SwapMakerLoop | null;
   stop(): Promise<void>;
   health(): SwapNodeHealthResponse;
   recordSettlement(event: SettlementEvent): bigint;
@@ -226,9 +289,8 @@ export interface SwapNodeHealthResponse {
   status: 'ok' | 'starting' | 'stopping' | 'stopped';
   version: string;
   nodePubkey: string;
-  ilpAddress: string;
-  rfqDestination: string;
-  fillDestination: string;
+  /** The Nostr pubkey takers address wraps to. */
+  nostrPubkey: string;
   swapPairsCount: number;
   chains: readonly SwapNodeChainKind[];
   uptimeSec: number;
@@ -236,8 +298,10 @@ export interface SwapNodeHealthResponse {
   swapPairs: SwapPair[];
   inventoryAvailable: Record<string, string>;
   inventoryWindow: Record<string, SwapNodeHealthWindowEntry>;
-  legB: Record<string, SwapLegBTerms>;
+  legA: Record<string, SwapLegTerms>;
+  legB: Record<string, SwapLegTerms>;
   sessions: number;
+  relay: SwapMakerLoopHealth | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -360,7 +424,13 @@ const SWAP_REQUIRED_PROVIDER_FIELDS: Record<
   SwapNodeChainProvider['chainType'],
   readonly string[]
 > = {
-  evm: ['chainId', 'rpcUrl', 'registryAddress', 'tokenAddress', 'tokenNetworkAddress'],
+  evm: [
+    'chainId',
+    'rpcUrl',
+    'registryAddress',
+    'tokenAddress',
+    'tokenNetworkAddress',
+  ],
   solana: ['chainId', 'rpcUrl', 'programId', 'tokenMint'],
   mina: ['chainId', 'graphqlUrl', 'zkAppAddress'],
 };
@@ -380,7 +450,10 @@ function validateChainProviderEntry(p: unknown, i: number): void {
       `SwapNodeConfig.chainProviders[${i}].chainType MUST be one of 'evm' | 'solana' | 'mina' (got ${JSON.stringify(chainType)})`
     );
   }
-  if ((chainType === 'solana' || chainType === 'evm') && rec['channelDeposit'] !== undefined) {
+  if (
+    (chainType === 'solana' || chainType === 'evm') &&
+    rec['channelDeposit'] !== undefined
+  ) {
     const v = rec['channelDeposit'];
     const ok =
       (typeof v === 'bigint' && v > 0n) ||
@@ -403,8 +476,6 @@ function validateChainProviderEntry(p: unknown, i: number): void {
     }
   }
 }
-
-const ILP_ADDRESS_RE = /^[a-zA-Z0-9._~-]+$/;
 
 export function validateConfig(config: SwapNodeConfig): void {
   const hasMnemonic = config.mnemonic !== undefined;
@@ -451,20 +522,29 @@ export function validateConfig(config: SwapNodeConfig): void {
       'SwapNodeConfig.swapPairs MUST be a non-empty array'
     );
   }
-  if (config.ilpAddress !== undefined && !ILP_ADDRESS_RE.test(config.ilpAddress)) {
-    throw new SwapNodeStartError(
-      'INVALID_CONFIG',
-      `SwapNodeConfig.ilpAddress "${config.ilpAddress}" is not a valid ILP address`
-    );
+  if (config.order?.fill !== undefined) {
+    const { min, max } = config.order.fill;
+    if (
+      typeof min !== 'bigint' ||
+      typeof max !== 'bigint' ||
+      min <= 0n ||
+      max < min
+    ) {
+      throw new SwapNodeStartError(
+        'INVALID_CONFIG',
+        'SwapNodeConfig.order.fill MUST satisfy 0 < min <= max (bigints, source base units)'
+      );
+    }
   }
-  if (
-    config.fillAmount !== undefined &&
-    (typeof config.fillAmount !== 'bigint' || config.fillAmount <= 0n)
-  ) {
-    throw new SwapNodeStartError(
-      'INVALID_CONFIG',
-      'SwapNodeConfig.fillAmount MUST be a positive bigint when set'
-    );
+  if (config.relay !== undefined) {
+    for (const k of ['readUrl', 'connectorUrl'] as const) {
+      if (typeof config.relay[k] !== 'string' || config.relay[k].length === 0) {
+        throw new SwapNodeStartError(
+          'INVALID_CONFIG',
+          `SwapNodeConfig.relay.${k} MUST be a non-empty string`
+        );
+      }
+    }
   }
   for (const port of [config.appPort, config.blsPort]) {
     if (port === undefined) continue;
@@ -492,7 +572,13 @@ export function validateConfig(config: SwapNodeConfig): void {
     if (fromFam !== 'evm' && fromFam !== 'solana') {
       throw new SwapNodeStartError(
         'INVALID_CONFIG',
-        `SwapNodeConfig: pair.from.chain=${pair.from.chain} cannot be paid at a Rust connector (leg A is evm or solana only)`
+        `SwapNodeConfig: pair.from.chain=${pair.from.chain} cannot carry leg A (evm or solana only)`
+      );
+    }
+    if (!config.chains.includes(fromFam)) {
+      throw new SwapNodeStartError(
+        'INVALID_CONFIG',
+        `SwapNodeConfig.chains missing family "${fromFam}" required by pair.from.chain=${pair.from.chain}`
       );
     }
   }
@@ -513,11 +599,11 @@ export function validateConfig(config: SwapNodeConfig): void {
     const chanList = config.channels[chain];
     const onDemand =
       (fam === 'evm' &&
-        findChainProvider(config.chainProviders, 'evm', chain)?.channelDeposit !==
-          undefined) ||
+        findChainProvider(config.chainProviders, 'evm', chain)
+          ?.channelDeposit !== undefined) ||
       (fam === 'solana' &&
-        findChainProvider(config.chainProviders, 'solana', chain)?.channelDeposit !==
-          undefined);
+        findChainProvider(config.chainProviders, 'solana', chain)
+          ?.channelDeposit !== undefined);
     if (!Array.isArray(chanList) || (chanList.length === 0 && !onDemand)) {
       throw new SwapNodeStartError(
         'INVALID_CONFIG',
@@ -632,19 +718,15 @@ export async function startSwapNode(
   }
 
   const identity: NodeIdentity = fromMnemonic(config.mnemonic);
+  const nostr = deriveNostrIdentity({ mnemonic: config.mnemonic });
   const swapNodeKeys: SwapNodeKeys = await deriveSwapNodeKeys({
     mnemonic: config.mnemonic,
     chains: config.chains,
   });
 
-  const ilpAddress =
-    config.ilpAddress ?? `g.toon.swap.${identity.pubkey.slice(0, 16)}`;
-  const rfqDestination = `${ilpAddress}.rfq`;
-  const fillDestination = ilpAddress;
-
-  // --- per-chain leg-B signers + the terms every quote/advance advertises ---
+  // --- per-chain leg-B signers + the terms every order/quote/advance advertises ---
   const signers: Record<string, PaymentChannelSigner> = {};
-  const legBTerms: Record<string, SwapLegBTerms> = {};
+  const legBTerms: Record<string, SwapLegTerms> = {};
   const solanaLegB: Record<string, { programId: string; mint: string }> = {};
   const solanaProvisioners: Record<string, SolanaLegBChannelProvisioner> = {};
   const evmProvisioners: Record<string, EvmLegBChannelProvisioner> = {};
@@ -693,9 +775,8 @@ export async function startSwapNode(
       const provider = requireSolanaChainProvider(config.chainProviders, chain);
       signers[chain] = new SolanaPaymentChannelSigner({
         chain,
-        privateKey: (
-          swapNodeKeys.solana as NonNullable<SwapNodeKeys['solana']>
-        ).privateKey,
+        privateKey: (swapNodeKeys.solana as NonNullable<SwapNodeKeys['solana']>)
+          .privateKey,
         programId: provider.programId,
       });
       legBTerms[chain] = {
@@ -731,11 +812,71 @@ export async function startSwapNode(
         publicKey: keys.publicKey,
       });
       signers[chain] = sharedMinaSigner;
-      const minaProvider = findChainProvider(config.chainProviders, 'mina', chain);
+      const minaProvider = findChainProvider(
+        config.chainProviders,
+        'mina',
+        chain
+      );
       legBTerms[chain] = {
         chain,
         swapSignerAddress,
         ...(minaProvider?.tokenId && { token: minaProvider.tokenId }),
+      };
+    }
+  }
+
+  // --- per-source-chain leg-A terms: where a taker pays this maker, and the
+  //     facts the maker verifies a taker's claim against ---
+  const legATerms: Record<string, SwapLegTerms> = {};
+  const legAFacts: Record<string, LegAFacts> = {};
+  const rpcUrls: Record<string, string> = {};
+  for (const p of config.chainProviders ?? []) {
+    if (p.chainType === 'evm' || p.chainType === 'solana')
+      rpcUrls[p.chainId] = p.rpcUrl;
+  }
+  for (const chain of new Set(config.swapPairs.map((p) => p.from.chain))) {
+    if (chain.startsWith('evm:')) {
+      const provider = requireEvmChainProvider(config.chainProviders, chain);
+      const evmKeys = swapNodeKeys.evm;
+      if (!evmKeys)
+        throw new SwapNodeStartError(
+          'MISSING_KEY',
+          `No EVM key derived but pair pays on ${chain}`
+        );
+      legATerms[chain] = {
+        chain,
+        swapSignerAddress: evmKeys.address.toLowerCase(),
+        verifyingContract: provider.tokenNetworkAddress,
+        token: provider.tokenAddress,
+      };
+      legAFacts[chain] = {
+        family: 'evm',
+        chain,
+        chainId: parseEvmChainId(chain),
+        tokenNetwork: provider.tokenNetworkAddress,
+        self: evmKeys.address,
+      };
+    } else {
+      const provider = requireSolanaChainProvider(config.chainProviders, chain);
+      const solKeys = swapNodeKeys.solana;
+      if (!solKeys)
+        throw new SwapNodeStartError(
+          'MISSING_KEY',
+          `No Solana key derived but pair pays on ${chain}`
+        );
+      const self = base58Encode(solKeys.publicKey);
+      legATerms[chain] = {
+        chain,
+        swapSignerAddress: self,
+        programId: provider.programId,
+        token: provider.tokenMint,
+      };
+      legAFacts[chain] = {
+        family: 'solana',
+        chain,
+        programId: provider.programId,
+        mint: provider.tokenMint,
+        self,
       };
     }
   }
@@ -762,6 +903,9 @@ export async function startSwapNode(
         inventoryKeys: Object.keys(persistedState.inventory).length,
         channelKeys: Object.keys(persistedState.channels).length,
         bindings: Object.keys(persistedState.bindings).length,
+        sessions: Object.keys(persistedState.sessions).length,
+        inbound: Object.keys(persistedState.inbound).length,
+        relayCursor: persistedState.relayCursor,
       });
     }
   }
@@ -853,9 +997,10 @@ export async function startSwapNode(
   for (const pair of config.swapPairs) {
     const entries = config.channels[pair.to.chain] ?? [];
     for (const entry of entries) {
-      channelInit[`${pair.to.assetCode}:${pair.to.chain}:${entry.channelId}`] = {
-        ...entry,
-      };
+      channelInit[`${pair.to.assetCode}:${pair.to.chain}:${entry.channelId}`] =
+        {
+          ...entry,
+        };
     }
   }
   if (persistedState) {
@@ -875,7 +1020,8 @@ export async function startSwapNode(
           chainId: p.chainId,
           rpcUrl: p.rpcUrl,
           tokenNetworkAddress: p.tokenNetworkAddress,
-          makerAddress: (swapNodeKeys.evm as NonNullable<SwapNodeKeys['evm']>).address,
+          makerAddress: (swapNodeKeys.evm as NonNullable<SwapNodeKeys['evm']>)
+            .address,
         }))
     : [];
   const solanaChannelReaderProviders: SolanaChannelReaderProvider[] = [];
@@ -903,9 +1049,31 @@ export async function startSwapNode(
   });
   config.__testHooks?.onChannelStateBuilt?.(channelState);
 
+  // The relay loop and the engine own the v3 extras; the persister asks
+  // them at snapshot time (late-bound: both are built below).
+  const seen = new PersistentSeenPacketIds(persistedState?.seenEventIds);
+  const refs: { engine?: MakerEngine; loop?: SwapMakerLoop } = {};
   const persister = stateStore
-    ? new SwapStatePersister({ store: stateStore, inventory, channelState })
+    ? new SwapStatePersister({
+        store: stateStore,
+        inventory,
+        channelState,
+        seenPacketIds: seen,
+        extras: () => ({
+          ...(refs.loop?.extras() ?? {
+            inbound: persistedState?.inbound ?? {},
+            relayCursor: persistedState?.relayCursor ?? 0,
+            orders: persistedState?.orders ?? {},
+          }),
+          sessions:
+            refs.engine?.exportSessions() ?? persistedState?.sessions ?? {},
+        }),
+      })
     : undefined;
+  const persist = (): void => {
+    if (persister) persister.persist();
+  };
+  seen.setOnMutate(persist);
   if (persister) {
     try {
       persister.persist();
@@ -922,7 +1090,7 @@ export async function startSwapNode(
     inventory,
     channelState,
     ...(channelOnChainReader && { reader: channelOnChainReader }),
-    ...(persister && { persist: () => persister.persist() }),
+    ...(persister && { persist }),
     logger,
     ...(config.reconcileIntervalMs !== undefined && {
       intervalMs: config.reconcileIntervalMs,
@@ -934,7 +1102,7 @@ export async function startSwapNode(
     signers,
     channelState,
     signerAddresses,
-    ...(persister && { persistState: () => persister.persist() }),
+    ...(persister && { persistState: persist }),
     logger: {
       debug: logger.debug,
       info: logger.info,
@@ -955,19 +1123,23 @@ export async function startSwapNode(
   const makerSolanaPubkey = swapNodeKeys.solana
     ? base58Encode(swapNodeKeys.solana.publicKey)
     : undefined;
+  const fill = config.order?.fill ?? { ...DEFAULT_ORDER_FILL };
   const engine = new MakerEngine({
     swapPairs: config.swapPairs,
     claimIssuer,
     inventory,
+    legATerms: (chain) => {
+      const terms = legATerms[chain];
+      if (!terms) throw new Error(`no leg-A terms for ${chain}`);
+      return terms;
+    },
     legBTerms: (chain) => {
       const terms = legBTerms[chain];
       if (!terms) throw new Error(`no leg-B terms for ${chain}`);
       return terms;
     },
-    fill: {
-      destination: fillDestination,
-      ...(config.fillAmount !== undefined && { amount: config.fillAmount }),
-    },
+    fill,
+    orderIdFor: (pair) => pairKey(pair),
     ...(config.rateProvider && { rateProvider: config.rateProvider }),
     ...(stalenessGuard && { stalenessGuard }),
     preferredChannelFor: (chain, recipient) => {
@@ -1001,7 +1173,10 @@ export async function startSwapNode(
           channelId: string,
           seed: { nonce: bigint; cumulativeAmount: bigint }
         ): void => {
-          if (channelState.snapshot().channels[`${asset}:${chain}:${channelId}`]) return;
+          if (
+            channelState.snapshot().channels[`${asset}:${chain}:${channelId}`]
+          )
+            return;
           // A channel this maker has already been redeemed on (state lost, or
           // opened by the taker when it paid leg A) starts from its on-chain
           // watermark, never from zero: a claim below it is `InvalidNonce`.
@@ -1012,13 +1187,16 @@ export async function startSwapNode(
             nonce: seed.nonce,
             cumulativeAmount: seed.cumulativeAmount,
           });
-          if (persister) persister.persist();
+          persist();
         };
 
         const sol = solanaProvisioners[chain];
         if (sol) {
           const channelId = sol.channelFor(recipient);
-          const ensured = await sol.ensure(recipient, outstanding(channelId) + targetAmount);
+          const ensured = await sol.ensure(
+            recipient,
+            outstanding(channelId) + targetAmount
+          );
           const acct = await sol.read(recipient);
           const makerIsA = acct?.participantA === sol.makerPubkey;
           provisionKnown(ensured.channelId, {
@@ -1034,7 +1212,10 @@ export async function startSwapNode(
         const evm = evmProvisioners[chain];
         if (evm) {
           const channelId = await evm.channelFor(recipient);
-          const ensured = await evm.ensure(recipient, outstanding(channelId) + targetAmount);
+          const ensured = await evm.ensure(
+            recipient,
+            outstanding(channelId) + targetAmount
+          );
           provisionKnown(ensured.channelId, {
             nonce: ensured.nonce,
             cumulativeAmount: ensured.transferredAmount,
@@ -1044,19 +1225,130 @@ export async function startSwapNode(
         return undefined;
       },
     }),
-    ...(config.quote?.ttlMs !== undefined && { quoteTtlMs: config.quote.ttlMs }),
+    ...(config.quote?.ttlMs !== undefined && {
+      quoteTtlMs: config.quote.ttlMs,
+    }),
     ...(config.quote?.sessionTtlMs !== undefined && {
       sessionTtlMs: config.quote.sessionTtlMs,
     }),
     ...(config.quote?.maxSessions !== undefined && {
       maxSessions: config.quote.maxSessions,
     }),
+    ...(persistedState && { sessions: Object.values(persistedState.sessions) }),
     receiptSecretKey: identity.secretKey,
     logger,
   });
+  refs.engine = engine;
   config.__testHooks?.onEngineBuilt?.(engine);
 
-  // --- HTTP surface ---
+  // --- the relay loop ---
+  const sessionTtlMs = config.quote?.sessionTtlMs ?? DEFAULT_SESSION_TTL_MS;
+  let maker: SwapMakerLoop | null = null;
+  let relayClose: (() => Promise<void>) | undefined;
+  const slotReader: ChannelSlotReader =
+    config.__testHooks?.slotReader ?? createRpcChannelSlotReader({ rpcUrls });
+  const factsFor = (session: Readonly<MakerSession>): ChannelFacts => {
+    const base = legAFacts[session.pair.from.chain];
+    if (!base) throw new Error(`no leg-A facts for ${session.pair.from.chain}`);
+    return { ...base, counterparty: session.payerAddress } as ChannelFacts;
+  };
+  const buildLoop = (reader: RelayReader, writer: RelayWriter): SwapMakerLoop =>
+    new SwapMakerLoop({
+      engine,
+      nostr,
+      reader,
+      writer,
+      slotReader,
+      factsFor,
+      legATerms: (chain) => legATerms[chain] as SwapLegTerms,
+      legBTerms: (chain) => legBTerms[chain] as SwapLegTerms,
+      swapPairs: config.swapPairs,
+      seen,
+      persist,
+      ...(persistedState && {
+        initial: {
+          inbound: persistedState.inbound,
+          relayCursor: persistedState.relayCursor,
+          orders: persistedState.orders,
+        },
+      }),
+      sessionTtlMs,
+      ...(config.order?.ttlMs !== undefined && {
+        orderTtlMs: config.order.ttlMs,
+      }),
+      ...(config.order?.refreshMs !== undefined && {
+        orderRefreshMs: config.order.refreshMs,
+      }),
+      ...(config.maxChainReadsPerMin !== undefined && {
+        maxChainReadsPerMin: config.maxChainReadsPerMin,
+      }),
+      logger,
+    });
+
+  if (config.__testHooks?.relayTransport) {
+    // A test's in-memory relay: events are pushed straight at the loop.
+    let handler: (event: NostrEvent) => void = () => undefined;
+    const transport = config.__testHooks.relayTransport((event) =>
+      handler(event)
+    );
+    maker = buildLoop(transport.reader, transport.writer);
+    const loop = maker;
+    handler = (event) => void loop.handleWrap(event);
+    relayClose = transport.close;
+  } else if (config.relay) {
+    const relay = config.relay;
+    const payChain =
+      relay.payChain ??
+      config.chains.find(
+        (c): c is 'evm' | 'solana' => c === 'evm' || c === 'solana'
+      ) ??
+      'evm';
+    const payRpc =
+      relay.rpcUrl ??
+      (config.chainProviders ?? []).find((p) => p.chainType === payChain)?.[
+        'rpcUrl' as never
+      ];
+    const client = await createRelayClient({
+      connectorUrl: relay.connectorUrl,
+      chain: payChain,
+      ...(payChain === 'evm' &&
+        swapNodeKeys.evm && { evmPrivateKey: swapNodeKeys.evm.privateKey }),
+      ...(payChain === 'solana' &&
+        swapNodeKeys.solana && {
+          solanaSecretKey: swapNodeKeys.solana.privateKey,
+        }),
+      ...(payRpc !== undefined && { rpcUrl: payRpc as string }),
+      ...(relay.channelStorePath !== undefined && {
+        channelStore: relay.channelStorePath,
+      }),
+      ...(relay.deposit !== undefined && { deposit: relay.deposit }),
+      ...(relay.transport !== undefined && { transport: relay.transport }),
+      autoOpenChannel: true,
+      logger,
+    });
+    const writer = createRelayWriter({
+      sender: client.sender,
+      destination: relay.destination ?? DEFAULT_RELAY_DESTINATION,
+      logger,
+    });
+    const pending: { loop?: SwapMakerLoop } = {};
+    const subscription = new RelaySubscription({
+      relayUrl: relay.readUrl,
+      onEvent: (_subId, event) => void pending.loop?.handleWrap(event),
+      logger: (msg) => logger.debug?.('swap.relay', { msg }),
+    });
+    pending.loop = buildLoop(subscription, writer);
+    maker = pending.loop;
+    relayClose = client.close;
+  } else {
+    logger.warn?.('swap.relay.offline', {
+      reason:
+        'no `relay` configured: the maker publishes no order and reads no inbox — engine, health and admin only',
+    });
+  }
+  if (maker) refs.loop = maker;
+
+  // --- HTTP surface: /health + /admin/* on node:http ---
   const getHealth = (): SwapNodeHealthResponse => {
     const snapshot = inventory.snapshot();
     const inv: Record<string, string> = {};
@@ -1091,9 +1383,7 @@ export async function startSwapNode(
       status,
       version: VERSION,
       nodePubkey: identity.pubkey,
-      ilpAddress,
-      rfqDestination,
-      fillDestination,
+      nostrPubkey: nostr.pubkey,
       swapPairsCount: config.swapPairs.length,
       chains: config.chains,
       uptimeSec: Math.max(0, Math.floor((Date.now() - startedAt) / 1000)),
@@ -1101,30 +1391,70 @@ export async function startSwapNode(
       swapPairs: [...config.swapPairs],
       inventoryAvailable: invAvailable,
       inventoryWindow,
+      legA: { ...legATerms },
       legB: { ...legBTerms },
       sessions: engine.sessionCount,
+      relay: maker?.health() ?? null,
     };
   };
 
-  // `strict: false`: the connector resolves an envelope target of `/` to the
-  // route's own handler path, which an operator may write with or without a
-  // trailing slash — both must reach the same handler.
-  const app = new Hono({ strict: false });
-  app.get('/health', (c: Context) => c.json(getHealth()));
-  registerMakerRoutes(app, { engine, logger });
-  registerAdminRoutes(app, {
+  const adminDeps = {
     inventory,
     reconciler,
     ...(config.adminToken !== undefined && { adminToken: config.adminToken }),
-  });
+  };
+  const server: Server = createServer(
+    (req: IncomingMessage, res: ServerResponse) => {
+      void (async () => {
+        const path = (req.url ?? '/').split('?')[0] ?? '/';
+        const send = (statusCode: number, body: unknown): void => {
+          res.writeHead(statusCode, { 'content-type': 'application/json' });
+          res.end(JSON.stringify(body));
+        };
+        if (path === '/health' && req.method === 'GET') {
+          send(200, getHealth());
+          return;
+        }
+        if (isAdminPath(path)) {
+          const request: AdminRequest = {
+            method: req.method ?? 'GET',
+            path,
+            header: (name) => {
+              const v = req.headers[name.toLowerCase()];
+              return Array.isArray(v) ? v[0] : v;
+            },
+            json: async () => {
+              const chunks: Buffer[] = [];
+              for await (const chunk of req)
+                chunks.push(Buffer.from(chunk as Uint8Array));
+              return JSON.parse(
+                Buffer.concat(chunks).toString('utf8')
+              ) as unknown;
+            },
+          };
+          try {
+            const answer = await handleAdminRequest(request, adminDeps);
+            if (answer) {
+              send(answer.status, answer.body);
+              return;
+            }
+            send(405, { error: 'method_not_allowed' });
+          } catch (err) {
+            logger.error?.('swap.admin.failed', { path, err: errSummary(err) });
+            send(500, {
+              error: 'internal_error',
+              reason: errSummary(err).message,
+            });
+          }
+          return;
+        }
+        send(404, { error: 'not_found' });
+      })();
+    }
+  );
   const requestedPort = config.appPort ?? config.blsPort ?? 8080;
-  const server: ServerType = serve({ fetch: app.fetch, port: requestedPort });
-  const addrInfo = (
-    server as unknown as { address?: () => { port: number } | null }
-  ).address?.();
-  const appPort = addrInfo?.port ?? requestedPort;
   await new Promise<void>((resolve, reject) => {
-    const onError = (err: Error): void => {
+    server.once('error', (err: Error) => {
       reject(
         new SwapNodeStartError(
           'INVALID_CONFIG',
@@ -1132,44 +1462,54 @@ export async function startSwapNode(
           { cause: err }
         )
       );
-    };
-    server.once('error', onError);
-    server.once('listening', () => {
-      server.off('error', onError);
-      resolve();
     });
-    if ((server as unknown as { listening?: boolean }).listening) {
-      server.off('error', onError);
-      resolve();
-    }
+    server.listen(requestedPort, () => resolve());
   });
+  const addr = server.address();
+  const appPort = typeof addr === 'object' && addr ? addr.port : requestedPort;
+
+  if (maker) {
+    try {
+      await maker.start();
+    } catch (err) {
+      logger.error?.('swap.relay.start_failed', { err: errSummary(err) });
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+      throw new SwapNodeStartError(
+        'INVALID_CONFIG',
+        `the relay loop could not start: ${errSummary(err).message}`,
+        { cause: err }
+      );
+    }
+  }
 
   logger.info?.('swap.started', {
-    ilpAddress,
-    rfqDestination,
-    fillDestination,
+    nostrPubkey: nostr.pubkey,
     appPort,
+    relay: config.relay
+      ? {
+          readUrl: config.relay.readUrl,
+          connectorUrl: config.relay.connectorUrl,
+        }
+      : null,
     pairs: config.swapPairs.map(
-      (p) => `${p.from.assetCode}:${p.from.chain}→${p.to.assetCode}:${p.to.chain}`
+      (p) =>
+        `${p.from.assetCode}:${p.from.chain}→${p.to.assetCode}:${p.to.chain}`
     ),
+    fill: { min: fill.min.toString(), max: fill.max.toString() },
+    legA: legATerms,
     legB: legBTerms,
-    routes: {
-      rfq: `[[routes]] prefix = "${rfqDestination}" handler_url = "http://<this host>:${appPort}/swap/rfq" price = 0`,
-      fill: `[[routes]] prefix = "${fillDestination}" handler_url = "http://<this host>:${appPort}/swap/fill" price = ${config.fillAmount?.toString() ?? '<fill size>'}`,
-    },
   });
 
   status = 'ok';
   let stopped = false;
   const instance: SwapNodeInstance = {
     identity,
+    nostr,
     appPort,
     blsPort: appPort,
     swapNodeKeys,
-    ilpAddress,
-    rfqDestination,
-    fillDestination,
     engine,
+    maker,
     reconcileInventory: () => reconciler.reconcile(),
     recordSettlement: (event: SettlementEvent): bigint => {
       const { channels: liveChannels } = channelState.snapshot();
@@ -1208,14 +1548,12 @@ export async function startSwapNode(
         channelId: event.channelId,
         cumulativeAmount: BigInt(event.cumulativeAmount),
       });
-      if (persister) {
-        try {
-          persister.persist();
-        } catch (err) {
-          logger.error?.('swap.recordSettlement.persist_failed', {
-            err: errSummary(err),
-          });
-        }
+      try {
+        persist();
+      } catch (err) {
+        logger.error?.('swap.recordSettlement.persist_failed', {
+          err: errSummary(err),
+        });
       }
       logger.info?.('swap.recordSettlement.ok', {
         channelId: event.channelId,
@@ -1233,12 +1571,32 @@ export async function startSwapNode(
       stopped = true;
       status = 'stopping';
       reconciler.stop();
+      if (maker) {
+        try {
+          await maker.stop();
+        } catch (err) {
+          logger.warn?.('swap.stop.relay_loop_failed', {
+            err: errSummary(err),
+          });
+        }
+      }
+      if (relayClose) {
+        try {
+          await relayClose();
+        } catch (err) {
+          logger.warn?.('swap.stop.relay_client_close_failed', {
+            err: errSummary(err),
+          });
+        }
+      }
       try {
         await new Promise<void>((resolve) => {
           server.close(() => resolve());
         });
       } catch (err) {
-        logger.warn?.('swap.stop.server_close_failed', { err: errSummary(err) });
+        logger.warn?.('swap.stop.server_close_failed', {
+          err: errSummary(err),
+        });
       }
       try {
         channelState.releaseAll();

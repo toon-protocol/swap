@@ -151,21 +151,78 @@ export interface PersistedReservationEntry {
   expiresAt: number;
 }
 
+/** A relay-swap session as the maker persists it (bigints string-encoded). */
+export interface PersistedMakerSession {
+  streamNonce: string;
+  orderId: string;
+  /** The taker's Nostr pubkey, bound at accept. */
+  takerPubkey: string;
+  pair: unknown;
+  chainRecipient: string;
+  /** The taker's leg-A address on `pair.from.chain`. */
+  payerAddress: string;
+  quotedRate: string;
+  quotedAt: number;
+  quoteExpiresAt: number;
+  createdAt: number;
+  expiresAt: number;
+  /** The leg-A channel key bound at the first verified fill, or null. */
+  payer: string | null;
+  lastSeq: number;
+  /** The last advance, verbatim, for byte-identical retransmit. */
+  lastAdvance: unknown;
+  credit: string;
+  sourceTotal: string;
+  targetTotal: string;
+  lastFillEventId?: string;
+}
+
+/** My inbound watermark on one channel, plus the last chain reading. */
+export interface PersistedInboundEntry {
+  nonce: string;
+  cumulative: string;
+  /** What the last accepted fill advanced the cumulative by. */
+  delta: string;
+  seq: number;
+  streamNonce: string;
+  fillEventId: string;
+  signer: string;
+  deposit?: string;
+  depositReadAt?: number;
+  epoch?: string;
+  /**
+   * What the engine did with this fill, if it saw it: `answered` (an advance
+   * exists), `refused` (the value was credited to the session). Absent means
+   * verified and persisted but never handed to the engine (a crash window).
+   */
+  handled?: 'answered' | 'refused';
+  updatedAt: number;
+}
+
+export interface PersistedOrderEntry {
+  orderId: string;
+  eventId: string;
+  publishedAt: number;
+  expiresAt: number;
+}
+
 export interface PersistedSwapState {
   /**
    * Schema version — bump on breaking shape changes. v2 (issue #49) adds
-   * `reservations` + `settledWatermarks` + per-entry `unsettled`; v1
-   * snapshots load with those defaulted empty.
+   * `reservations` + `settledWatermarks` + per-entry `unsettled`; v3 (the
+   * relay-mediated swap) adds `inbound`, `sessions`, `relayCursor`, `orders`
+   * and renames `seenPacketIds` → `seenEventIds`. Older snapshots load with
+   * the new maps defaulted empty.
    */
-  version: 2;
+  version: 3;
   /** `${assetCode}:${chain}` → reserves. */
   inventory: Record<string, PersistedInventoryEntry>;
   /** `${assetCode}:${chain}:${channelId}` → watermark entry. */
   channels: Record<string, PersistedChannelEntry>;
   /** `${assetCode}:${chain}:${senderPubkey}` → stored channel key. */
   bindings: Record<string, string>;
-  /** Replay reservations (insertion-ordered, oldest first). */
-  seenPacketIds: string[];
+  /** Relay event ids already processed (insertion-ordered, oldest first). */
+  seenEventIds: string[];
   /** Issue #49 — reservation id → in-flight window reservation. */
   reservations: Record<string, PersistedReservationEntry>;
   /**
@@ -173,6 +230,14 @@ export interface PersistedSwapState {
    * cumulative watermark (string-encoded bigint).
    */
   settledWatermarks: Record<string, string>;
+  /** `${chain}:${channelId}` → my inbound watermark for a counterparty's claims. */
+  inbound: Record<string, PersistedInboundEntry>;
+  /** streamNonce → live maker session. */
+  sessions: Record<string, PersistedMakerSession>;
+  /** Unix seconds: the newest wrap `created_at` the maker has processed. */
+  relayCursor: number;
+  /** pairKey → the order currently published for it. */
+  orders: Record<string, PersistedOrderEntry>;
 }
 
 /** Storage abstraction so tests / future sqlite backends can swap in. */
@@ -329,15 +394,20 @@ export function validatePersistedState(raw: unknown): PersistedSwapState {
   }
   const rec = raw as Record<string, unknown>;
   const version = rec['version'];
-  if (version !== 1 && version !== 2) {
+  if (version !== 1 && version !== 2 && version !== 3) {
     throw new Error(
-      `unsupported state schema version ${JSON.stringify(version)} (expected 1 or 2)`
+      `unsupported state schema version ${JSON.stringify(version)} (expected 1, 2 or 3)`
     );
   }
   const invRaw = rec['inventory'];
   const chanRaw = rec['channels'];
   const bindRaw = rec['bindings'];
-  const seenRaw = rec['seenPacketIds'];
+  // v3 renamed `seenPacketIds` → `seenEventIds`; either spelling loads.
+  const seenRaw = rec['seenEventIds'] ?? rec['seenPacketIds'] ?? [];
+  const inboundRaw = rec['inbound'] ?? {};
+  const sessionsRaw = rec['sessions'] ?? {};
+  const cursorRaw = rec['relayCursor'] ?? 0;
+  const ordersRaw = rec['orders'] ?? {};
   // Issue #49 (v2) — absent in v1 snapshots → defaulted empty.
   const resvRaw = rec['reservations'] ?? {};
   const wmRaw = rec['settledWatermarks'] ?? {};
@@ -359,7 +429,23 @@ export function validatePersistedState(raw: unknown): PersistedSwapState {
     throw new Error('state.bindings must be an object');
   }
   if (!Array.isArray(seenRaw) || seenRaw.some((s) => typeof s !== 'string')) {
-    throw new Error('state.seenPacketIds must be an array of strings');
+    throw new Error('state.seenEventIds must be an array of strings');
+  }
+  for (const [name, v] of [
+    ['inbound', inboundRaw],
+    ['sessions', sessionsRaw],
+    ['orders', ordersRaw],
+  ] as const) {
+    if (typeof v !== 'object' || v === null || Array.isArray(v)) {
+      throw new Error(`state.${name} must be an object`);
+    }
+  }
+  if (
+    typeof cursorRaw !== 'number' ||
+    !Number.isFinite(cursorRaw) ||
+    cursorRaw < 0
+  ) {
+    throw new Error('state.relayCursor must be a non-negative number');
   }
   if (
     typeof resvRaw !== 'object' ||
@@ -434,14 +520,64 @@ export function validatePersistedState(raw: unknown): PersistedSwapState {
       assertBigintString(v, `state.settledWatermarks["${k}"]`);
     }
   );
+  const inbound = copyRecord(
+    inboundRaw as Record<string, PersistedInboundEntry>,
+    'state.inbound',
+    (v, k) => {
+      assertBigintString(v?.nonce, `state.inbound["${k}"].nonce`);
+      assertBigintString(v?.cumulative, `state.inbound["${k}"].cumulative`);
+      assertBigintString(v?.delta, `state.inbound["${k}"].delta`);
+      if (typeof v?.seq !== 'number')
+        throw new Error(`state.inbound["${k}"].seq must be a number`);
+      if (typeof v?.streamNonce !== 'string') {
+        throw new Error(`state.inbound["${k}"].streamNonce must be a string`);
+      }
+      if (v.deposit !== undefined)
+        assertBigintString(v.deposit, `state.inbound["${k}"].deposit`);
+      if (v.epoch !== undefined)
+        assertBigintString(v.epoch, `state.inbound["${k}"].epoch`);
+    }
+  );
+  const sessions = copyRecord(
+    sessionsRaw as Record<string, PersistedMakerSession>,
+    'state.sessions',
+    (v, k) => {
+      if (
+        typeof v?.streamNonce !== 'string' ||
+        typeof v?.takerPubkey !== 'string'
+      ) {
+        throw new Error(
+          `state.sessions["${k}"] must carry streamNonce and takerPubkey`
+        );
+      }
+      if (typeof v.lastSeq !== 'number')
+        throw new Error(`state.sessions["${k}"].lastSeq must be a number`);
+      assertBigintString(v.credit, `state.sessions["${k}"].credit`);
+      assertBigintString(v.sourceTotal, `state.sessions["${k}"].sourceTotal`);
+      assertBigintString(v.targetTotal, `state.sessions["${k}"].targetTotal`);
+    }
+  );
+  const orders = copyRecord(
+    ordersRaw as Record<string, PersistedOrderEntry>,
+    'state.orders',
+    (v, k) => {
+      if (typeof v?.orderId !== 'string' || typeof v?.eventId !== 'string') {
+        throw new Error(`state.orders["${k}"] must carry orderId and eventId`);
+      }
+    }
+  );
   return {
-    version: 2,
+    version: 3,
     inventory,
     channels,
     bindings,
-    seenPacketIds: [...(seenRaw as string[])],
+    seenEventIds: [...(seenRaw as string[])],
     reservations,
     settledWatermarks,
+    inbound,
+    sessions,
+    relayCursor: cursorRaw,
+    orders,
   };
 }
 
@@ -466,6 +602,8 @@ export const DEFAULT_PERSISTED_SEEN_IDS_CAP = 10_000;
  * before the corresponding claim can leave the process (crash rule 4).
  */
 export class PersistentSeenPacketIds {
+  // On rolling/3 the ids are relay event ids; the class name is kept for
+  // the SDK-shaped contract it satisfies (`has`/`add`/`delete`/`size`).
   private readonly ids = new Set<string>();
   private readonly cap: number;
   private onMutate?: () => void;
@@ -527,6 +665,10 @@ export class PersistentSeenPacketIds {
   }
 }
 
+/** The rolling/3 name for the same replay set. */
+export const PersistentSeenEventIds = PersistentSeenPacketIds;
+export type PersistentSeenEventIds = PersistentSeenPacketIds;
+
 // ---------------------------------------------------------------------------
 // Persister — snapshots live state into the store
 // ---------------------------------------------------------------------------
@@ -542,6 +684,19 @@ export interface SwapStatePersisterInit {
    * rule 4).
    */
   seenPacketIds?: PersistentSeenPacketIds;
+  /**
+   * The relay-swap state the maker owns outside inventory/channel state:
+   * sessions, inbound watermarks, the relay cursor, published orders.
+   * Called on every persist; absent → the v3 maps are written empty.
+   */
+  extras?: () => SwapStateExtras;
+}
+
+export interface SwapStateExtras {
+  inbound?: Record<string, PersistedInboundEntry>;
+  sessions?: Record<string, PersistedMakerSession>;
+  relayCursor?: number;
+  orders?: Record<string, PersistedOrderEntry>;
 }
 
 /**
@@ -555,12 +710,14 @@ export class SwapStatePersister {
   private readonly inventory: SwapInventory;
   private readonly channelState: SwapChannelState;
   private readonly seenPacketIds?: PersistentSeenPacketIds;
+  private readonly extras?: () => SwapStateExtras;
 
   constructor(init: SwapStatePersisterInit) {
     this.store = init.store;
     this.inventory = init.inventory;
     this.channelState = init.channelState;
     if (init.seenPacketIds) this.seenPacketIds = init.seenPacketIds;
+    if (init.extras) this.extras = init.extras;
   }
 
   persist(): void {
@@ -613,14 +770,19 @@ export class SwapStatePersister {
       };
     }
 
+    const extras = this.extras?.() ?? {};
     this.store.save({
-      version: 2,
+      version: 3,
       inventory,
       channels,
       bindings,
-      seenPacketIds: this.seenPacketIds?.values() ?? [],
+      seenEventIds: this.seenPacketIds?.values() ?? [],
       reservations,
       settledWatermarks,
+      inbound: extras.inbound ?? {},
+      sessions: extras.sessions ?? {},
+      relayCursor: extras.relayCursor ?? 0,
+      orders: extras.orders ?? {},
     });
   }
 }
