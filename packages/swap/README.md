@@ -1,6 +1,6 @@
 # @toon-protocol/swap
 
-**Swap USDC across chains through a relay, with no server in between.**
+**Swap tokens across chains through a relay, with no server in between.**
 
 One side (the **maker**) publishes an order. The other side (the **taker**) streams it small
 fills. Each fill trades a pair of signed payment-channel claims — the taker's on chain A, the
@@ -9,6 +9,10 @@ side checks the other's claim itself. **Nothing touches a chain until the end**,
 the newest claim once.
 
 Both roles ship in this one package: `toon-swap make` runs a maker, `toon-swap take` runs a taker.
+
+The guide below uses USDC on both sides because that is the quickest first swap. The two sides
+do not have to match: a pair can cross assets **and** decimal scales — an 18-decimal ERC-20 on
+EVM against a 6-decimal SPL mint, say. See [Pairs that are not USDC↔USDC](#pairs-that-are-not-usdcusdc).
 
 ```
 maker ──publishes order──▶  relay  ◀──reads orders── taker
@@ -42,8 +46,10 @@ involved.
 > reason a first attempt stops.
 
 > [!IMPORTANT]
-> **Every amount is in base units — never decimals.** USDC has 6 decimals, so
-> `1000000` = 1 USDC, `5000` = 0.005 USDC. There are no floats anywhere in this CLI.
+> **Every amount is in base units — never decimals.** Base units are the token's own: USDC has
+> 6 decimals, so `1000000` = 1 USDC and `5000` = 0.005 USDC. An 18-decimal token counts in
+> `10^18`, and `--size` / `--delta` are always in the **source** token's units. There are no
+> floats anywhere in this CLI.
 
 ## 1. Install
 
@@ -154,9 +160,10 @@ SWAP_AUTOGEN_IDENTITY=1 toon-swap take --config swap.config.json \
   --order <makerPubkey>:<orderId> --size 1000000 --delta 5000
 ```
 
-- `--size` — how much of the **source** asset to swap, in base units. `1000000` = 1 USDC.
-- `--delta` — the size of **one fill** (δ), in base units. Optional; defaults to the order's
-  `fill.min`. See [Choosing δ](#choosing-δ).
+- `--size` — how much of the **source** asset to swap, in that asset's base units.
+  `1000000` = 1 USDC.
+- `--delta` — the size of **one fill** (δ), in the same source base units. Optional; defaults
+  to the order's `fill.min`. See [Choosing δ](#choosing-δ).
 - `--recipient` — where the target-chain payout goes. Optional; defaults to your own address on
   that chain.
 
@@ -219,6 +226,8 @@ base-units row at the bottom.
 | `delta … is outside the order's fill bounds [min, max]` | Your `--delta` is below the maker's floor or above its ceiling. Use a value inside the `fill [min, max]` the order printed. |
 | `size … is below one fill of …` | `--size` must be at least one δ. |
 | `INSUFFICIENT_INVENTORY` from the maker | The maker ran out of target-chain capital mid-stream. Your existing claim is still good — redeem it. |
+| `fill too small: target amount truncates to zero` | Your δ converts to less than one base unit of the target token. Raise δ — see [the truncation floor](#the-truncation-floor). |
+| `execution reverted: Insufficient balance` when `take` opens your channel | Your `chainProviders` entry for that chain names a **different token** than the order trades. One token per chain per config; point `tokenAddress`/`tokenNetworkAddress` at the order's asset. |
 | An amount came out 1 000 000× too small | You passed decimals. Amounts are base units: 1 USDC is `1000000`. |
 
 Interrupted, crashed, or closed the terminal? Nothing is lost —
@@ -290,7 +299,7 @@ SWAP_AUTOGEN_IDENTITY=1 toon-swap make --config maker.config.json
 
 | Key | What it does |
 | --- | --- |
-| `swapPairs` | What you sell, in which direction, at what indicative rate. |
+| `swapPairs` | What you sell, in which direction, at what indicative rate. `assetScale` **must** equal the token's on-chain `decimals()`. |
 | `inventory` | How much target-chain capital you will issue claims against, in base units. |
 | `chainProviders[].channelDeposit` | Lets the maker open and fund its side of a channel with each taker **on demand**, at that taker's first verified fill, and top it up later. Without it, channels must be pre-opened under `channels`. |
 | `order.fill.min` / `max` | The smallest and largest fill a taker may send. The floor is what stops anyone making you sign thousands of near-zero claims. |
@@ -303,8 +312,9 @@ watermarks. Full key list and operational detail:
 
 # Choosing δ
 
-δ (`--delta`) is the size of one fill, and it is the only number you really tune. It sets three
-things at once. **Small δ: safer, more expensive, slower. Large δ: riskier, cheaper, faster.**
+δ (`--delta`) is the size of one fill, in the **source** token's base units, and it is the only
+number you really tune. It sets three things at once. **Small δ: safer, more expensive, slower.
+Large δ: riskier, cheaper, faster.**
 
 | For a swap of size S, with N = ⌈S/δ⌉ fills | |
 | --- | --- |
@@ -312,10 +322,87 @@ things at once. **Small δ: safer, more expensive, slower. Large δ: riskier, ch
 | **Relay cost** | (2N + 3) µUSDC — two writes per fill, three per swap, 1 µUSDC each. |
 | **Time** | ≈ N × 0.37 s — about 350 ms per fill on the devnet, whatever δ is. |
 
-**Sensible default on the devnet: δ between 1 000 and 10 000 µUSDC** (0.001–0.01 USDC). That
-keeps relay cost under 0.25 % and puts a 1 USDC swap between 40 s and 6 min. The measurements and
+**Sensible default for the USDC pair on the devnet: δ between 1 000 and 10 000 µUSDC**
+(0.001–0.01 USDC). That keeps relay cost under 0.25 % and puts a 1 USDC swap between 40 s and
+6 min. For a source token with different decimals these numbers do not carry over — see
+[Pairs that are not USDC↔USDC](#pairs-that-are-not-usdcusdc). The measurements and
 the reasoning behind them are in
 [docs/how-it-works.md](https://github.com/toon-protocol/swap/blob/main/docs/how-it-works.md#the-lever-δ).
+
+# Pairs that are not USDC↔USDC
+
+Nothing in the swap is denominated in USDC, or in six decimals. A pair names its two assets and
+their scales, and the conversion is exact integer arithmetic:
+
+```
+targetAmount = ⌊ sourceAmount · rate · 10^toScale / 10^fromScale ⌋
+```
+
+So an 18-decimal ERC-20 on EVM against a 6-decimal SPL mint works, and is covered by the e2e
+suite (`cross-decimal` in
+[relay-swap.e2e.test.ts](https://github.com/toon-protocol/swap/blob/main/packages/swap/tests/e2e/relay-swap.e2e.test.ts)):
+three fills of 0.1 ANYONE at rate `0.04` pay 4 000 base units of USDC each, redeemed on chain.
+
+```json
+"swapPairs": [
+  {
+    "from": { "assetCode": "ANYONE", "assetScale": 18, "chain": "evm:31337" },
+    "to":   { "assetCode": "USDC",   "assetScale": 6,  "chain": "solana:localnet" },
+    "rate": "0.04"
+  }
+]
+```
+
+Five things to get right.
+
+**1. `assetScale` must equal the token's on-chain `decimals()`.** It is what the formula above
+divides by. Set it wrong and every amount is wrong by a power of ten while looking perfectly
+reasonable — nothing validates it against the chain for you.
+
+**2. `rate` is in whole units, not base units.** `"0.04"` means *one* ANYONE buys *0.04* USDC.
+The scales in the formula do the base-unit conversion, so the rate never has to carry it. It is
+a decimal string of arbitrary precision — never a float.
+
+**3. One token per chain, per config.** A `chainProviders` entry is looked up by `chainId` and
+carries a single `tokenAddress`/`tokenNetworkAddress` (EVM) or `tokenMint` (Solana). So
+ANYONE↔USDC across *two* chains is fine; ANYONE↔USDC on the *same* chain cannot be expressed in
+one node. A taker whose provider names a different token than the order trades does not get a
+clean error — it deposits the wrong token and the channel open reverts with
+`execution reverted: Insufficient balance`.
+
+**4. Fill bounds and δ are in the source token's units.** `order.fill.min` / `max`, `--size` and
+`--delta` all count in `10^fromScale`. An `order.fill.min` of `1000` is a sensible floor for
+6-decimal USDC and meaningless for an 18-decimal token, where the same fraction of a token is
+`10^14`.
+
+**5. A floating pair needs a live rate — and watching.** A pair whose price moves should not be
+quoted from a frozen `rate` in config. Point the maker at a feed with `SWAP_RATE_URL` (or a
+`rateProvider`), which re-prices **every fill**, and set `maxRateAge` so the maker refuses rather
+than filling at a stale price — without it, a taker who sees the market move first can farm the
+difference.
+
+> [!WARNING]
+> **The taker has no slippage bound yet.** It verifies that the maker's claim advanced by the
+> amount the maker *declared*, but never checks that declared rate against the one it was quoted
+> ([#182](https://github.com/toon-protocol/swap/issues/182)). On a floating pair your protection
+> is structural: δ caps the loss on any one fill, and you can stop and redeem at any point. That
+> is fine against a maker you run yourself, and thin against one you do not.
+
+### The truncation floor
+
+The conversion floors to an integer, so a fill whose target rounds to zero is refused by the
+maker with `fill too small: target amount truncates to zero`. For ANYONE(18) → USDC(6) at
+`0.04`, measured with the real `applyRate`:
+
+| δ (ANYONE base units) | in ANYONE | pays |
+| --- | --- | --- |
+| `10000000000000` | 0.00001 | **0 µUSDC — refused** |
+| `25000000000000` | 0.000025 | 1 µUSDC ← the floor |
+| `100000000000000` | 0.0001 | 4 µUSDC |
+| `100000000000000000` | 0.1 | 4 000 µUSDC |
+
+The floor moves with the rate and with the gap between the two scales. Pick δ from what it pays
+on the target side, not from habit on the source side.
 
 # CLI reference
 

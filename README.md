@@ -1,8 +1,10 @@
 # swap
 
-`@toon-protocol/swap` — swap USDC across chains through a TOON relay, with no server in
+`@toon-protocol/swap` — swap tokens across chains through a TOON relay, with no server in
 between. A maker publishes an order; a taker streams it small fills; each side verifies the
-other's signed payment-channel claim; the newest claim is redeemed on chain once.
+other's signed payment-channel claim; the newest claim is redeemed on chain once. A pair can
+cross assets and decimal scales (an 18-decimal ERC-20 against a 6-decimal SPL mint), not just
+USDC↔USDC.
 
 ### 👉 New here? Start with the guide: [packages/swap/README.md](packages/swap/README.md)
 
