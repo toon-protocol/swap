@@ -1,5 +1,29 @@
 # @toon-protocol/swap
 
+## 3.0.2
+
+### Patch Changes
+
+- 4da6c3a: The maker now defaults its relay channel-watermark file beside `statePath`, as the taker
+  already did and as `SwapNodeRelayConfig.channelStorePath` has always documented
+  ("default beside `statePath`").
+
+  Without `relay.channelStorePath` set explicitly, `startSwapNode` passed no `channelStore` at
+  all, so the client held the watermark in memory and warned: a restart then re-signs at nonces
+  the relay's connector has already banked, the connector refuses every one of them, and the
+  channel's collateral stays locked. The maker is the party that runs for weeks, so it is the
+  one that could least afford the in-memory default.
+
+- 4da6c3a: Fix `relay.payChain: "solana"`, which could not open its channel with the relay's connector.
+
+  Both the maker (`startSwapNode`) and the taker (`createTakerRuntime`) handed the relay client
+  only the Solana key when paying on Solana. The client's on-chain channel client is the EVM
+  transaction signer as well, so it refused to build, with a message telling the operator to
+  supply a `mnemonic` instead of a bare `solanaSecretKey` — advice the swap cannot act on, since it
+  derives its own keys by design. Both call sites now pass the EVM key whatever the pay chain is;
+  `chain` still decides which chain the money moves on. A Solana-paying node now proceeds to the
+  real, actionable error when it is short of SOL for channel rent.
+
 ## 3.0.1
 
 ### Patch Changes
