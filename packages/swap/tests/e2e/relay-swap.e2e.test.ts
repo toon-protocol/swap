@@ -31,6 +31,7 @@ import type { SwapAdvance } from '../../src/wire.js';
 
 import {
   deployEvmContracts,
+  deployExtraToken,
   erc20Balance,
   fundEth,
   mintUsdc,
@@ -76,6 +77,11 @@ const EVM_CHAIN = `evm:${ANVIL_CHAIN_ID}`;
 const SOL_CHAIN = 'solana:localnet';
 const TAKER_MNEMONIC =
   'legal winner thank year wave sausage worth useful legal winner thank yellow';
+/** A second maker, so the cross-decimal pair does not disturb the one above. */
+const MAKER2_MNEMONIC =
+  'perfect month child valve cause clog bomb dinosaur lava text drama title';
+/** 1 ANYONE, an 18-decimal ERC-20 — the other side of the decimal boundary. */
+const ANYONE = 10n ** 18n;
 
 const log = (line: string): void => console.log(`[swap e2e] ${line}`);
 
@@ -170,13 +176,15 @@ async function takerRuntime(
     statePath?: string;
     answerTimeoutMs?: number;
     maxResends?: number;
+    /** Trade a different token on a chain than the default maker does. */
+    chainProviders?: SwapNodeConfig['chainProviders'];
   } = {}
 ): Promise<TakerRuntime> {
   const cfg = makerConfig();
   return createTakerRuntime({
     mnemonic: TAKER_MNEMONIC,
     chains: ['evm', 'solana'],
-    chainProviders: (cfg.chainProviders ?? []).map((p) => {
+    chainProviders: (opts.chainProviders ?? cfg.chainProviders ?? []).map((p) => {
       // The taker never opens leg-B channels; strip the maker's on-demand knob.
       const { channelDeposit: _drop, ...rest } = p as {
         channelDeposit?: unknown;
@@ -539,6 +547,187 @@ describe('relay-mediated rolling swap', () => {
       expect(maker.engine.sessionFor(session!.streamNonce)?.lastSeq).toBe(2);
     } finally {
       await second.stop();
+    }
+  }, 180_000);
+
+  it('cross-decimal: an 18-decimal EVM token against a 6-decimal SPL mint, priced and paid out exactly', async () => {
+    // ANYONE(18) on EVM -> USDC(6) on Solana at 0.04. `applyRate` is
+    // `source * rateNum * 10^toScale / (rateDen * 10^fromScale)`, so one fill
+    // of 0.1 ANYONE is 0.1 * 0.04 = 0.004 USDC = 4000 base units. Nothing in
+    // the swap is denominated in the carriage's asset: the relay connector
+    // below still settles the 6-decimal mock USDC it always did.
+    const anyone = await deployExtraToken({
+      rpcUrl: anvil.rpcUrl,
+      registry: evm.registry,
+      name: 'Anyone',
+      symbol: 'ANYONE',
+      decimals: 18,
+    });
+    log(`evm: anyone=${anyone.token} tokenNetwork=${anyone.tokenNetwork}`);
+    const maker2Keys = await deriveSwapNodeKeys({
+      mnemonic: MAKER2_MNEMONIC,
+      chains: ['evm', 'solana'],
+    });
+    if (!maker2Keys.evm || !maker2Keys.solana) throw new Error('keys missing');
+    const maker2Evm = maker2Keys.evm.address as Address;
+    const maker2Sol = new PublicKey(base58Encode(maker2Keys.solana.publicKey));
+
+    // The taker pays leg A in ANYONE; the second maker pays leg B in SPL USDC.
+    // Both still pay the relay in the connector's own asset on EVM.
+    await mintUsdc(anvil.rpcUrl, anyone.token, takerEvmAddress, 10n * ANYONE);
+    await fundEth(anvil.rpcUrl, maker2Evm, 10n * 10n ** 18n);
+    await mintUsdc(anvil.rpcUrl, evm.usdc, maker2Evm, 100n * USDC);
+    await airdropSol(validator.rpcUrl, maker2Sol, 10);
+    await mintUsdcTo({
+      rpcUrl: validator.rpcUrl,
+      mint: new PublicKey(sol.mint),
+      owner: maker2Sol,
+      amount: 100n * USDC,
+    });
+
+    const maker2StatePath = join(stateDir, 'maker2-state.json');
+    const maker2 = await startSwapNode({
+      mnemonic: MAKER2_MNEMONIC,
+      chains: ['evm', 'solana'],
+      swapPairs: [
+        {
+          from: { assetCode: 'ANYONE', assetScale: 18, chain: EVM_CHAIN },
+          to: { assetCode: 'USDC', assetScale: 6, chain: SOL_CHAIN },
+          rate: '0.04',
+        },
+      ],
+      channels: { [SOL_CHAIN]: [] },
+      inventory: { [SOL_CHAIN]: 50n * USDC },
+      chainProviders: [
+        {
+          chainType: 'evm',
+          chainId: EVM_CHAIN,
+          rpcUrl: anvil.rpcUrl,
+          registryAddress: evm.registry,
+          tokenAddress: anyone.token,
+          tokenNetworkAddress: anyone.tokenNetwork,
+          settlementTimeoutSeconds: 3600,
+        },
+        {
+          chainType: 'solana',
+          chainId: SOL_CHAIN,
+          rpcUrl: validator.rpcUrl,
+          programId: validator.programId,
+          tokenMint: sol.mint,
+          channelDeposit: 20_000n,
+          challengeDurationSeconds: 0,
+        },
+      ],
+      relay: {
+        readUrl: RELAY_URL,
+        connectorUrl: RELAY_CONNECTOR_URL,
+        payChain: 'evm',
+        rpcUrl: anvil.rpcUrl,
+        deposit: 1n * USDC,
+        channelStorePath: join(stateDir, 'maker2-relay-channels.json'),
+      },
+      // Fill bounds are SOURCE units: 18 decimals here, not 6.
+      order: {
+        fill: { min: ANYONE / 100n, max: ANYONE },
+        ttlMs: 600_000,
+        refreshMs: 300_000,
+      },
+      quote: { sessionTtlMs: 600_000 },
+      statePath: maker2StatePath,
+      reconcileIntervalMs: 0,
+      appPort: MAKER_APP_PORT + 1,
+      logger: {
+        debug: () => undefined,
+        info: (...a) =>
+          console.log('[maker2]', ...a.map((x) => JSON.stringify(x))),
+        warn: (...a) =>
+          console.warn('[maker2]', ...a.map((x) => JSON.stringify(x))),
+        error: (...a) =>
+          console.error('[maker2]', ...a.map((x) => JSON.stringify(x))),
+      },
+    });
+
+    const rt = await takerRuntime({
+      statePath: join(stateDir, 'taker-cross-decimal.json'),
+      // Leg A is the ANYONE TokenNetwork, not the 6-decimal one the other
+      // tests trade: a chainProvider carries ONE token per chain.
+      chainProviders: [
+        {
+          chainType: 'evm',
+          chainId: EVM_CHAIN,
+          rpcUrl: anvil.rpcUrl,
+          registryAddress: evm.registry,
+          tokenAddress: anyone.token,
+          tokenNetworkAddress: anyone.tokenNetwork,
+          settlementTimeoutSeconds: 3600,
+        },
+        {
+          chainType: 'solana',
+          chainId: SOL_CHAIN,
+          rpcUrl: validator.rpcUrl,
+          programId: validator.programId,
+          tokenMint: sol.mint,
+          challengeDurationSeconds: 0,
+        },
+      ],
+    });
+    try {
+      // The taker's own view of leg A has to be the ANYONE network too.
+      const anyoneOrder = () =>
+        rt.taker
+          .listOrders()
+          .find((o) => o.order.pair.from.assetCode === 'ANYONE');
+      rt.taker.listOrders();
+      await waitFor(() => anyoneOrder() !== undefined, 20_000, 'the ANYONE order');
+      const listing = anyoneOrder()!;
+      expect(listing.order.pair.from.assetScale).toBe(18);
+      expect(listing.order.pair.to.assetScale).toBe(6);
+
+      const session = await rt.taker.accept(listing, {
+        size: (3n * ANYONE) / 10n, // 0.3 ANYONE
+        delta: ANYONE / 10n, //       0.1 ANYONE per fill
+      });
+      const advances: SwapAdvance[] = [];
+      const done = await rt.taker.run(session.streamNonce, {
+        onFill: (a) => {
+          advances.push(a);
+        },
+      });
+      expect(done.status).toBe('done');
+      // Three fills of 0.1 ANYONE, each worth 4000 base units of a 6-decimal
+      // USDC. The cumulative is in TARGET units and never in source units.
+      expect(advances.map((a) => a.targetAmount)).toEqual([
+        '4000',
+        '4000',
+        '4000',
+      ]);
+      expect(advances.map((a) => a.claim.cumulativeAmount)).toEqual([
+        '4000',
+        '8000',
+        '12000',
+      ]);
+
+      // Leg A is denominated in the 18-decimal token, all the way to the maker.
+      const inbound =
+        maker2.maker!.health().inbound[`${EVM_CHAIN}:${done.legA.channelId}`];
+      expect(inbound).toMatchObject({
+        cumulative: ((3n * ANYONE) / 10n).toString(),
+        seq: 3,
+      });
+
+      // And the payout is real: 12000 base units = 0.012 USDC on chain.
+      const ata = associatedTokenAddress(
+        takerSolanaPubkey,
+        new PublicKey(sol.mint)
+      );
+      const before = await splBalance(validator.rpcUrl, ata);
+      await rt.taker.redeem(session.streamNonce);
+      await rt.settler.close(rt.taker.session(session.streamNonce)!);
+      await rt.settler.settle(rt.taker.session(session.streamNonce)!);
+      expect((await splBalance(validator.rpcUrl, ata)) - before).toBe(12_000n);
+    } finally {
+      await rt.stop();
+      await maker2.stop();
     }
   }, 180_000);
 

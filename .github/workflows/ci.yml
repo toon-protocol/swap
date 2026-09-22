@@ -327,7 +327,7 @@ jobs:
               fail=1
             fi
           }
-          check 'relay-swap.e2e.test.ts' 5
+          check 'relay-swap.e2e.test.ts' 6
           check 'taker-toolkit.selfcheck.test.ts' 12
           [ "$fail" -eq 0 ] || exit 1
           echo "✓ both e2e suites collected and ran their full complement"

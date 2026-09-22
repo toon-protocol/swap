@@ -21,6 +21,7 @@
  */
 
 import { createServer } from 'node:http';
+import { dirname, join } from 'node:path';
 import type { IncomingMessage, Server, ServerResponse } from 'node:http';
 import type { NostrEvent } from 'nostr-tools/pure';
 import { fromMnemonic, base58Encode } from '@toon-protocol/sdk';
@@ -1309,18 +1310,31 @@ export async function startSwapNode(
       (config.chainProviders ?? []).find((p) => p.chainType === payChain)?.[
         'rpcUrl' as never
       ];
+    const defaultChannelStorePath =
+      config.statePath !== undefined
+        ? join(dirname(config.statePath), 'relay-channels.json')
+        : undefined;
     const client = await createRelayClient({
       connectorUrl: relay.connectorUrl,
       chain: payChain,
-      ...(payChain === 'evm' &&
-        swapNodeKeys.evm && { evmPrivateKey: swapNodeKeys.evm.privateKey }),
+      // The EVM key goes in whatever the pay chain is: the client's on-chain
+      // channel client is the EVM transaction signer too, and refuses to build
+      // without one even when it settles on Solana. `chain` above still decides
+      // which chain the money moves on.
+      ...(swapNodeKeys.evm && { evmPrivateKey: swapNodeKeys.evm.privateKey }),
       ...(payChain === 'solana' &&
         swapNodeKeys.solana && {
           solanaSecretKey: swapNodeKeys.solana.privateKey,
         }),
       ...(payRpc !== undefined && { rpcUrl: payRpc as string }),
-      ...(relay.channelStorePath !== undefined && {
-        channelStore: relay.channelStorePath,
+      // Default it beside `statePath`, exactly as the taker does and as
+      // `SwapNodeRelayConfig.channelStorePath` has always documented. Left in
+      // memory, a restart re-signs nonces the relay's connector has already
+      // banked; it refuses every one of them while the channel's collateral
+      // stays locked — and the maker is the party that runs for weeks.
+      ...((relay.channelStorePath ?? defaultChannelStorePath) !== undefined && {
+        channelStore: (relay.channelStorePath ??
+          defaultChannelStorePath) as string,
       }),
       ...(relay.deposit !== undefined && { deposit: relay.deposit }),
       ...(relay.transport !== undefined && { transport: relay.transport }),
