@@ -4,9 +4,12 @@
 between. A maker publishes an order; a taker streams it small fills; each side verifies the
 other's signed payment-channel claim; the newest claim is redeemed on chain once.
 
-| Start here | |
+### 👉 New here? Start with the guide: [packages/swap/README.md](packages/swap/README.md)
+
+It takes you from `npm i` to USDC redeemed on chain, on the devnet, in six steps.
+
+| Then | |
 | --- | --- |
-| **Guide** — install, try it on the devnet, run a maker, the CLI | [packages/swap/README.md](packages/swap/README.md) |
 | **How it works** — the sequence, and the one number you turn (δ) | [docs/how-it-works.md](docs/how-it-works.md) |
 | Design record — why the swap is relay-mediated, what does not change | [docs/relay-swap.md](docs/relay-swap.md) |
 | Operator & config reference | [deploy/swap/README.md](deploy/swap/README.md) |
@@ -18,7 +21,7 @@ by CI (changesets + `pnpm`, authed by the org `NPM_TOKEN` secret). The relay's
 [Rust connector](https://github.com/toon-protocol/connector) charges for each write and never
 opens a message.
 
-## Getting started with Devbox
+## Working on this repo
 
 [Devbox](https://www.jetify.com/devbox) pins the exact toolchain (Node 22, pnpm 8.15.x, Foundry 1.7.1) so every contributor builds with the same environment.
 
@@ -39,4 +42,15 @@ anvil --version
 devbox run build    # pnpm install --no-frozen-lockfile && pnpm build
 devbox run test     # pnpm test
 devbox run lint     # pnpm lint
+```
+
+Node 22 matters: the relay used by the e2e suite pulls in `better-sqlite3`, which has no prebuilt
+binary for newer Node majors and then tries (and fails) to compile from source.
+
+The end-to-end suite — a real relay, a real connector, anvil and `solana-test-validator` — is the
+fastest way to watch a whole swap without funding anything:
+
+```bash
+SWAP_E2E_CONNECTOR_IMAGE=ghcr.io/toon-protocol/connector:rust-sha-5c1b222 \
+  pnpm --filter @toon-protocol/swap test:e2e
 ```

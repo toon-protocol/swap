@@ -95,8 +95,10 @@ export async function createTakerRuntime(
     client = await createRelayClient({
       connectorUrl: cfg.relay.connectorUrl,
       chain: payChain,
-      ...(payChain === 'evm' &&
-        keys.evm && { evmPrivateKey: keys.evm.privateKey }),
+      // Always hand over the EVM key: the client's on-chain channel client is
+      // the EVM transaction signer as well, and refuses to build without one
+      // even for a Solana-settled channel. `chain` above picks the pay chain.
+      ...(keys.evm && { evmPrivateKey: keys.evm.privateKey }),
       ...(payChain === 'solana' &&
         keys.solana && { solanaSecretKey: keys.solana.privateKey }),
       ...(payRpc !== undefined && { rpcUrl: payRpc }),

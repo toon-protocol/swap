@@ -1312,8 +1312,11 @@ export async function startSwapNode(
     const client = await createRelayClient({
       connectorUrl: relay.connectorUrl,
       chain: payChain,
-      ...(payChain === 'evm' &&
-        swapNodeKeys.evm && { evmPrivateKey: swapNodeKeys.evm.privateKey }),
+      // The EVM key goes in whatever the pay chain is: the client's on-chain
+      // channel client is the EVM transaction signer too, and refuses to build
+      // without one even when it settles on Solana. `chain` above still decides
+      // which chain the money moves on.
+      ...(swapNodeKeys.evm && { evmPrivateKey: swapNodeKeys.evm.privateKey }),
       ...(payChain === 'solana' &&
         swapNodeKeys.solana && {
           solanaSecretKey: swapNodeKeys.solana.privateKey,

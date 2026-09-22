@@ -308,10 +308,17 @@ export async function startRustConnector(
     // connection refused / timeout = free, as it should be
   }
 
+  // A deterministic name, so `stop()` can remove the CONTAINER rather than
+  // just the `docker` CLI that launched it: SIGKILL on the client orphans the
+  // container, it keeps port 18300, and the next suite in the same run dies on
+  // "port … already serves a connector".
+  const containerName = `swap-e2e-connector-${opts.clientEdgePort}-${process.pid}`;
   const args = docker
     ? [
         'run',
         '--rm',
+        '--name',
+        containerName,
         '--network',
         'host',
         '-e',
@@ -354,6 +361,12 @@ export async function startRustConnector(
         await new Promise((r) => setTimeout(r, 100));
       }
       if (exit.info === null) child.kill('SIGKILL');
+    }
+    // The connector does not always go down on the SIGTERM the docker client
+    // forwards, and the SIGKILL above reaches only that client. Remove the
+    // container by name so the port is actually free for the next suite.
+    if (docker) {
+      spawnSync('docker', ['rm', '-f', containerName], { stdio: 'ignore' });
     }
     log.end();
     try {
