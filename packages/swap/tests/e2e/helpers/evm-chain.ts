@@ -285,6 +285,55 @@ export async function deployEvmContracts(rpcUrl: string): Promise<EvmDeployment>
   return { chainId: clients.chainId, usdc, registry, tokenNetwork, rollingSwapChannel };
 }
 
+/**
+ * Deploy ONE more `MockERC20` next to the deployment above, with its own
+ * decimals, and give it a TokenNetwork on the same registry.
+ *
+ * The swap's two legs are priced independently of the carriage, so a pair can
+ * cross a decimal boundary (an 18-decimal token on EVM against a 6-decimal SPL
+ * mint) while the relay connector keeps settling in whatever IT settles in.
+ * `deployEvmContracts` above pins 6 decimals because it reproduces the
+ * connector's own local deploy; this is the seam for everything else.
+ */
+export async function deployExtraToken(params: {
+  rpcUrl: string;
+  registry: Address;
+  name: string;
+  symbol: string;
+  decimals: number;
+}): Promise<{ token: Address; tokenNetwork: Address }> {
+  const clients = await evmClients(params.rpcUrl);
+  const { client, account } = clients.wallet(ANVIL_ACCOUNT0_KEY);
+  const hash = await client.deployContract({
+    abi: MOCK_ERC20.abi,
+    bytecode: MOCK_ERC20.bytecode,
+    args: [params.name, params.symbol, params.decimals],
+    account,
+    chain: client.chain,
+  });
+  const receipt = await clients.publicClient.waitForTransactionReceipt({ hash });
+  if (receipt.status !== 'success' || !receipt.contractAddress) {
+    throw new Error(`${params.symbol} deployment ${hash} failed`);
+  }
+  const token = receipt.contractAddress;
+  await sendAndWait(clients, ANVIL_ACCOUNT0_KEY, {
+    to: params.registry,
+    abi: TOKEN_NETWORK_REGISTRY.abi,
+    functionName: 'createTokenNetwork',
+    args: [token],
+  });
+  const tokenNetwork = (await clients.publicClient.readContract({
+    address: params.registry,
+    abi: TOKEN_NETWORK_REGISTRY.abi,
+    functionName: 'getTokenNetwork',
+    args: [token],
+  })) as Address;
+  if (BigInt(tokenNetwork) === 0n) {
+    throw new Error(`registry.getTokenNetwork(${params.symbol}) is zero`);
+  }
+  return { token, tokenNetwork };
+}
+
 // ---------------------------------------------------------------------------
 // Funding / balances
 // ---------------------------------------------------------------------------
