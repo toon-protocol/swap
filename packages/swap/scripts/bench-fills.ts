@@ -55,8 +55,8 @@ const chainProviders: NonNullable<SwapNodeConfig['chainProviders']> = [
     chainId: EVM_CHAIN,
     rpcUrl: 'https://base-sepolia-rpc.publicnode.com',
     registryAddress: '0x0c41D9D424d6B075A3cEa1068a694f7847a8CCa5',
-    tokenAddress: '0x49beE1Bca5d15Fb0963117923403F9498119a9Ce',
-    tokenNetworkAddress: '0xe9E05dfecfe165266C88d73e61D483612651952a',
+    tokenAddress: '0x0C996d7c934c79a6255254875607Fe69df25C0E1',
+    tokenNetworkAddress: '0x1B4606218ceE5Bf02B546e416905F4D3FC8a0249',
   },
   {
     chainType: 'solana',
