@@ -1,5 +1,4 @@
-// Shared, pure logic for the two gate guard scripts (gate-correctness.ts /
-// gate-no-regression.ts). Kept side-effect-free and independently testable
+// Shared, pure logic for the gate guard script (gate-correctness.ts). Kept side-effect-free and independently testable
 // (gate-lib.test.ts) — the scripts themselves only wire this logic to real
 // child-process output and process.exit, which unit tests don't need to
 // exercise.
@@ -15,19 +14,7 @@ export interface GateCorrectnessSnapshot {
 }
 
 export interface GateBaseline {
-  gateSpeed: {
-    lintMs: number;
-    typecheckMs: number;
-    testMs: number;
-    buildMs: number;
-    gateTotalMs: number;
-  };
-  gatePerformance: {
-    runnerMinutesBillable: number;
-    dockerImageSize: number | null;
-  };
   gateCorrectness: GateCorrectnessSnapshot;
-  regressionTolerancePct: number;
 }
 
 export function summarizeEslintResults(results: EslintResult[]): {
@@ -71,95 +58,4 @@ export function evaluateCorrectness(
   }
 
   return { pass: violations.length === 0, violations };
-}
-
-function exceedsTolerance(
-  currentMs: number,
-  baselineMs: number,
-  tolerancePct: number,
-): boolean {
-  return currentMs > baselineMs * (1 + tolerancePct / 100);
-}
-
-export function evaluateSpeedRegression(
-  baseline: GateBaseline["gateSpeed"],
-  current: GateBaseline["gateSpeed"],
-  tolerancePct: number,
-): { pass: boolean; violations: string[] } {
-  const violations: string[] = [];
-  const phases: Array<[string, keyof GateBaseline["gateSpeed"]]> = [
-    ["lint", "lintMs"],
-    ["typecheck", "typecheckMs"],
-    ["test", "testMs"],
-    ["build", "buildMs"],
-  ];
-
-  for (const [label, key] of phases) {
-    if (exceedsTolerance(current[key], baseline[key], tolerancePct)) {
-      violations.push(
-        `gate speed regressed (${label}): ${current[key]}ms > ${tolerancePct}% tolerance over frozen baseline ${baseline[key]}ms`,
-      );
-    }
-  }
-
-  if (
-    exceedsTolerance(
-      current.gateTotalMs,
-      baseline.gateTotalMs,
-      tolerancePct,
-    )
-  ) {
-    violations.push(
-      `gate speed regressed (total): ${current.gateTotalMs}ms > ${tolerancePct}% tolerance over frozen baseline ${baseline.gateTotalMs}ms`,
-    );
-  }
-
-  return { pass: violations.length === 0, violations };
-}
-
-export function evaluatePerformanceRegression(
-  baseline: GateBaseline["gatePerformance"],
-  current: GateBaseline["gatePerformance"],
-  tolerancePct: number,
-): { pass: boolean; violations: string[]; skipped: string[] } {
-  const violations: string[] = [];
-  const skipped: string[] = [];
-
-  if (baseline.runnerMinutesBillable <= 0) {
-    skipped.push(
-      "runner-minutes: frozen baseline is 0 (free/unlimited GitHub-hosted minutes) — nothing to regress against",
-    );
-  } else if (
-    exceedsTolerance(
-      current.runnerMinutesBillable,
-      baseline.runnerMinutesBillable,
-      tolerancePct,
-    )
-  ) {
-    violations.push(
-      `runner-minutes regressed: ${current.runnerMinutesBillable} > ${tolerancePct}% tolerance over frozen baseline ${baseline.runnerMinutesBillable}`,
-    );
-  }
-
-  if (baseline.dockerImageSize === null) {
-    skipped.push(
-      "image size: no frozen baseline captured yet (no Docker daemon at capture time)",
-    );
-  } else if (current.dockerImageSize === null) {
-    skipped.push(
-      "image size: no current measurement available (no Docker daemon in this environment)",
-    );
-  } else if (
-    exceedsTolerance(
-      current.dockerImageSize,
-      baseline.dockerImageSize,
-      tolerancePct,
-    )
-  ) {
-    violations.push(
-      `image size regressed: ${current.dockerImageSize} bytes > ${tolerancePct}% tolerance over frozen baseline ${baseline.dockerImageSize} bytes`,
-    );
-  }
-
-  return { pass: violations.length === 0, violations, skipped };
 }

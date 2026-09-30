@@ -34,7 +34,6 @@ jobs:
           docker run --rm --entrypoint bash sandcastle:swap -lc '
             set -e
             node --version
-            npm --version
             gh --version | head -1
             # swap is a pnpm workspace; pnpm resolves via corepack, and the
             # mounted repo pins pnpm@8.15.9 through its packageManager field.

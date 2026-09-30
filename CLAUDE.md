@@ -11,14 +11,6 @@ pnpm -r build
 pnpm -r test
 ```
 
-## Shared skills, docs & project context → toon-protocol/toon-meta
-Cross-cutting agent skills, docs, and the canonical project context live in **[toon-protocol/toon-meta](https://github.com/toon-protocol/toon-meta)**. Load the shared skills:
-```
-/plugin marketplace add toon-protocol/toon-meta
-/plugin install toon-skills@toon-meta
-```
-Canonical rules/decisions: `toon-meta` → `context/decisions.md` and `context/context.md`.
-
 ## Cross-repo dependencies
 - Consumes `@toon-protocol/{core,sdk}` from **npm** (pinned semver).
 - Consumes `@toon-protocol/client` (2.1.0+) from npm for paid relay writes only (`ToonClient`). Relay reads, NIP-59, Nostr keys and inbound-claim verification live here (`relay-subscription.ts`, `nip59.ts`, `nostr-keys.ts`, `received-claim.ts`) — the client is a pure payer and deleted its own copies in 2.0.

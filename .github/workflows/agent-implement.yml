@@ -20,7 +20,7 @@
 # Label events from PRs on forks carry no secrets. Only people with triage access
 # or higher can label an issue, so there is no separate permission guard here.
 
-name: agent:implement
+name: agent-implement
 
 on:
   issues:
