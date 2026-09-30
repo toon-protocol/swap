@@ -48,12 +48,7 @@ Single-context: this file plus `docs/`. See `docs/agents/domain.md`.
 
 ### The AFK factory
 
-`ready-for-agent` on an open issue whose blockers are closed queues it. `.github/workflows/agent-implement.yml` runs `/mattpocock-skills:implement` and then `/mattpocock-skills:code-review` in a sandbox (`.sandcastle/`), runs CI's `build` job commands (`pnpm run gate:correctness`, `pnpm test`) itself, and opens a PR labelled `ready-for-human` for a human to merge. A failed run moves the issue to `needs-triage`. The sandbox gate does not run the `solana-e2e` job; CI still does. Rebuild and push the prebuilt sandbox image whenever `.sandcastle/Dockerfile` changes:
-
-```
-docker build --build-arg AGENT_UID=1001 --build-arg AGENT_GID=1001 -t ghcr.io/toon-protocol/swap:sandcastle-agent .sandcastle/
-docker push ghcr.io/toon-protocol/swap:sandcastle-agent
-```
+`ready-for-agent` on an open issue whose blockers are closed queues it. `.github/workflows/agent-implement.yml` runs `/mattpocock-skills:implement` and then `/mattpocock-skills:code-review` in a sandbox (`.sandcastle/`), runs CI's `build` job commands (`pnpm run gate:correctness`, `pnpm test`) itself, and opens a PR labelled `ready-for-human` for a human to merge. A failed run moves the issue to `needs-triage`. The sandbox gate does not run the `solana-e2e` job; CI still does. The sandbox is the shared `ghcr.io/toon-protocol/sandcastle-agent` image, built from connector's `.sandcastle/Dockerfile`; this repo has no Dockerfile for it.
 
 ## Publishing
 CI publishes via **changesets + `pnpm`** using the org `NPM_TOKEN` secret. **Never run `npm publish`**. This will be `swap`'s first-ever npm publish.
