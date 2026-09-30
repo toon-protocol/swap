@@ -11,14 +11,6 @@ pnpm -r build
 pnpm -r test
 ```
 
-## Shared skills, docs & project context → toon-protocol/toon-meta
-Cross-cutting agent skills, docs, and the canonical project context live in **[toon-protocol/toon-meta](https://github.com/toon-protocol/toon-meta)**. Load the shared skills:
-```
-/plugin marketplace add toon-protocol/toon-meta
-/plugin install toon-skills@toon-meta
-```
-Canonical rules/decisions: `toon-meta` → `context/decisions.md` and `context/context.md`.
-
 ## Cross-repo dependencies
 - Consumes `@toon-protocol/{core,sdk}` from **npm** (pinned semver).
 - Consumes `@toon-protocol/client` (2.1.0+) from npm for paid relay writes only (`ToonClient`). Relay reads, NIP-59, Nostr keys and inbound-claim verification live here (`relay-subscription.ts`, `nip59.ts`, `nostr-keys.ts`, `received-claim.ts`) — the client is a pure payer and deleted its own copies in 2.0.
@@ -39,6 +31,29 @@ Backwards: `:release` cannot move (connector [ADR 0041](https://github.com/toon-
 CI enforces the ordering on the PR (`swap runtime image build` → *"This build must still boot the fleet's committed maker config"*, inside the required `CI OK`), so you find out before the merge rather than after. The publish-time gate in `publish-swap-image.yml` re-asks the same question on `main` and is the authoritative one; neither is skippable.
 
 **The cheaper answer is usually to make the setting optional with a safe default** — then there is no ordering constraint at all. That is why a config with `relayUrls` but no `relay.connectorUrl` boots **offline** (engine, health, admin; no orders, no fills) with a loud warning instead of refusing: the fleet's committed file predates the relay-mediated swap. Add `relay.connectorUrl` there to make the maker trade.
+
+## Agent skills
+
+### Issue tracker
+
+Issues live in this repo's GitHub Issues (`toon-protocol/swap`, via the `gh` CLI). See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+The five canonical triage labels, names unchanged. See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+Single-context: this file plus `docs/`. See `docs/agents/domain.md`.
+
+### The AFK factory
+
+`ready-for-agent` on an open issue whose blockers are closed queues it. `.github/workflows/agent-implement.yml` runs `/mattpocock-skills:implement` and then `/mattpocock-skills:code-review` in a sandbox (`.sandcastle/`), runs CI's `build` job commands (`pnpm run gate:correctness`, `pnpm test`) itself, and opens a PR labelled `ready-for-human` for a human to merge. A failed run moves the issue to `needs-triage`. The sandbox gate does not run the `solana-e2e` job; CI still does. Rebuild and push the prebuilt sandbox image whenever `.sandcastle/Dockerfile` changes:
+
+```
+docker build --build-arg AGENT_UID=1001 --build-arg AGENT_GID=1001 -t ghcr.io/toon-protocol/swap:sandcastle-agent .sandcastle/
+docker push ghcr.io/toon-protocol/swap:sandcastle-agent
+```
 
 ## Publishing
 CI publishes via **changesets + `pnpm`** using the org `NPM_TOKEN` secret. **Never run `npm publish`**. This will be `swap`'s first-ever npm publish.
