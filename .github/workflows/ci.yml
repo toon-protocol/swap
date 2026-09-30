@@ -1,6 +1,9 @@
 name: CI
 
 on:
+  # The no-op merge guard's triggers, kept from toon-meta's empty-pr-guard.yml
+  # (swap#189). `synchronize` catches a PR that BECOMES a no-op when its branch
+  # moves; `ready_for_review` re-runs everything when a draft is marked ready.
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
   push:
@@ -538,7 +541,7 @@ jobs:
   # as well; a required context that never reports wedges a repo (swap#147).
   #
   # It warns and passes wherever it cannot tell (no merge ref, stale merge ref,
-  # not a PR event). No `if:` either: this workflow also runs on push, where the
+  # not a PR event). No job-level `if:`: this workflow also runs on push, where the
   # guard passes plainly, and a skipped gating job must never read as a pass.
   no-op-merge:
     name: No-op merge guard
@@ -547,8 +550,8 @@ jobs:
       contents: read
     steps:
       # Depth 3 is enough for the merge commit and both parents; nothing here
-      # walks history. A shallow clone keeps this job at a few seconds so it
-      # can sit on every PR in every repo.
+      # walks history. A shallow clone keeps this job at a few seconds on
+      # every PR.
       - name: Check out the merge result
         uses: actions/checkout@v4
         with:
@@ -570,11 +573,10 @@ jobs:
         run: |
           set -uo pipefail
 
-          # The caller is a job in the repo's gate workflow, which also runs on
-          # `push`. There is no PR to evaluate there. Pass plainly — NOT with a
+          # This workflow also runs on `push`. There is no PR to evaluate there. Pass plainly — NOT with a
           # `::warning::`, which would annotate every push to main, and NOT
           # with a job-level `if:`, because a skipped job is a non-success
-          # result to the aggregate that now asserts on this job.
+          # result to the `ci-ok` aggregate that asserts on this job.
           if [ "${GITHUB_EVENT_NAME}" != "pull_request" ]; then
             echo "event is '${GITHUB_EVENT_NAME}', not 'pull_request' — no merge result to evaluate"
             exit 0
@@ -662,11 +664,11 @@ jobs:
       # Fleet-wide aggregate required check (toon-meta#279): this job is the
       # single required status for the repo. It must fail unless every gating
       # job actually SUCCEEDED — a skipped or cancelled gating job must never
-      # read as a pass. `build`, `devbox-validate`, `solana-e2e` and
-      # `swap-image-build` carry no `if:` of their own, so for them a `skipped`
+      # read as a pass. `build`, `devbox-validate`, `solana-e2e`,
+      # `swap-image-build` and `no-op-merge` carry no `if:` of their own, so for them a `skipped`
       # cannot mean "correctly not required" — only cancelled-upstream or a
       # workflow edit that stopped them running, and both must fail. That is why
-      # a flat `!= success` is a complete gate for these four.
+      # a flat `!= success` is a complete gate for these five.
       - name: Check all gating jobs succeeded
         run: |
           echo "build: ${{ needs.build.result }}"
