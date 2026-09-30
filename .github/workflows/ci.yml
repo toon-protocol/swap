@@ -1,7 +1,11 @@
 name: CI
 
 on:
+  # The no-op merge guard's triggers, kept from toon-meta's empty-pr-guard.yml
+  # (swap#189). `synchronize` catches a PR that BECOMES a no-op when its branch
+  # moves; `ready_for_review` re-runs everything when a draft is marked ready.
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
   push:
     branches: [main]
 
@@ -523,24 +527,132 @@ jobs:
           echo "::warning::the fleet config did not reach a running state on this build (exit $STATUS), but not with INVALID_CONFIG."
           echo "::warning::Not treated as a config-schema break — most likely an unreachable RPC from this runner. Output above."
 
-  # Fleet no-op merge guard (toon-meta#405), wired INTO this repo's aggregate
-  # required check so that it blocks a HUMAN merge and not just the fleet
-  # auto-merge pass (toon-meta#408). connector#1008 merged green, closed its
-  # ticket and changed zero files -- and it was a human who merged it, because
-  # a red NON-required check is only a warning on the merge button. This
-  # replaces the stand-alone empty-pr-guard-shim.yml, deleted in the same
-  # commit; running both would put two identical "No-op merge guard" check
-  # runs on every PR. Canonical caller snippet and full rationale:
-  # toon-meta scripts/factory/empty-pr-guard-gate-job.yml.
+  # No-op merge guard: a PR whose MERGE RESULT changes zero files must not merge
+  # green. Born of connector#1008, which merged green, closed its ticket and
+  # changed zero files because its content had already landed via another PR --
+  # the three-dot "Files changed" diff looked normal, the merge result was empty.
+  # `refs/pull/N/merge` (what a `pull_request` run checks out) has the base tip
+  # as first parent and the PR head as second, so `git diff HEAD^1 HEAD` is what
+  # the squash commit would carry. Empty diff, empty merge.
   #
-  # No `secrets: inherit` -- the guard makes no API call and no write of any
-  # kind, so handing it FACTORY_OPS_TOKEN would widen a monitored credential
-  # for nothing. No `if:` either: this workflow also runs on push, where the
-  # guard passes with a plain "no merge result to evaluate"; a job-level `if:`
-  # would make it `skipped` there, and a skipped gating job must never read as
-  # a pass (toon-meta#279).
+  # Inlined from toon-meta's reusable empty-pr-guard.yml so CI does not depend
+  # on toon-meta. It is wired INTO the `ci-ok` aggregate (the one required
+  # check), not added as a second required context, so it blocks a human merge
+  # as well; a required context that never reports wedges a repo (swap#147).
+  #
+  # It warns and passes wherever it cannot tell (no merge ref, stale merge ref,
+  # not a PR event). No job-level `if:`: this workflow also runs on push, where the
+  # guard passes plainly, and a skipped gating job must never read as a pass.
   no-op-merge:
-    uses: toon-protocol/toon-meta/.github/workflows/empty-pr-guard.yml@main
+    name: No-op merge guard
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      # Depth 3 is enough for the merge commit and both parents; nothing here
+      # walks history. A shallow clone keeps this job at a few seconds on
+      # every PR.
+      - name: Check out the merge result
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 3
+
+      - name: A merge that changes nothing must not merge green
+        env:
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_BASE_REF: ${{ github.event.pull_request.base.ref }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          # The count GitHub's Files-changed tab shows — its three-dot diff,
+          # straight from the event payload. Deliberately NOT recomputed with
+          # `git diff base...head`: that needs the merge BASE commit, which a
+          # shallow clone does not have, and running it against the merge
+          # commit (whose merge-base with the base tip is the base tip itself)
+          # silently returns 0 for every PR. Caught in a local simulation of
+          # the #1008 shape before this shipped.
+          PR_CHANGED_FILES: ${{ github.event.pull_request.changed_files }}
+        run: |
+          set -uo pipefail
+
+          # This workflow also runs on `push`. There is no PR to evaluate there. Pass plainly — NOT with a
+          # `::warning::`, which would annotate every push to main, and NOT
+          # with a job-level `if:`, because a skipped job is a non-success
+          # result to the `ci-ok` aggregate that asserts on this job.
+          if [ "${GITHUB_EVENT_NAME}" != "pull_request" ]; then
+            echo "event is '${GITHUB_EVENT_NAME}', not 'pull_request' — no merge result to evaluate"
+            exit 0
+          fi
+
+          # `pull_request` runs check out refs/pull/N/merge. If HEAD is not a
+          # merge commit, GitHub could not compute a merge result — a
+          # conflicted PR is the usual reason, and a conflicted PR cannot merge
+          # at all. Warn, do not fail: see the header.
+          if ! git rev-parse --verify -q HEAD^2 >/dev/null; then
+            echo "::warning::no merge ref for this PR (HEAD is not a merge commit) — the merge result could not be evaluated. A conflicted PR is the usual cause; resolve the conflict and this guard re-runs."
+            exit 0
+          fi
+
+          P1=$(git rev-parse HEAD^1)
+          P2=$(git rev-parse HEAD^2)
+
+          # Parent order on refs/pull/N/merge is base-first, head-second. Assert
+          # it against the event payload rather than trusting it, so a change in
+          # that convention degrades to a warning instead of silently comparing
+          # the wrong two trees.
+          if [ "$P2" = "$PR_HEAD_SHA" ]; then
+            BASE="$P1"
+          elif [ "$P1" = "$PR_HEAD_SHA" ]; then
+            BASE="$P2"
+          else
+            echo "::warning::neither parent of the merge ref is the PR head ($PR_HEAD_SHA) — the merge ref is probably stale. Not evaluated; push to the branch to refresh it."
+            exit 0
+          fi
+
+          if ! git diff --quiet "$BASE" HEAD; then
+            CHANGED=$(git diff --name-only "$BASE" HEAD | wc -l)
+            echo "✓ merging this PR changes $CHANGED file(s) against $PR_BASE_REF"
+            exit 0
+          fi
+
+          # Empty merge. Which of the two shapes is it? Whether the PR page
+          # still shows files is what decides how confusing this PR is.
+          BRANCH_FILES="${PR_CHANGED_FILES:-0}"
+
+          {
+            echo "## ❌ Merging this PR would change nothing"
+            echo ""
+            echo "The merge result is byte-identical to \`$PR_BASE_REF\`, so squashing this PR"
+            echo "would land an **empty commit** — a green check, a closed ticket, and no change."
+            echo ""
+            if [ "$BRANCH_FILES" -gt 0 ]; then
+              echo "**The content is already on \`$PR_BASE_REF\`.** The Files-changed tab still shows"
+              echo "$BRANCH_FILES file(s) because that is the three-dot diff against this branch's fork"
+              echo "point, not against the branch tip — another PR has landed this same content since."
+              echo ""
+              echo "Almost certainly a duplicate PR. What to do:"
+              echo ""
+              echo "1. Find the PR that actually landed it: \`git log --oneline $PR_BASE_REF -- <a file this PR touches>\`."
+              echo "2. **Close this PR** and point its ticket at that one."
+              echo "3. If the change you meant to make is still missing from \`$PR_BASE_REF\`, it was"
+              echo "   never merged by that PR either — diff the file on \`$PR_BASE_REF\` and open a"
+              echo "   PR from a branch cut fresh off \`$PR_BASE_REF\`."
+            else
+              echo "**This branch's own commits cancel out.** Its three-dot diff against"
+              echo "\`$PR_BASE_REF\` is empty too, so there was never anything to merge — usually a"
+              echo "change and its revert on the same branch, or a branch cut after the work landed."
+              echo ""
+              echo "Close this PR, or push the change it was supposed to carry."
+            fi
+            echo ""
+            echo "This guard exists because connector#1008 did exactly this and nobody noticed:"
+            echo "it merged green, closed its ticket, and \`git show\` returned zero files."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          if [ "$BRANCH_FILES" -gt 0 ]; then
+            echo "::error::merging PR #$PR_NUMBER would produce an EMPTY commit — its content is already on $PR_BASE_REF (the Files-changed tab shows $BRANCH_FILES file(s) only because that is the three-dot diff). This is probably a duplicate PR; close it. See the job summary."
+          else
+            echo "::error::merging PR #$PR_NUMBER would produce an EMPTY commit — this branch's commits cancel out, so it has nothing to merge. See the job summary."
+          fi
+          exit 1
 
   ci-ok:
     name: CI OK
@@ -552,11 +664,11 @@ jobs:
       # Fleet-wide aggregate required check (toon-meta#279): this job is the
       # single required status for the repo. It must fail unless every gating
       # job actually SUCCEEDED — a skipped or cancelled gating job must never
-      # read as a pass. `build`, `devbox-validate`, `solana-e2e` and
-      # `swap-image-build` carry no `if:` of their own, so for them a `skipped`
+      # read as a pass. `build`, `devbox-validate`, `solana-e2e`,
+      # `swap-image-build` and `no-op-merge` carry no `if:` of their own, so for them a `skipped`
       # cannot mean "correctly not required" — only cancelled-upstream or a
       # workflow edit that stopped them running, and both must fail. That is why
-      # a flat `!= success` is a complete gate for these four.
+      # a flat `!= success` is a complete gate for these five.
       - name: Check all gating jobs succeeded
         run: |
           echo "build: ${{ needs.build.result }}"
