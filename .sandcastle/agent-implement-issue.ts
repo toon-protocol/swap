@@ -207,7 +207,14 @@ async function main() {
       maxIterations: 1,
       agent: sandcastle.claudeCode('claude-opus-5-5'),
       promptFile: './.sandcastle/review-prompt.md',
-      promptArgs: { ISSUE_URL: issue.url, ISSUE_NUMBER: issueNumber, BRANCH: branch },
+      promptArgs: {
+        ISSUE_URL: issue.url,
+        ISSUE_NUMBER: issueNumber,
+        BRANCH: branch,
+        // Not TARGET_BRANCH: sandcastle reserves that built-in and sets it to this
+        // sandbox's own branch, which would make the review diff empty.
+        BASE_BRANCH: BASE,
+      },
     });
     const summary = reviewSummary(review.stdout);
 
