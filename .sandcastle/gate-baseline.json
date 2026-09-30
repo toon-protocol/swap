@@ -40,7 +40,7 @@
     },
     "dockerImageSize": {
       "value": null,
-      "note": "Not measured in this capture pass — no Docker daemon is available in the capture sandbox. gate-no-regression.ts skips the image-size check while this is null. Reproduce in an environment with Docker: `npx --yes @ai-hero/sandcastle@0.12.0 docker build-image && docker image inspect sandcastle:swap --format '{{.Size}}'`. .github/workflows/agent-image.yml now logs the built image's size on every build so a future capture can fill this in."
+      "note": "Not measured in this capture pass — no Docker daemon is available in the capture sandbox. gate-no-regression.ts skips the image-size check while this is null. Reproduce in an environment with Docker: `npx --yes @ai-hero/sandcastle@0.12.0 docker build-image && docker image inspect sandcastle:swap --format '{{.Size}}'`."
     },
     "cacheHitRate": {
       "sample": "pnpm dependency cache (actions/setup-node@v4, cache: pnpm) across the last 5 completed CI runs on main",
