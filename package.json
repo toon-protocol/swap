@@ -17,12 +17,8 @@
     "release": "changeset publish",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "gate:correctness": "npx tsx .sandcastle/scripts/gate-correctness.ts",
-    "gate:no-regression": "npx tsx .sandcastle/scripts/gate-no-regression.ts",
-    "sandcastle": "npx tsx .sandcastle/main.ts",
-    "sandcastle:plan": "npx tsx .sandcastle/plan-dry-run.ts",
     "sandcastle:implement": "npx tsx .sandcastle/agent-implement-issue.ts",
-    "sandcastle:review": "npx tsx .sandcastle/agent-review-pr.ts",
-    "sandcastle:fix": "npx tsx .sandcastle/agent-fix-pr.ts"
+    "sandcastle:ready": "npx tsx .sandcastle/ready-issues.ts"
   },
   "keywords": [
     "nostr",

@@ -40,5 +40,28 @@ CI enforces the ordering on the PR (`swap runtime image build` → *"This build 
 
 **The cheaper answer is usually to make the setting optional with a safe default** — then there is no ordering constraint at all. That is why a config with `relayUrls` but no `relay.connectorUrl` boots **offline** (engine, health, admin; no orders, no fills) with a loud warning instead of refusing: the fleet's committed file predates the relay-mediated swap. Add `relay.connectorUrl` there to make the maker trade.
 
+## Agent skills
+
+### Issue tracker
+
+Issues live in this repo's GitHub Issues (`toon-protocol/swap`, via the `gh` CLI). See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+The five canonical triage labels, names unchanged. See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+Single-context: this file plus `docs/`. See `docs/agents/domain.md`.
+
+### The AFK factory
+
+`ready-for-agent` on an open issue whose blockers are closed queues it. `.github/workflows/agent-implement.yml` runs `/mattpocock-skills:implement` and then `/mattpocock-skills:code-review` in a sandbox (`.sandcastle/`), runs CI's `build` job commands (`pnpm run gate:correctness`, `pnpm test`) itself, and opens a PR labelled `ready-for-human` for a human to merge. A failed run moves the issue to `needs-triage`. The sandbox gate does not run the `solana-e2e` job; CI still does. Rebuild and push the prebuilt sandbox image whenever `.sandcastle/Dockerfile` changes:
+
+```
+docker build --build-arg AGENT_UID=1001 --build-arg AGENT_GID=1001 -t ghcr.io/toon-protocol/swap:sandcastle-agent .sandcastle/
+docker push ghcr.io/toon-protocol/swap:sandcastle-agent
+```
+
 ## Publishing
 CI publishes via **changesets + `pnpm`** using the org `NPM_TOKEN` secret. **Never run `npm publish`**. This will be `swap`'s first-ever npm publish.
