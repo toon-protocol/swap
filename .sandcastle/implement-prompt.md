@@ -19,9 +19,10 @@ push, open a PR or close the issue. The runner does all three once you finish.
   red: `pnpm run gate:correctness` (build, then eslint and typecheck against the frozen
   `.sandcastle/gate-baseline.json` allowlist) and `pnpm test`. Run both before you commit.
   Never weaken, skip or `.skip` a test, and never loosen a lint, to get green.
-- The gate does not run CI's `solana-e2e` job, which needs a Rust connector image, anvil and
-  `solana-test-validator`. None of them is in this sandbox. A ticket that changes what that
-  suite covers needs its result from CI, so say so in a comment on the issue.
+- The gate does not run CI's `solana-e2e` job, which needs the Rust connector image
+  (`docker run`, not available here). The sandbox has `anvil` and `solana-test-validator`, but
+  a ticket that changes what that suite covers needs its result from CI, so say so in a comment
+  on the issue.
 - A change under `packages/swap` needs a changeset (`pnpm changeset`, or a hand-written
   `.changeset/*.md`). CI's changeset job refuses the PR without one. A changeset that releases
   nothing must say `changeset:no-release` and name what does not ship
