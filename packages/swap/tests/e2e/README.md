@@ -27,8 +27,8 @@ usual cause; `helpers/relay.ts` does the same for 18903.
 
 ## Against the devnet
 
-The same code runs against TOON's live devnet — `wss://relay-ws.devnet.toonprotocol.dev` and
-`https://proxy.relay.devnet.toonprotocol.dev/ilp` — with `toon-swap make` / `toon-swap take`;
+The same code runs against TOON's live devnet — `wss://relay.toonprotocol.dev` and
+`https://toonprotocol.dev/ilp` — with `toon-swap make` / `toon-swap take`;
 that is the dev loop, not a CI job (it needs funded keys on Base Sepolia and Solana devnet).
 
 ## Fixtures

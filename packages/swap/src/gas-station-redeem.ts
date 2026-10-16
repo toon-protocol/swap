@@ -49,7 +49,7 @@ import type { SwapNodeKeys } from './wallet.js';
 
 export const SOLANA_GAS_STATION_KIND = 5096;
 export const EVM_GAS_STATION_KIND = 5098;
-/** The devnet relay connector's route to the gas station. */
+/** The devnet connector's route to the gas station (terminated by the relay's own connector). */
 export const DEFAULT_GAS_STATION_DESTINATION = 'g.toon.relay.gas';
 
 export class GasStationRefusal extends Error {
@@ -129,10 +129,11 @@ export interface GasStationRedeemerConfig {
   /** The terminating connector's key when `destination` is forwarded. */
   sealTo?: string | Uint8Array;
   /**
-   * The gas station's own connector (e.g. `https://proxy.gas.devnet.toonprotocol.dev/ilp`).
-   * When `sealTo` is absent its `GET /ilp` self-description supplies the sealing key — the
-   * relay's `g.toon.relay.gas` route is FORWARDED to that node, so a payload sealed to the
-   * relay's connector cannot be opened there.
+   * The connector that terminates `destination`, when that is not the sender's own connector.
+   * When `sealTo` is absent its `GET /ilp` self-description supplies the sealing key: on a
+   * FORWARDED route a payload sealed to the sender's connector cannot be opened at the far end.
+   * Leave it unset when the sender's connector terminates the route itself — as on the devnet,
+   * where one connector (`https://toonprotocol.dev/ilp`) terminates `g.toon.relay.gas`.
    */
   connectorUrl?: string;
   fetch?: typeof fetch;

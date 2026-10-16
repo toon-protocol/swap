@@ -26,8 +26,8 @@ gas and the settlement token there.
 
 ```json
 "relay": {
-  "readUrl": "wss://relay-ws.devnet.toonprotocol.dev",
-  "connectorUrl": "https://proxy.relay.devnet.toonprotocol.dev/ilp",
+  "readUrl": "wss://relay.toonprotocol.dev",
+  "connectorUrl": "https://toonprotocol.dev/ilp",
   "payChain": "evm",
   "deposit": "1000000"
 }
@@ -55,7 +55,7 @@ consumes:
 | `relay` | for trading | `{ readUrl, connectorUrl, destination? ("g.toon.relay"), payChain? ("evm"\|"solana"), rpcUrl?, deposit?, channelStorePath?, transport? }`. Aliases from 2.x: `relayUrls[0]` → `readUrl`, top-level `connectorUrl` → `connectorUrl`. |
 | `order` | no | `{ fill: { min, max }, ttlMs (10 min), refreshMs (8 min) }` — the per-fill delta bounds a taker may pick (source base units; default 1–100 USDC). Alias: `fillAmount` → `fill.min`. |
 | `maxChainReadsPerMin` | no | Chain reads one taker may cause per minute while its claims are verified (default 30). |
-| `gasStation` | no | `{ destination? ("g.toon.relay.gas"), connectorUrl? }` — for `toon-swap redeem --via gas-station`; `connectorUrl` is the station's own connector, whose key the job is sealed to (the relay route is forwarded). |
+| `gasStation` | no | `{ destination? ("g.toon.relay.gas"), connectorUrl? }` — for `toon-swap redeem --via gas-station`; `connectorUrl` is needed only when the route is forwarded to a separate gas-station connector, whose key the job is then sealed to. On the devnet the relay's connector terminates `g.toon.relay.gas` itself: leave it unset. |
 | `quote` | no | `{ ttlMs (60s), sessionTtlMs (1h), maxSessions (1024) }`. |
 | `appPort` | no | Port for `/health` and `/admin/*` (default 8080; `blsPort` is an alias). |
 | `statePath` | no | Snapshot file (inventory, channel watermarks, bindings, sessions, inbound watermarks, relay cursor, orders) — write-ahead of every claim. The taker subcommands keep theirs at `<statePath>.taker.json`. |

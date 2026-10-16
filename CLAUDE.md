@@ -16,7 +16,7 @@ pnpm -r test
 - Consumes `@toon-protocol/client` (2.1.0+) from npm for paid relay writes only (`ToonClient`). Relay reads, NIP-59, Nostr keys and inbound-claim verification live here (`relay-subscription.ts`, `nip59.ts`, `nostr-keys.ts`, `received-claim.ts`) — the client is a pure payer and deleted its own copies in 2.0.
 - The ILP payment engine is the separate **[toon-protocol/connector](https://github.com/toon-protocol/connector)** repo (Rust). It verifies the **carriage** claim on every relay write; it never sees a swap claim (payload opacity). Swap-claim verification is this repo's `verifyInboundClaim`, run by whichever party receives the claim.
 - The e2e suite needs a relay (`@toon-protocol/relay`, a devDependency, or `SWAP_E2E_RELAY_BIN`) and a connector to front it: `SWAP_E2E_CONNECTOR_BIN` (a built `connector` binary) or `SWAP_E2E_CONNECTOR_IMAGE` (`ghcr.io/toon-protocol/connector:rust-sha-…`). `tests/e2e/helpers/rust-connector.ts` refuses a port something else already answers on — a stale `docker run` from an aborted run is the usual cause of an `F02 no route` surprise.
-- The dev loop runs against the live **devnet** (`wss://relay-ws.devnet.toonprotocol.dev`, `https://proxy.relay.devnet.toonprotocol.dev/ilp`, Base Sepolia, Solana devnet); the local harness is the CI proof. The gas station cannot redeem swap claims yet (gas-station#18).
+- The dev loop runs against the live **devnet** (`wss://relay.toonprotocol.dev`, `https://toonprotocol.dev/ilp`, Base Sepolia, Solana devnet); the local harness is the CI proof. The gas station cannot redeem swap claims yet (gas-station#18).
 - Image-publish workflow (the `swap` Docker image) is a follow-up.
 
 ### Config first, code second

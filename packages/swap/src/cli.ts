@@ -159,7 +159,7 @@ export function relayConfigWarning(raw: CliRawConfig): string | null {
     return 'no relay configured (relay.readUrl + relay.connectorUrl): booting OFFLINE — no order is published and no fill is answered';
   }
   if (!hasConnector) {
-    return `relay.readUrl is set (${String(readUrl)}) but relay.connectorUrl is not: booting OFFLINE — add the relay connector's client edge (e.g. https://proxy.relay.devnet.toonprotocol.dev/ilp) to pay for writes`;
+    return `relay.readUrl is set (${String(readUrl)}) but relay.connectorUrl is not: booting OFFLINE — add the relay connector's client edge (e.g. https://toonprotocol.dev/ilp) to pay for writes`;
   }
   return 'relay.connectorUrl is set but relay.readUrl is not: booting OFFLINE — add the relay WebSocket URL to read orders and the inbox';
 }

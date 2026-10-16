@@ -233,9 +233,9 @@ export interface SwapNodeConfig {
 }
 
 export interface SwapNodeRelayConfig {
-  /** Free NIP-01 reads, e.g. `wss://relay-ws.devnet.toonprotocol.dev`. */
+  /** Free NIP-01 reads, e.g. `wss://relay.toonprotocol.dev`. */
   readUrl: string;
-  /** The relay connector's client edge, e.g. `https://proxy.relay.devnet.toonprotocol.dev/ilp`. */
+  /** The relay connector's client edge, e.g. `https://toonprotocol.dev/ilp`. */
   connectorUrl: string;
   /** The route that terminates at the relay's `POST /write` (default `g.toon.relay`). */
   destination?: string;

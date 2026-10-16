@@ -34,7 +34,7 @@ export interface TakerRuntimeConfig {
   statePath: string;
   /** Skip the paying client — reads only (`orders`). */
   readOnly?: boolean;
-  /** The gas station: the route to it (default `g.toon.relay.gas`) and its own connector (for the sealing key). */
+  /** The gas station: the route to it (default `g.toon.relay.gas`) and, only when that route is forwarded, the connector that terminates it (for the sealing key). */
   gasStation?: { destination?: string; connectorUrl?: string };
   logger?: SwapTakerLogger;
   answerTimeoutMs?: number;

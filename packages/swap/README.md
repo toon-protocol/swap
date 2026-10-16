@@ -84,8 +84,8 @@ Make a directory, and save this as `swap.config.json`. It is the live devnet —
     }
   ],
   "relay": {
-    "readUrl": "wss://relay-ws.devnet.toonprotocol.dev",
-    "connectorUrl": "https://proxy.relay.devnet.toonprotocol.dev/ilp",
+    "readUrl": "wss://relay.toonprotocol.dev",
+    "connectorUrl": "https://toonprotocol.dev/ilp",
     "transport": "btp",
     "payChain": "evm",
     "deposit": "1000000"
@@ -274,8 +274,8 @@ do a first swap with no one else involved: run this in one terminal, and `take` 
     }
   ],
   "relay": {
-    "readUrl": "wss://relay-ws.devnet.toonprotocol.dev",
-    "connectorUrl": "https://proxy.relay.devnet.toonprotocol.dev/ilp",
+    "readUrl": "wss://relay.toonprotocol.dev",
+    "connectorUrl": "https://toonprotocol.dev/ilp",
     "transport": "btp",
     "payChain": "evm",
     "deposit": "1000000"
