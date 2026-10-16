@@ -167,7 +167,7 @@ export function createRelayWriter(config: RelayWriterConfig): RelayWriter {
 }
 
 export interface RelayClientConfig {
-  /** The relay connector's client edge, e.g. `https://proxy.relay.devnet.toonprotocol.dev/ilp`. */
+  /** The relay connector's client edge, e.g. `https://toonprotocol.dev/ilp`. */
   connectorUrl: string;
   /** Which chain this party pays the relay on. */
   chain: ChainKind;

@@ -29,8 +29,8 @@ import type { TakerRuntime } from '../../src/taker-runtime.js';
 import { readSolanaChannel } from './helpers/solana-chain.js';
 
 const ENABLED = process.env['SWAP_E2E_DEVNET'] === '1';
-const RELAY_READ = 'wss://relay-ws.devnet.toonprotocol.dev';
-const RELAY_CONNECTOR = 'https://proxy.relay.devnet.toonprotocol.dev/ilp';
+const RELAY_READ = 'wss://relay.toonprotocol.dev';
+const RELAY_CONNECTOR = 'https://toonprotocol.dev/ilp';
 const EVM_CHAIN = 'evm:84532';
 const SOL_CHAIN = 'solana:devnet';
 const USDC = 1_000_000n;

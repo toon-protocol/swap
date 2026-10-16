@@ -121,9 +121,12 @@ pays out). By default on the taker's own keys and gas (`src/redeem.ts`).
 with the station as fee payer — the taker signs nothing, the claimer is a non-signer — and
 kind:5098 on EVM signs an ERC-2771 `ForwardRequest` for `claimFromChannel` against the
 forwarder's `eip712Domain()`. Both jobs ride the taker's relay client to `g.toon.relay.gas`.
-Config: `gasStation: { destination, connectorUrl }` — the relay's `g.toon.relay.gas` route is
-**forwarded** to the gas station's own connector, so jobs are sealed to that node's key (resolved
-from its `GET /ilp`). **The station refuses claims today** — proven live on devnet 2026-08-28:
+Config: `gasStation: { destination, connectorUrl }`. A job is sealed to the connector that
+*terminates* its route. On the devnet that is the relay's own connector — since 2026-10-16 one
+connector (`https://toonprotocol.dev/ilp`) terminates `g.toon.relay`, `g.toon.relay.gas` and
+`g.toon.gas` alike — so leave `connectorUrl` unset there. Set it only where the route is
+**forwarded** to a separate gas-station connector; the job is then sealed to that node's key
+(resolved from its `GET /ilp`). **The station refuses claims today** — proven live on devnet 2026-08-28:
 quote ok, execute `program_not_whitelisted — instruction 0 invokes Ed25519SigVerify…` —
 its whitelist is deposit/close/settle, and close/settle carry no balance proof so they cannot
 substitute. [toon-protocol/gas-station#18](https://github.com/toon-protocol/gas-station/issues/18)
@@ -154,6 +157,6 @@ are retired (`rolling/1`), `20035` is the maker's internal fill-context rumor.
 - **Taker:** `toon-swap orders`, `toon-swap take --order <maker>:<orderId> --size <n> [--delta <n>]`,
   `toon-swap resume --stream <nonce>`, `toon-swap redeem|close|settle --stream <nonce>`,
   `toon-swap sessions`. State lives in `<statePath>.taker.json`.
-- **Devnet:** relay `wss://relay-ws.devnet.toonprotocol.dev`, connector
-  `https://proxy.relay.devnet.toonprotocol.dev/ilp`, Base Sepolia + Solana devnet; the faucet
+- **Devnet:** relay `wss://relay.toonprotocol.dev`, connector
+  `https://toonprotocol.dev/ilp`, Base Sepolia + Solana devnet; the faucet
   drips USDC only — native gas comes from elsewhere.
