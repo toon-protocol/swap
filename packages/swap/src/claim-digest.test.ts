@@ -173,7 +173,10 @@ describe('recoverEvmClaimSigner', () => {
     bad[64] = 5;
     expect(() => recoverEvmSigner(digest, bad)).toThrow(/27 or 28/);
     expect(() =>
-      recoverEvmClaimSigner({ ...params, verifyingContract: '0x1234' }, sign(digest))
+      recoverEvmClaimSigner(
+        { ...params, verifyingContract: '0x1234' },
+        sign(digest)
+      )
     ).toThrow(/verifyingContract/);
   });
 });

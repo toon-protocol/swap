@@ -369,8 +369,8 @@ export class MinaPaymentChannelSigner implements PaymentChannelSigner {
         signerModule = null;
       }
 
-      // Pack params into field elements via the SHARED helper in
-      // `@toon-protocol/sdk` so the swap node signer and the sender-side
+      // Pack params into field elements via the helper in
+      // `./claim-digest.js` so the swap node signer and
       // `verifyMinaSignature` cannot drift (Story 12.6 AC-6 pattern). The
       // helper hashes `channelId`/`recipient` to a Pallas-field-safe bigint
       // (first 240 bits of sha256) — see `claimFieldsMina`.
@@ -461,12 +461,12 @@ export interface SolanaPaymentChannelSignerConfig {
   programId: string;
 }
 
-/** `TOON-BALPROOF-V2` — the domain tag every Solana balance proof begins with. */
+/** `TOON-BALPROOF-V2` — the domain tag every Solana claim begins with. */
 export const SOLANA_CLAIM_DOMAIN_TAG = new TextEncoder().encode(
   'TOON-BALPROOF-V2'
 );
 
-/** Byte length of the ADR 0053 Solana balance-proof message. */
+/** Byte length of the ADR 0053 Solana claim message. */
 export const SOLANA_CLAIM_MESSAGE_SIZE = 96;
 
 function decodeSolanaKey(label: string, value: string): Uint8Array {

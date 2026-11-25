@@ -55,7 +55,7 @@ prints exposure, carriage and ETA for the δ it is about to use; makers set the 
 
 ## Claims and channels — unchanged
 
-- EVM: the fleet's `TokenNetwork`/`1` EIP-712 `BalanceProof` (`TokenNetworkBalanceProofSigner`).
+- EVM: the fleet's `TokenNetwork`/`1` EIP-712 `BalanceProof` (`TokenNetworkClaimSigner`).
 - Solana: the 96-byte `TOON-BALPROOF-V2` message binding the program id (connector ADR 0053).
 - One ordinary channel per (party, party, chain), derived from the participants (ADR 0059). The
   taker funds its side to pay leg A (`defaultChannelFunder`); the maker funds its side on demand

@@ -79,7 +79,7 @@ describe('EvmPaymentChannelSigner — round-trip derive → sign → verify (Sto
     expect(signer.chainKind).toBe('evm');
 
     // Reconstruct the exact v2 EIP-712 digest used by the signer, via the
-    // SAME shared leaf (./claim-digest.ts) it signs with.
+    // SAME helper (./claim-digest.ts) it signs with.
     const msgHash = claimHashEvm(
       hexToBytes(params.channelId),
       params.cumulativeAmount,
@@ -177,7 +177,7 @@ describe.skipIf(!hasMinaSigner)(
 
     it('[P0] swap node signature round-trips through the SDK verifier (Story 12.8)', async () => {
       // End-to-end swap-node↔sender contract: the swap node signs a balance proof, and
-      // the SDK's `verifyMinaSignature` accepts it against the swap node's REAL
+      // `verifyMinaSignature` (./claim-digest.ts) accepts it against the swap node's REAL
       // Mina public key (derived from the converted private key, not the
       // keccak placeholder `deriveSwapNodeKeys` stores).
       // Peer dep — optional. Use a runtime-only specifier so TS doesn't try

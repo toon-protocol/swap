@@ -115,10 +115,14 @@ export function claimHashEvm(
   verifyingContractBytes: Uint8Array
 ): Uint8Array {
   if (channelIdBytes.length !== 32) {
-    throw new Error(`channelId must be 32 bytes (got ${channelIdBytes.length})`);
+    throw new Error(
+      `channelId must be 32 bytes (got ${channelIdBytes.length})`
+    );
   }
   if (recipientBytes.length !== 20) {
-    throw new Error(`recipient must be 20 bytes (got ${recipientBytes.length})`);
+    throw new Error(
+      `recipient must be 20 bytes (got ${recipientBytes.length})`
+    );
   }
   const structHash = keccak_256(
     concatBytes(
@@ -159,7 +163,10 @@ export function claimFieldsMina(
 }
 
 /** Recover the `0x…` lowercase signer address of a 65-byte `r||s||v` signature over `digest`. */
-export function recoverEvmSigner(digest: Uint8Array, sig65: Uint8Array): string {
+export function recoverEvmSigner(
+  digest: Uint8Array,
+  sig65: Uint8Array
+): string {
   if (sig65.length !== 65) {
     throw new Error(
       `EVM signature must be 65 bytes (r||s||v), got ${sig65.length}`
@@ -196,10 +203,14 @@ export function recoverEvmClaimSigner(
   const recipientBytes = hexToBytes(params.recipient);
   const verifyingContractBytes = hexToBytes(params.verifyingContract);
   if (channelIdBytes.length !== 32) {
-    throw new Error(`channelId must be 32 bytes (got ${channelIdBytes.length})`);
+    throw new Error(
+      `channelId must be 32 bytes (got ${channelIdBytes.length})`
+    );
   }
   if (recipientBytes.length !== 20) {
-    throw new Error(`recipient must be 20 bytes (got ${recipientBytes.length})`);
+    throw new Error(
+      `recipient must be 20 bytes (got ${recipientBytes.length})`
+    );
   }
   if (verifyingContractBytes.length !== 20) {
     throw new Error(
