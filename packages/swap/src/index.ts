@@ -63,12 +63,20 @@ export type {
   EvmPaymentChannelSignerConfig,
   MinaPaymentChannelSignerConfig,
   SolanaPaymentChannelSignerConfig,
+  TokenNetworkClaimSignerConfig,
   TokenNetworkBalanceProofSignerConfig,
 } from './payment-channel-signer.js';
 export {
   EvmPaymentChannelSigner,
   MinaPaymentChannelSigner,
   SolanaPaymentChannelSigner,
+  TokenNetworkClaimSigner,
+  TOKEN_NETWORK_CLAIM_TYPES,
+  tokenNetworkClaimDigest,
+  solanaClaimMessage,
+  SOLANA_CLAIM_DOMAIN_TAG,
+  SOLANA_CLAIM_MESSAGE_SIZE,
+  // Deprecated pre-rename aliases (one release).
   TokenNetworkBalanceProofSigner,
   TOKEN_NETWORK_BALANCE_PROOF_TYPES,
   tokenNetworkBalanceProofDigest,

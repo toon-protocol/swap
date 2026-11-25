@@ -56,7 +56,7 @@ import type { RelayReader, SwapMakerLoopHealth } from './swap-maker.js';
 import {
   MinaPaymentChannelSigner,
   SolanaPaymentChannelSigner,
-  TokenNetworkBalanceProofSigner,
+  TokenNetworkClaimSigner,
 } from './payment-channel-signer.js';
 import type { PaymentChannelSigner } from './payment-channel-signer.js';
 import { MultiChainClaimIssuer } from './claim-issuer.js';
@@ -742,7 +742,7 @@ export async function startSwapNode(
     if (chain.startsWith('evm:')) {
       const provider = requireEvmChainProvider(config.chainProviders, chain);
       const evmKeys = swapNodeKeys.evm as NonNullable<SwapNodeKeys['evm']>;
-      signers[chain] = new TokenNetworkBalanceProofSigner({
+      signers[chain] = new TokenNetworkClaimSigner({
         chain,
         privateKey: evmKeys.privateKey,
         chainId: parseEvmChainId(chain),

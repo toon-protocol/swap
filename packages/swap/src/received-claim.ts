@@ -6,8 +6,8 @@
  * carriage for the wrap and never opens it (payload opacity), so the maker
  * checks the taker's leg-A claim itself and the taker checks the maker's
  * leg-B claim itself — with this one function, over the same two message
- * formats the parties SIGN with (`tokenNetworkBalanceProofDigest`,
- * `solanaBalanceProofMessage`), so signer and verifier cannot drift.
+ * formats the parties SIGN with (`tokenNetworkClaimDigest`,
+ * `solanaClaimMessage`), so signer and verifier cannot drift.
  *
  * The ladder, cheapest first, every rung fail-closed and result-shaped:
  *
@@ -47,8 +47,8 @@ import {
 
 import { deriveEvmChannelId } from './evm-leg-b-channel.js';
 import {
-  solanaBalanceProofMessage,
-  tokenNetworkBalanceProofDigest,
+  solanaClaimMessage,
+  tokenNetworkClaimDigest,
 } from './payment-channel-signer.js';
 import { decodeSolanaChannelAccount } from './solana-leg-b-channel.js';
 import type { SolanaChannelAccount } from './solana-leg-b-channel.js';
@@ -300,7 +300,7 @@ export async function verifyInboundClaim(
   // 4. signature — before any chain read
   try {
     if (facts.family === 'evm') {
-      const digest = tokenNetworkBalanceProofDigest({
+      const digest = tokenNetworkClaimDigest({
         chainId: facts.chainId,
         tokenNetworkAddress: facts.tokenNetwork,
         channelId: claim.channelId,
@@ -319,7 +319,7 @@ export async function verifyInboundClaim(
         );
       }
     } else {
-      const message = solanaBalanceProofMessage(
+      const message = solanaClaimMessage(
         facts.programId,
         claim.channelId,
         nonce,

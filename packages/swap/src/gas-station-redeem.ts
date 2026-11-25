@@ -39,7 +39,7 @@ import {
 } from 'viem';
 import { privateKeyToAccount } from 'viem/accounts';
 
-import { solanaBalanceProofMessage } from './payment-channel-signer.js';
+import { solanaClaimMessage } from './payment-channel-signer.js';
 import { claimFromChannelIx, ed25519VerifyIx } from './redeem.js';
 import type { SwapNodeChainProvider } from './swap-node.js';
 import { parseEvmChainId } from './swap-node.js';
@@ -260,7 +260,7 @@ export function createGasStationRedeemer(
         const channelPda = new PublicKey(claim.channelId);
         const claimer = new PublicKey(base58Decode(claim.signer));
         const feePayer = new PublicKey(quote.feePayer);
-        const message = solanaBalanceProofMessage(
+        const message = solanaClaimMessage(
           provider.programId,
           claim.channelId,
           BigInt(claim.nonce),

@@ -6,7 +6,7 @@ import { privateKeyToAccount } from 'viem/accounts';
 import { deriveEvmChannelId } from './evm-leg-b-channel.js';
 import {
   SolanaPaymentChannelSigner,
-  TokenNetworkBalanceProofSigner,
+  TokenNetworkClaimSigner,
 } from './payment-channel-signer.js';
 import { createReadBudgets, verifyInboundClaim } from './received-claim.js';
 import type {
@@ -37,7 +37,7 @@ const evmFacts: ChannelFacts = {
   counterparty: takerAddress,
 };
 
-const evmSigner = new TokenNetworkBalanceProofSigner({
+const evmSigner = new TokenNetworkClaimSigner({
   chain: EVM_CHAIN,
   privateKey: takerKey,
   chainId: 31337n,

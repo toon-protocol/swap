@@ -14,10 +14,10 @@
 import { describe, it, expect } from 'vitest';
 
 import {
-  balanceProofHashEvm,
+  claimHashEvm,
   hexToBytes,
   recoverEvmClaimSigner,
-} from '@toon-protocol/settlement-digest';
+} from './claim-digest.js';
 
 import { EvmPaymentChannelSigner } from './payment-channel-signer.js';
 import { validateConfig, parseEvmChainId } from './swap-node.js';
@@ -55,7 +55,7 @@ describe('issue #101 — v2 EIP-712 balance-proof digest: canonical golden vecto
   // interoperability with every other v2 signer/verifier (client, sdk,
   // connector, on-chain RollingSwapChannel) that reproduces this SAME vector.
   it('[P0] the pinned inputs hash to the pinned digest, byte for byte', () => {
-    const digest = balanceProofHashEvm(
+    const digest = claimHashEvm(
       hexToBytes(GOLDEN.channelId),
       GOLDEN.cumulativeAmount,
       GOLDEN.nonce,

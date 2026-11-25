@@ -36,7 +36,7 @@ import {
 } from 'viem';
 import { privateKeyToAccount } from 'viem/accounts';
 
-import { solanaBalanceProofMessage } from './payment-channel-signer.js';
+import { solanaClaimMessage } from './payment-channel-signer.js';
 import { associatedTokenAddress } from './solana-leg-b-channel.js';
 import { findProgramAddress } from './solana-pda.js';
 import type { SwapNodeChainProvider } from './swap-node.js';
@@ -306,7 +306,7 @@ export function createRedeemer(cfg: RedeemerConfig): Redeemer & SolanaSettler {
       const programId = new PublicKey(provider.programId);
       const channelPda = new PublicKey(claim.channelId);
       const claimer = new PublicKey(base58Decode(claim.signer));
-      const message = solanaBalanceProofMessage(
+      const message = solanaClaimMessage(
         provider.programId,
         claim.channelId,
         BigInt(claim.nonce),

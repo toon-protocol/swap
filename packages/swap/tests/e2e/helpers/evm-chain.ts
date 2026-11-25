@@ -19,7 +19,7 @@
  *   `{name:'RollingSwapChannel', version:'2', chainId, verifyingContract}`,
  *   struct `ClaimBalanceProof(bytes32 channelId,uint256 cumulativeAmount,
  *   uint256 nonce,address recipient)` — signed by the swap maker's
- *   `EvmPaymentChannelSigner` via `@toon-protocol/settlement-digest`.
+ *   `EvmPaymentChannelSigner` via `claim-digest.ts`.
  */
 
 import { spawn, type ChildProcess } from 'node:child_process';

@@ -15,7 +15,8 @@ import {
 
 import { deriveSwapNodeKeys } from './wallet.js';
 
-import { base58Decode, verifyMinaSignature } from '@toon-protocol/sdk';
+import { base58Decode } from '@toon-protocol/sdk';
+import { verifyMinaSignature } from './claim-digest.js';
 import type { AccumulatedClaim } from '@toon-protocol/sdk';
 
 import { SwapWalletError } from './errors.js';
@@ -45,8 +46,7 @@ try {
 describe('EvmPaymentChannelSigner — round-trip derive → sign → verify (Story 12.4 AC-5, T-035)', () => {
   it('[P0] (T-035) EVM signer produces a 65-byte signature (r||s||v) that recovers to the derived public key', async () => {
     const { secp256k1 } = await import('@noble/curves/secp256k1.js');
-    const { balanceProofHashEvm, hexToBytes } =
-      await import('@toon-protocol/settlement-digest');
+    const { claimHashEvm, hexToBytes } = await import('./claim-digest.js');
 
     // Arrange
     const keys = await deriveSwapNodeKeys({
@@ -79,8 +79,8 @@ describe('EvmPaymentChannelSigner — round-trip derive → sign → verify (Sto
     expect(signer.chainKind).toBe('evm');
 
     // Reconstruct the exact v2 EIP-712 digest used by the signer, via the
-    // SAME shared leaf (@toon-protocol/settlement-digest) it signs with.
-    const msgHash = balanceProofHashEvm(
+    // SAME shared leaf (./claim-digest.ts) it signs with.
+    const msgHash = claimHashEvm(
       hexToBytes(params.channelId),
       params.cumulativeAmount,
       params.nonce,

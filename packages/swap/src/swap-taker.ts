@@ -24,7 +24,7 @@ import { unwrapGiftWrap, wrapGiftWrap, eventExpiration } from './nip59.js';
 import type { NostrIdentity } from './nostr-keys.js';
 import {
   SolanaPaymentChannelSigner,
-  TokenNetworkBalanceProofSigner,
+  TokenNetworkClaimSigner,
 } from './payment-channel-signer.js';
 import type { PaymentChannelSigner } from './payment-channel-signer.js';
 import { createReadBudgets, verifyInboundClaim } from './received-claim.js';
@@ -1144,7 +1144,7 @@ export class SwapTaker {
           'order_incomplete',
           'legA.verifyingContract missing'
         );
-      return new TokenNetworkBalanceProofSigner({
+      return new TokenNetworkClaimSigner({
         chain,
         privateKey: this.#c.keys.evm.privateKey,
         chainId: parseEvmChainId(chain),

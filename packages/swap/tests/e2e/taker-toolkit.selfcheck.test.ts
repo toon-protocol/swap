@@ -599,7 +599,7 @@ describe('leg B: the maker pays the taker on the target chain', () => {
     });
 
     // Belt and braces: the deployed contract's own digest view agrees with
-    // the digest the swap signer signed (settlement-digest's v2 preimage).
+    // the digest the swap signer signed (claim-digest.ts's v2 preimage).
     const onChain = await rollingClaimDigestOnChain({
       rpcUrl: anvil.rpcUrl,
       rollingSwapChannel: evm.rollingSwapChannel,

@@ -11,35 +11,15 @@ import { hashTypedData, type Hex } from 'viem';
 import { ed25519 } from '@noble/curves/ed25519.js';
 import { sha256 } from '@noble/hashes/sha2.js';
 
-// Story 12.6 AC-6: the Solana/Mina balance-proof hashes moved to
-// @toon-protocol/sdk so the swap-node-side signer and the sender-side verifier
-// share a single source of truth. (The EVM digest now comes from the
-// settlement-digest leaf imported below — issue #101.)
+import { base58Decode, base58Encode } from '@toon-protocol/sdk';
+
 import {
-  balanceProofFieldsMina,
-  base58Decode,
-  base58Encode,
   bigintToBytes32BE,
+  claimFieldsMina,
+  claimHashEvm,
   concatBytes,
   hexToBytes,
-} from '@toon-protocol/sdk';
-
-// Issue #101: the EVM balance-proof digest comes from the shared, dependency-light
-// leaf (@noble-only, no core/sdk/connector major bump needed) so the swap node
-// signs the SAME v2 EIP-712 domain-separated digest every client, the sdk, the
-// connector and the on-chain RollingSwapChannel verify against.
-//
-// swap#164 / toon#214: the Solana balance proof is the RAW 48-byte message the
-// deployed program's Ed25519 precompile check verifies, NOT the legacy
-// `balanceProofHashSolana` digest — which no program has ever verified, making
-// every Solana claim this signer issued before swap#165 unredeemable. The byte
-// layout now comes from the SAME shared leaf as the EVM digest (published in
-// `@toon-protocol/settlement-digest@1.1.0`, re-exported by core/sdk), replacing
-// swap's temporary local copy: it was proven byte-identical over the pinned
-// vectors in `solana-balance-proof.test.ts` before removal.
-import {
-  balanceProofHashEvm,
-} from '@toon-protocol/settlement-digest';
+} from './claim-digest.js';
 
 import type { SwapNodeChainKind } from './wallet.js';
 import { SwapWalletError } from './errors.js';
@@ -138,7 +118,7 @@ export class EvmPaymentChannelSigner implements PaymentChannelSigner {
         );
       }
 
-      const msgHash = balanceProofHashEvm(
+      const msgHash = claimHashEvm(
         channelBytes,
         params.cumulativeAmount,
         params.nonce,
@@ -196,7 +176,7 @@ export class EvmPaymentChannelSigner implements PaymentChannelSigner {
  * off chain and enforced on chain by `claimFromChannel` (only a participant
  * can claim, and only what its counterparty signed).
  */
-export interface TokenNetworkBalanceProofSignerConfig {
+export interface TokenNetworkClaimSignerConfig {
   chain: string;
   privateKey: Uint8Array;
   chainId: bigint;
@@ -204,7 +184,7 @@ export interface TokenNetworkBalanceProofSignerConfig {
   tokenNetworkAddress: string;
 }
 
-export const TOKEN_NETWORK_BALANCE_PROOF_TYPES = {
+export const TOKEN_NETWORK_CLAIM_TYPES = {
   BalanceProof: [
     { name: 'channelId', type: 'bytes32' },
     { name: 'nonce', type: 'uint256' },
@@ -214,7 +194,7 @@ export const TOKEN_NETWORK_BALANCE_PROOF_TYPES = {
   ],
 } as const;
 
-export function tokenNetworkBalanceProofDigest(p: {
+export function tokenNetworkClaimDigest(p: {
   chainId: bigint;
   tokenNetworkAddress: string;
   channelId: string;
@@ -228,7 +208,7 @@ export function tokenNetworkBalanceProofDigest(p: {
       chainId: p.chainId,
       verifyingContract: p.tokenNetworkAddress as Hex,
     },
-    types: TOKEN_NETWORK_BALANCE_PROOF_TYPES,
+    types: TOKEN_NETWORK_CLAIM_TYPES,
     primaryType: 'BalanceProof',
     message: {
       channelId: p.channelId as Hex,
@@ -241,14 +221,14 @@ export function tokenNetworkBalanceProofDigest(p: {
   return hexToBytes(digest);
 }
 
-export class TokenNetworkBalanceProofSigner implements PaymentChannelSigner {
+export class TokenNetworkClaimSigner implements PaymentChannelSigner {
   public readonly chain: string;
   public readonly chainKind: SwapNodeChainKind = 'evm';
   public readonly tokenNetworkAddress: string;
   private readonly privateKey: Uint8Array;
   private readonly chainId: bigint;
 
-  constructor(cfg: TokenNetworkBalanceProofSignerConfig) {
+  constructor(cfg: TokenNetworkClaimSignerConfig) {
     if (!(cfg.privateKey instanceof Uint8Array) || cfg.privateKey.length !== 32) {
       throw new SwapWalletError(
         'SIGNING_FAILED',
@@ -278,7 +258,7 @@ export class TokenNetworkBalanceProofSigner implements PaymentChannelSigner {
       if (hexToBytes(params.channelId).length !== 32) {
         throw new Error('TokenNetwork channelId must be 32 bytes');
       }
-      const digest = tokenNetworkBalanceProofDigest({
+      const digest = tokenNetworkClaimDigest({
         chainId: this.chainId,
         tokenNetworkAddress: this.tokenNetworkAddress,
         channelId: params.channelId,
@@ -393,8 +373,8 @@ export class MinaPaymentChannelSigner implements PaymentChannelSigner {
       // `@toon-protocol/sdk` so the swap node signer and the sender-side
       // `verifyMinaSignature` cannot drift (Story 12.6 AC-6 pattern). The
       // helper hashes `channelId`/`recipient` to a Pallas-field-safe bigint
-      // (first 240 bits of sha256) — see `balanceProofFieldsMina`.
-      const fields = balanceProofFieldsMina(
+      // (first 240 bits of sha256) — see `claimFieldsMina`.
+      const fields = claimFieldsMina(
         params.channelId,
         params.cumulativeAmount,
         params.nonce,
@@ -482,12 +462,12 @@ export interface SolanaPaymentChannelSignerConfig {
 }
 
 /** `TOON-BALPROOF-V2` — the domain tag every Solana balance proof begins with. */
-export const SOLANA_BALANCE_PROOF_DOMAIN_TAG = new TextEncoder().encode(
+export const SOLANA_CLAIM_DOMAIN_TAG = new TextEncoder().encode(
   'TOON-BALPROOF-V2'
 );
 
 /** Byte length of the ADR 0053 Solana balance-proof message. */
-export const SOLANA_BALANCE_PROOF_MESSAGE_SIZE = 96;
+export const SOLANA_CLAIM_MESSAGE_SIZE = 96;
 
 function decodeSolanaKey(label: string, value: string): Uint8Array {
   let bytes: Uint8Array;
@@ -526,7 +506,7 @@ function decodeSolanaKey(label: string, value: string): Uint8Array {
  * a truncated message can never verify. Every claim signed over the old
  * layout is unredeemable on the current program.
  */
-export function solanaBalanceProofMessage(
+export function solanaClaimMessage(
   programId: string,
   channelId: string,
   nonce: bigint,
@@ -545,8 +525,8 @@ export function solanaBalanceProofMessage(
       );
     }
   }
-  const out = new Uint8Array(SOLANA_BALANCE_PROOF_MESSAGE_SIZE);
-  out.set(SOLANA_BALANCE_PROOF_DOMAIN_TAG, 0);
+  const out = new Uint8Array(SOLANA_CLAIM_MESSAGE_SIZE);
+  out.set(SOLANA_CLAIM_DOMAIN_TAG, 0);
   out.set(program, 16);
   out.set(channelPda, 48);
   new DataView(out.buffer).setBigUint64(80, nonce, true);
@@ -584,7 +564,7 @@ export class SolanaPaymentChannelSigner implements PaymentChannelSigner {
     params: PaymentChannelSignParams
   ): Promise<Uint8Array> {
     try {
-      const msg = solanaBalanceProofMessage(
+      const msg = solanaClaimMessage(
         this.programId,
         params.channelId,
         params.nonce,
@@ -593,7 +573,7 @@ export class SolanaPaymentChannelSigner implements PaymentChannelSigner {
       const sig = ed25519.sign(msg, this.privateKey);
       return new Uint8Array(sig);
     } catch (err) {
-      // `solanaBalanceProofMessage` already explains exactly which input it
+      // `solanaClaimMessage` already explains exactly which input it
       // refused (a channelId that is not a 32-byte PDA, an out-of-u64 amount);
       // re-wrapping it would bury that message in `cause`.
       if (err instanceof SwapWalletError) throw err;
@@ -605,3 +585,22 @@ export class SolanaPaymentChannelSigner implements PaymentChannelSigner {
     }
   }
 }
+
+// Deprecated aliases for the names these exports had before they were renamed
+// after claims. Kept for one release.
+/** @deprecated Use {@link TokenNetworkClaimSignerConfig}. */
+export type TokenNetworkBalanceProofSignerConfig = TokenNetworkClaimSignerConfig;
+/** @deprecated Use {@link TokenNetworkClaimSigner}. */
+export const TokenNetworkBalanceProofSigner = TokenNetworkClaimSigner;
+/** @deprecated Use {@link TokenNetworkClaimSigner}. */
+export type TokenNetworkBalanceProofSigner = TokenNetworkClaimSigner;
+/** @deprecated Use {@link TOKEN_NETWORK_CLAIM_TYPES}. */
+export const TOKEN_NETWORK_BALANCE_PROOF_TYPES = TOKEN_NETWORK_CLAIM_TYPES;
+/** @deprecated Use {@link tokenNetworkClaimDigest}. */
+export const tokenNetworkBalanceProofDigest = tokenNetworkClaimDigest;
+/** @deprecated Use {@link solanaClaimMessage}. */
+export const solanaBalanceProofMessage = solanaClaimMessage;
+/** @deprecated Use {@link SOLANA_CLAIM_DOMAIN_TAG}. */
+export const SOLANA_BALANCE_PROOF_DOMAIN_TAG = SOLANA_CLAIM_DOMAIN_TAG;
+/** @deprecated Use {@link SOLANA_CLAIM_MESSAGE_SIZE}. */
+export const SOLANA_BALANCE_PROOF_MESSAGE_SIZE = SOLANA_CLAIM_MESSAGE_SIZE;
